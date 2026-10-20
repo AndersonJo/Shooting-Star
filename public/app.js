@@ -13,10 +13,15 @@ const store = {
 
 const ROOT_Q = new URLSearchParams(location.search).get('root');
 async function api(method, route, params = {}, body, signal) {
+  let rootDir = ROOT_Q;
+  if (typeof params.path === 'string' && params.path.startsWith('@memo/')) { // 메모는 ~/.shooting-star/memos 를 루트로 접근
+    rootDir = state.memoDir; params = { ...params, path: params.path.slice(6) };
+    if (body && typeof body.to === 'string') body = { ...body, to: body.to.replace(/^@memo\//, '') };
+  }
   const qs = new URLSearchParams(params).toString();
   const res = await fetch(`/api/${route}${qs ? '?' + qs : ''}`, {
     method,
-    headers: { 'X-SS': '1', ...(ROOT_Q ? { 'X-SS-Root': encodeURIComponent(ROOT_Q) } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { 'X-SS': '1', ...(rootDir ? { 'X-SS-Root': encodeURIComponent(rootDir) } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     signal,
   });
@@ -109,6 +114,8 @@ const state = {
   active: null,
   expanded: new Set(),
   root: '',
+  view: store.get('view', 'files'),   // 사이드바 보기: files | memo
+  memoDir: '',
   filter: store.get('treeFilter', false),   // 트리 필터 on/off
   filterDirs: null,
   selected: '',
@@ -223,11 +230,12 @@ function revealAt({ line, col = 0, len = 0 }) { // 해당 줄/열을 선택하�
     ta.scrollLeft = x > ta.clientWidth - 120 ? x - ta.clientWidth / 3 : 0;
   }
 }
-async function save(t = cur()) {
+async function save(t = cur(), silent = false) {
   if (!t || !dirty(t)) return;
   try {
-    const r = await api('PUT', 'file', { path: t.path }, { content: t.content, mtime: t.mtime });
-    t.orig = t.content; t.mtime = r.mtime; toast('저장됨'); renderChrome();
+    const sent = t.content;
+    const r = await api('PUT', 'file', { path: t.path }, { content: sent, mtime: t.mtime });
+    t.orig = sent; t.mtime = r.mtime; if (!silent) toast('저장됨'); renderChrome();
   } catch (e) {
     if (e.status === 409 && confirm('디스크에서 파일이 변경되었습니다. 덮어쓸까요?')) {
       const r = await api('PUT', 'file', { path: t.path }, { content: t.content });
@@ -239,6 +247,7 @@ function closeTab(p) {
   const t = tabOf(p); if (!t) return;
   if (dirty(t) && !confirm(`${p}\n저장하지 않은 변경이 있습니다. 닫을까요?`)) return;
   const i = state.tabs.indexOf(t); state.tabs.splice(i, 1);
+  if (isMemo(p) && !t.content.replace(/#/g, '').trim()) api('DELETE', 'file', { path: p }).then(refreshMemos).catch(() => {}); // 비어 있는 메모는 닫을 때 삭제
   if (state.active === p) state.active = (state.tabs[i] || state.tabs[i - 1])?.path || null;
   persistTabs(); renderAll();
 }
@@ -270,7 +279,7 @@ function renderTabs() {
     const x = el('span', { className: 'x', title: '닫기 (⌘W)' });
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.path); };
     const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : ''), title: t.path },
-      el('span', { textContent: t.path.split('/').pop() }), x);
+      el('span', { textContent: isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.path.split('/').pop() }), x);
     tab.onclick = () => { state.active = t.path; state.selected = t.path; persistTabs(); renderAll(); };
     tab.onauxclick = (e) => e.button === 1 && closeTab(t.path);
     return tab;
@@ -285,7 +294,7 @@ function btn(label, title, onclick, cls = '') {
 function renderToolbar() {
   const bar = $('#toolbar'); const t = cur();
   if (!t) { bar.replaceChildren(); return; }
-  const items = [el('span', { className: 'path', textContent: t.path, title: t.path })];
+  const items = [el('span', { className: 'path', textContent: isMemo(t.path) ? '메모 · ' + (memoTitle(t.content) || '새 메모') : t.path, title: isMemo(t.path) ? state.memoDir + '/' + t.path.slice(6) : t.path })];
   const modes = MODES[t.kind];
   if (modes.length > 1) {
     const seg = el('span', { className: 'seg' }, ...modes.map(([m, label]) =>
@@ -294,7 +303,7 @@ function renderToolbar() {
   }
   items.push(
     btn('복사', '전체 내용 복사', () => copy(t.content, '전체 복사됨')),
-    btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(e.shiftKey ? state.root + '/' + t.path : t.path, '경로 복사됨')),
+    btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) ? state.memoDir + '/' + t.path.slice(6) : e.shiftKey ? state.root + '/' + t.path : t.path, '경로 복사됨')),
     btn('✨ Prettify', '정리/포맷 (⌘⌥L)', prettify),
   );
   if (t.kind === 'json') items.push(btn('Minify', 'JSON 압축', minify));
@@ -374,6 +383,7 @@ function renderContent() {
     ta.oninput = () => {
       t.content = ta.value;
       renderTabs(); renderToolbarDirtyOnly(); validate(); updatePreview(); paint();
+      if (isMemo(t.path)) { clearTimeout(t._as); t._as = setTimeout(() => save(t, true).then(refreshMemos), 800); } // 메모는 입력을 멈추면 자동 저장
     };
     paint();
     ta.onkeydown = (e) => {
@@ -599,7 +609,7 @@ function matchFile(q, f) {
   return k >= 0 ? { tier: 4, pos: range(k, ql.length) } : null;
 }
 function filterPalette(q) {
-  const recent = state.tabs.map((t) => t.path);
+  const recent = state.tabs.map((t) => t.path).filter((p) => !isMemo(p));
   const res = q
     ? pal.files.map((f) => ({ f, m: matchFile(q, f) })).filter((x) => x.m)
         .sort((a, b) => a.m.tier - b.m.tier || a.f.length - b.f.length || a.f.localeCompare(b.f)).slice(0, 80)
@@ -644,6 +654,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'o') { e.preventDefault(); openPicker(); }
   else if (k === 'b') { e.preventDefault(); document.body.classList.toggle('no-side'); store.set('noSide', document.body.classList.contains('no-side')); }
   else if (k === 'w' && cur()) { e.preventDefault(); closeTab(state.active); }
+  else if (e.code === 'KeyN' && e.altKey) { e.preventDefault(); newMemo(); }
   else if (k === ',') { e.preventDefault(); $('#settings') && !$('#settings').hidden ? ($('#settings').hidden = true) : openSettings(); }
   else if (k === 'f' && e.shiftKey) { e.preventDefault(); openFind(); }
   else if (e.code === 'KeyL' && e.altKey) { e.preventDefault(); prettify(); }
@@ -856,6 +867,67 @@ function openHit(i) {
   closeFind(); openFile(it.path, undefined, { line: it.line, col: it.col, len: it.len });
 }
 
+// ───────── 메모 (~/.shooting-star/memos/*.md) ─────────
+const isMemo = (p) => typeof p === 'string' && p.startsWith('@memo/');
+const memoTitle = (text) => ((text || '').split('\n').map((l) => l.trim()).find(Boolean) || '').replace(/^#+\s*/, '');
+const pad2 = (n) => String(n).padStart(2, '0');
+let memoTimer;
+const refreshMemos = () => { if (state.view !== 'memo') return; clearTimeout(memoTimer); memoTimer = setTimeout(loadMemos, 150); };
+async function loadMemos() {
+  const q = $('#memo-q').value.trim(); let list = [];
+  try { list = await api('GET', 'memos', { q }); } catch {}
+  const box = $('#memo-list');
+  if (!list.length) { box.replaceChildren(el('div', { className: 'memo-empty', textContent: q ? '일치하는 메모가 없습니다' : '＋ 를 눌러 첫 메모를 만드세요' })); return; }
+  box.replaceChildren(...list.map((m) => {
+    const p = '@memo/' + m.name, open = tabOf(p), d = new Date(m.mtime);
+    const x = el('span', { className: 'mx', textContent: '✕', title: '메모 삭제' });
+    x.onclick = (e) => { e.stopPropagation(); deleteMemo(m.name, open ? memoTitle(open.content) : m.title); };
+    const when = `${d.getMonth() + 1}월 ${d.getDate()}일 ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    const row = el('div', { className: 'memo' + (state.active === p ? ' sel' : ''), title: m.name },
+      el('div', { className: 'mt', textContent: (open ? memoTitle(open.content) : m.title) || '제목 없음' }),   // 열려 있으면 저장 전 제목도 반영
+      el('div', { className: 'mm', textContent: when + (m.snippet ? ' · ' + m.snippet : '') }), x);
+    row.onclick = () => openFile(p);
+    return row;
+  }));
+}
+async function newMemo() {
+  setView('memo', true);
+  const d = new Date(), name = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}.md`, p = '@memo/' + name;
+  try {
+    await api('POST', 'create', { path: p }, { dir: false });
+    await api('PUT', 'file', { path: p }, { content: '# \n\n' });
+    await openFile(p, 'edit', { line: 1, col: 2, len: 0 });   // 제목 줄 끝에 커서
+    loadMemos();
+  } catch (e) { toast('메모 생성 실패: ' + e.message); }
+}
+async function deleteMemo(name, title) {
+  if (!confirm(`메모를 삭제할까요? (되돌릴 수 없음)\n${title || name}`)) return;
+  const p = '@memo/' + name;
+  try {
+    await api('DELETE', 'file', { path: p });
+    const t = tabOf(p); if (t) { t.content = t.orig; closeTab(p); }
+    loadMemos();
+  } catch (e) { toast(e.message); }
+}
+$('#btn-memo-new').onclick = newMemo;
+$('#memo-q').oninput = refreshMemos;
+
+// ───────── 아이콘 바: 파일 / 메모 ─────────
+function setView(v, forceShow) {
+  state.view = v; store.set('view', v);
+  $('#sidebar').classList.toggle('memo', v === 'memo');
+  $('#memo-view').hidden = v !== 'memo';
+  document.querySelectorAll('#activity .act').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
+  if (forceShow) document.body.classList.remove('no-side');
+  if (v === 'memo') { $('#memo-path').textContent = (state.memoDir || '').replace(state.home || '\u0000', '~'); loadMemos(); }
+}
+document.querySelectorAll('#activity .act').forEach((b) => {
+  b.onclick = () => { // 활성 아이콘을 다시 누르면 사이드바 접기/펼치기 (VS Code 와 동일)
+    if (state.view === b.dataset.view) { document.body.classList.toggle('no-side'); store.set('noSide', document.body.classList.contains('no-side')); }
+    else { setView(b.dataset.view, true); store.set('noSide', false); }
+  };
+});
+
 // ───────── 폴더 열기 (⌘O) ─────────
 const recents = () => store.get('recent', []);
 function addRecent(p) { store.set('recent', [p, ...recents().filter((x) => x !== p)].slice(0, 12)); }
@@ -970,7 +1042,7 @@ $('#root-name').onclick = openPicker; $('#root-name').style.cursor = 'pointer';
     const last = info.last || recents()[0];
     if (last && last !== info.root) return location.replace('/?root=' + encodeURIComponent(last));
   }
-  state.root = info.root;
+  state.root = info.root; state.memoDir = info.memoDir; state.home = info.home;
   api('PUT', 'last', {}, { root: info.root }).catch(() => {}); state.home = info.home;
   history.replaceState(null, '', '/?root=' + encodeURIComponent(info.root));
   $('#root-name').textContent = info.name; $('#root-name').title = info.root + '  (클릭 / ⌘O: 폴더 열기)';
@@ -984,5 +1056,5 @@ $('#root-name').onclick = openPicker; $('#root-name').style.cursor = 'pointer';
   }
   const a = store.get(wsKey('active'), null);
   state.active = tabOf(a) ? a : state.tabs[0]?.path || null; state.selected = state.active || '';
-  renderAll();
+  renderAll(); setView(state.view);
 })();

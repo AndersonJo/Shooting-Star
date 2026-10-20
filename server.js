@@ -30,6 +30,9 @@ const defaultWorkspace = () => {
   for (const c of [cfg && String(cfg).replace(/^~(?=$|\/)/, HOME), path.join(HOME, 'projects')]) if (c && path.isAbsolute(c) && isDirSafe(c)) return fs.realpathSync(c);
   return HOME;
 };
+// 메모: ~/.shooting-star/memos/*.md (평범한 마크다운 파일)
+const MEMO_DIR = path.join(HOME, '.shooting-star', 'memos');
+const ensureMemoDir = () => { fs.mkdirSync(MEMO_DIR, { recursive: true }); return MEMO_DIR; };
 const LAST_FILE = path.join(path.dirname(FAV_FILE), 'last.json'); // 마지막으로 연 워크스페이스
 const readLast = () => { try { const r = JSON.parse(fs.readFileSync(LAST_FILE, 'utf8')).root; return isDirSafe(r) ? r : null; } catch { return null; } };
 const MAX_SIZE = 5 * 1024 * 1024;
@@ -317,7 +320,7 @@ async function api(req, res, url, root) {
     }
     case 'GET /api/info':
       getIndex(root); // 워크스페이스를 열면 인덱싱 시작
-      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace() });
+      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir() });
     case 'GET /api/browse': { // 폴더 선택기: 절대경로의 하위 폴더 목록
       const dir = fs.realpathSync(path.resolve((p || defaultWorkspace()).replace(/^~(?=$|\/)/, HOME)));
       const list = (await fsp.readdir(dir, { withFileTypes: true }))
@@ -341,6 +344,19 @@ async function api(req, res, url, root) {
       if (!ix.ready) await ix.building;
       else if (!ix.watcher && Date.now() - ix.ts > 10000) rebuild(root, ix); // 감시 불가 시 TTL
       return send(res, 200, indexFiles(ix));
+    }
+    case 'GET /api/memos': { // 메모 목록 (최근 수정 순). q 가 있으면 제목+본문 검색
+      const q = (url.searchParams.get('q') || '').toLowerCase(), out = [];
+      for (const name of await fsp.readdir(ensureMemoDir())) {
+        if (!name.endsWith('.md')) continue;
+        const abs = path.join(MEMO_DIR, name);
+        let st, text;
+        try { st = await fsp.stat(abs); text = (await fsp.readFile(abs, 'utf8')).slice(0, 200000); } catch { continue; }
+        if (q && !(name + '\n' + text).toLowerCase().includes(q)) continue;
+        const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+        out.push({ name, mtime: st.mtimeMs, title: (lines[0] || '').replace(/^#+\s*/, '') || '제목 없음', snippet: (lines[1] || '').replace(/^#+\s*/, '').slice(0, 90) });
+      }
+      return send(res, 200, out.sort((a, b) => b.mtime - a.mtime));
     }
     case 'GET /api/matchdirs': { // 지정한 확장자의 파일이 (하위 포함) 존재하는 폴더들. 비우면 파일이 있는 모든 폴더.
       const ix = getIndex(root); if (!ix.ready) await ix.building;

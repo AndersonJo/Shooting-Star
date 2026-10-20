@@ -8,6 +8,10 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<nav id="activity">
+  <button class="act on" data-view="files" title="파일"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+  <button class="act" data-view="memo" title="메모 (⌘/Ctrl+Alt+N: 새 메모)"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h11l3 3v13H5z"/><path d="M8.5 10h7M8.5 14h7M8.5 17.5h4"/></svg></button>
+</nav>
 <aside id="sidebar">
   <header>
     <span id="root-name" title=""></span>
@@ -23,6 +27,12 @@
     <span id="filter-info"></span>
   </div>
   <nav id="tree" tabindex="0"></nav>
+  <div id="memo-view" hidden>
+    <div class="mv-head"><span>메모</span><button id="btn-memo-new" title="새 메모 (⌘/Ctrl+Alt+N)">＋</button></div>
+    <input id="memo-q" placeholder="메모 검색…" autocomplete="off" spellcheck="false">
+    <div id="memo-list"></div>
+    <div class="mv-foot" id="memo-path"></div>
+  </div>
 </aside>
 <div id="resizer"></div>
 <main>
