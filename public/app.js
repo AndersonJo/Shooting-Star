@@ -133,7 +133,8 @@ async function fetchFilterDirs() {
   try { state.filterDirs = new Set(await api('GET', 'matchdirs', { exts: searchExts() })); } catch { state.filterDirs = null; }
 }
 async function refreshFilter() { // 필터가 켜져 있으면 폴더 목록을 다시 계산해 트리를 갱신
-  drawFilterBtn(); if (!state.filter) return;
+  drawFilterBtn();
+  if (!state.filter) return renderTree();   // 끌 때도 트리를 다시 그려야 전체 목록으로 돌아온다
   await fetchFilterDirs(); renderTree();
 }
 function drawFilterBtn() {
@@ -644,6 +645,22 @@ $('#pal-input').onkeydown = (e) => {
   else if (e.key === 'Enter' && pal.items[pal.sel]) { const f = pal.items[pal.sel].f; closePalette(); openFile(f); }
 };
 document.addEventListener('mousedown', (e) => { if (!$('#palette').hidden && !e.target.closest('#palette')) closePalette(); });
+
+// ───────── 트리에서 ⌘/Ctrl+C → 선택한 파일/폴더의 전체 경로 복사 (Shift 를 같이 누르면 프로젝트 기준 상대 경로) ─────────
+function selectedPath(relative) {
+  const sel = state.selected || '';
+  if (isMemo(sel)) return state.memoDir + '/' + sel.slice(6);
+  return relative ? (sel || '.') : (sel ? state.root + '/' + sel : state.root);
+}
+const inTree = () => !!document.activeElement?.closest('#tree');
+document.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key.toLowerCase() !== 'c' || !inTree()) return;
+  e.preventDefault(); copy(selectedPath(e.shiftKey), e.shiftKey ? '상대 경로 복사됨' : '전체 경로 복사됨');
+}, true);
+document.addEventListener('copy', (e) => { // 메뉴(네이티브 앱의 편집 > 복사하기)로 들어온 복사 요청
+  if (!inTree() || String(getSelection())) return;
+  e.preventDefault(); e.clipboardData.setData('text/plain', selectedPath(false)); toast('전체 경로 복사됨');
+});
 
 // ───────── 단축키 ─────────
 document.addEventListener('keydown', (e) => {
