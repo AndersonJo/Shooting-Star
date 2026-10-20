@@ -511,3 +511,10 @@ table.csv tr:hover td { background: var(--accent-bg); }
 .th-card span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .th-sw { display: flex; height: 28px; border-radius: 5px; overflow: hidden; border: 1px solid var(--bd); }
 .th-sw i { flex: 1; } .th-sw i:nth-child(3) { flex: .5; } .th-sw i:nth-child(4) { flex: .5; }
+
+/* 찾기 미리보기: 줄바꿈 (긴 줄이 잘리지 않게) */
+.ff-pv { position: static; display: block; flex: 1; overflow: auto; padding: 8px 0; font: 12.5px/1.55 var(--mono); }
+.pl { display: flex; align-items: flex-start; }
+.pl .pnum { flex: none; width: 52px; padding-right: 12px; text-align: right; color: var(--fg2); user-select: none; }
+.pl .pt { flex: 1; min-width: 0; padding-right: 16px; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+.pl.cur { background: var(--bar); }

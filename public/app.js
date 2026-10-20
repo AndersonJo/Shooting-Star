@@ -898,6 +898,18 @@ function renderFind(r, ms) {
   $('#ff-prev').replaceChildren();
   if (ff.items.length) selectHit(0);
 }
+// 색칠된 HTML 을 줄 단위로 나눈다. 여러 줄에 걸친 <span>(문자열 등)은 줄마다 닫고 다시 열어 짝을 맞춘다.
+function splitHtmlLines(html) {
+  const out = []; let cur = ''; const open = [];
+  for (const m of html.match(/<span class="[^"]*">|<\/span>|\n|[^<\n]+/g) || []) {
+    if (m === '\n') { out.push(cur + '</span>'.repeat(open.length)); cur = open.join(''); }
+    else if (m.startsWith('<span')) { open.push(m); cur += m; }
+    else if (m === '</span>') { open.pop(); cur += m; }
+    else cur += m;
+  }
+  out.push(cur + '</span>'.repeat(open.length));
+  return out;
+}
 async function selectHit(i) {
   if (i < 0 || !ff.items[i]) return; ff.sel = i; const it = ff.items[i];
   document.querySelectorAll('#ff-list .ff-hit.sel').forEach((n) => n.classList.remove('sel'));
@@ -908,10 +920,14 @@ async function selectHit(i) {
     if (ff.sel !== i) return;
     const lines = ff.cache.text.split('\n'), from = Math.max(0, it.line - 1 - 10), to = Math.min(lines.length, it.line - 1 + 16);
     const slice = lines.slice(from, to).join('\n'), lang = langOf(it.path);
-    const pre = el('pre', { className: 'code' }); pre.innerHTML = lang ? highlight(lang, slice) : slice.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    const gut = el('pre', { className: 'gut', textContent: Array.from({ length: to - from }, (_, k) => from + k + 1).join('\n') });
-    const bar = el('div', { className: 'bar' }); bar.style.top = `calc(8px + ${it.line - 1 - from} * 1.55em)`;
-    $('#ff-prev').replaceChildren(el('div', { className: 'ff-pv-h', textContent: it.path }), el('div', { className: 'ff-pv' }, bar, gut, pre));
+    const html = lang ? highlight(lang, slice) : slice.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const pv = el('div', { className: 'ff-pv' });
+    splitHtmlLines(html).forEach((h, k) => { // 한 줄 = (번호 + 줄바꿈되는 내용): 긴 줄도 잘리지 않고 번호/강조가 어긋나지 않는다
+      const n = from + k + 1, text = el('span', { className: 'pt' }); text.innerHTML = h || ' ';
+      pv.append(el('div', { className: 'pl' + (n === it.line ? ' cur' : '') }, el('span', { className: 'pnum', textContent: n }), text));
+    });
+    $('#ff-prev').replaceChildren(el('div', { className: 'ff-pv-h', textContent: it.path }), pv);
+    pv.querySelector('.cur')?.scrollIntoView({ block: 'center' });
   } catch { $('#ff-prev').replaceChildren(el('div', { className: 'ff-pv-h', textContent: '미리보기를 불러올 수 없습니다' })); }
 }
 function openHit(i) {
