@@ -264,3 +264,7 @@ table.csv tr:hover td { background: var(--accent-bg); }
 /* 폴더 선택기: 경로 조각 클릭 */
 .pseg { cursor: pointer; border-radius: 3px; padding: 0 1px; }
 .pseg:hover { color: var(--accent); text-decoration: underline; background: #2d3a5a; }
+
+#st-zoom { cursor: pointer; padding: 0 6px; border-radius: 4px; }
+#st-zoom:hover { color: var(--fg); background: var(--bg3); }
+#st-zoom.flash { color: var(--accent); background: var(--accent-bg); }

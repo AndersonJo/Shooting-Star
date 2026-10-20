@@ -1043,11 +1043,21 @@ $('#root-name').onclick = openPicker; $('#root-name').style.cursor = 'pointer';
 // ───────── 본문 글자 크기: ⌘/Ctrl + / - / 0 (UI 는 고정, 편집기·마크다운·CSV·트리뷰 글자만 변경) ─────────
 let contentScale = Math.min(3, Math.max(0.6, Number(store.get('contentScale', 1)) || 1));
 const applyScale = () => document.documentElement.style.setProperty('--cz', contentScale);
+let zoomFlash;
+function drawZoom(flash) { // 상태바에 배율 표시: 100% 가 아니면 계속, 100% 일 땐 조절 직후에만 잠깐
+  const z = $('#st-zoom'), pct = Math.round(contentScale * 100);
+  z.textContent = `🔍 ${pct}%`;
+  z.classList.toggle('flash', !!flash);
+  clearTimeout(zoomFlash);
+  z.hidden = pct === 100 && !flash;
+  if (flash) zoomFlash = setTimeout(() => { z.classList.remove('flash'); z.hidden = Math.round(contentScale * 100) === 100; }, 1800);
+}
+$('#st-zoom').onclick = () => setScale(1);
 function setScale(v) {
   contentScale = Math.min(3, Math.max(0.6, Math.round(v * 10) / 10));
-  store.set('contentScale', contentScale); applyScale(); toast(`글자 크기 ${Math.round(contentScale * 100)}%`);
+  store.set('contentScale', contentScale); applyScale(); drawZoom(true);
 }
-applyScale();
+applyScale(); drawZoom(false);
 document.addEventListener('keydown', (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
   if (e.key === '+' || e.key === '=') { e.preventDefault(); setScale(contentScale + 0.1); }
