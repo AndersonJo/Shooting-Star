@@ -712,11 +712,35 @@ const SEARCH_CATS = [
   { id: 'web', label: 'HTML / CSS / XML', exts: 'html,htm,css,scss,xml,svg' },
   { id: 'text', label: '텍스트 / 로그', exts: 'txt,log,rst' },
 ];
-const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '' };
+// ───────── 테마 ─────────
+// colors: [배경, 사이드바, 강조, 글자] — 설정 화면의 미리보기 카드용. system 은 다크/라이트 반반.
+const THEMES = [
+  { id: 'system', label: '시스템 설정 따르기', colors: ["#14161a", "#ffffff", "#7aa2ff", "#0969da"] },
+  { id: 'dark', label: '다크', colors: ["#14161a", "#1a1d22", "#7aa2ff", "#d4d8de"] },
+  { id: 'light', label: '라이트', colors: ["#ffffff", "#f6f8fa", "#0969da", "#1f2328"] },
+  { id: 'midnight', label: '미드나잇', colors: ["#000000", "#0a0a0c", "#6ea0ff", "#d8dbe0"] },
+  { id: 'nord', label: 'Nord', colors: ["#2e3440", "#292e39", "#88c0d0", "#d8dee9"] },
+  { id: 'solarized', label: 'Solarized Dark', colors: ["#002b36", "#00232c", "#268bd2", "#93a1a1"] },
+  { id: 'dracula', label: 'Dracula', colors: ["#282a36", "#21222c", "#bd93f9", "#f8f8f2"] },
+];
+const THEME_BY_ID = Object.fromEntries(THEMES.map((t) => [t.id, t]));
+const lightMQ = matchMedia('(prefers-color-scheme: light)');
+function applyTheme(name) {
+  if (!THEME_BY_ID[name]) name = 'dark';
+  const resolved = name === 'system' ? (lightMQ.matches ? 'light' : 'dark') : name;
+  document.documentElement.dataset.theme = resolved;
+  store.set('theme', name);
+  const cs = getComputedStyle(document.documentElement);
+  // 네이티브 앱(WKWebView)에는 창 모양(밝기/배경)을 알려 준다
+  try { window.webkit?.messageHandlers?.theme?.postMessage(`${cs.colorScheme.includes('light') ? 'light' : 'dark'},${cs.getPropertyValue('--bg').trim()}`); } catch {}
+}
+lightMQ.addEventListener?.('change', () => { if (store.get('theme', 'dark') === 'system') applyTheme('system'); });
+
+const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark' };
 let settings = { ...SETTINGS_DEFAULT };
 async function loadSettings() {
   try { settings = { ...SETTINGS_DEFAULT, ...(await api('GET', 'settings')) }; } catch {}
-  updateScope();
+  applyTheme(settings.theme); updateScope();
 }
 const saveSettings = () => api('PUT', 'settings', {}, { settings }).catch(() => toast('설정 저장 실패'));
 function searchExts() { // 서버로 보낼 확장자 목록 (빈 문자열 = 제한 없음)
@@ -753,6 +777,16 @@ function openSettings() {
       });
       if (settings.searchAll) r.classList.add('off'); return r;
     });
+    const themeGrid = el('div', { className: 'st-themes' }, ...THEMES.map((t) => {
+      const [bg, bg2, ac, fg] = t.colors;
+      const sw = el('div', { className: 'th-sw' }, el('i'), el('i'), el('i'), el('i'));
+      const dots = sw.children;
+      if (t.id === 'system') { dots[0].style.background = `linear-gradient(90deg, ${THEME_BY_ID.dark.colors[0]} 50%, ${THEME_BY_ID.light.colors[0]} 50%)`; dots[1].style.background = `linear-gradient(90deg, ${THEME_BY_ID.dark.colors[1]} 50%, ${THEME_BY_ID.light.colors[1]} 50%)`; dots[2].style.background = ac; dots[3].style.background = `linear-gradient(90deg, ${THEME_BY_ID.dark.colors[3]} 50%, ${THEME_BY_ID.light.colors[3]} 50%)`; }
+      else { dots[0].style.background = bg; dots[1].style.background = bg2; dots[2].style.background = ac; dots[3].style.background = fg; }
+      const card = el('button', { className: 'th-card' + ((settings.theme || 'dark') === t.id ? ' on' : ''), title: t.label }, sw, el('span', { textContent: t.label }));
+      card.onclick = () => { settings.theme = t.id; applyTheme(t.id); saveSettings(); draw(); };
+      return card;
+    }));
     const root = el('input', { className: 'st-custom', placeholder: '~/projects', value: settings.defaultRoot || '', spellcheck: false });
     root.oninput = () => { settings.defaultRoot = root.value.trim(); clearTimeout(root._t); root._t = setTimeout(saveSettings, 400); };
     const custom = el('input', { className: 'st-custom', placeholder: '추가 확장자 (예: env, proto, tf)', value: settings.customExts, spellcheck: false });
@@ -762,6 +796,7 @@ function openSettings() {
     reset.onclick = () => { settings = { ...settings, ...SETTINGS_DEFAULT }; apply(); draw(); };
     box.replaceChildren(
       el('div', { className: 'st-h', textContent: '설정' }),
+      el('div', { className: 'st-sec', textContent: '테마' }), themeGrid,
       el('div', { className: 'st-sec', textContent: '기본 프로젝트 위치 (마지막으로 연 폴더가 없을 때 여기서 시작, 비우면 ~/projects)' }), root,
       el('div', { className: 'st-sec', textContent: '내용 검색 (⌘/Ctrl+Shift+F) 대상 파일 형식' }),
       all, el('div', { className: 'st-grid' }, ...cats), custom,
@@ -955,7 +990,7 @@ const loadFavs = async () => { try { favs = await api('GET', 'favorites'); } cat
 const saveFavs = async () => { await api('PUT', 'favorites', {}, { list: favs }); drawFavBtn(); };
 function drawFavBtn() {
   const on = favs.includes(state.root), b = $('#btn-fav');
-  b.textContent = on ? '★' : '☆'; b.style.color = on ? '#e3b341' : '';
+  b.textContent = on ? '★' : '☆'; b.style.color = on ? 'var(--star)' : '';
   b.title = on ? '즐겨찾기에서 제거' : '이 폴더를 즐겨찾기에 추가';
   drawFavList();
 }

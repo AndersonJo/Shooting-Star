@@ -14,7 +14,7 @@ func loadConfig() -> Config {
     return try! JSONDecoder().decode(Config.self, from: try! Data(contentsOf: url))
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, NSWindowDelegate, WKScriptMessageHandler {
     let cfg = loadConfig()
     var ready = false                 // 서버가 떠서 창을 열 수 있는 상태
     var pending: [URL] = []           // 서버 준비 전에 요청된 URL
@@ -77,7 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     // MARK: 창
     func open(_ url: URL) {
-        let wv = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let conf = WKWebViewConfiguration()
+        conf.userContentController.add(self, name: "theme")   // 웹 UI 의 테마 변경 알림
+        let wv = WKWebView(frame: .zero, configuration: conf)
         wv.uiDelegate = self
         wv.navigationDelegate = self
         wv.setValue(false, forKey: "drawsBackground")
@@ -107,6 +109,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         wv.load(URLRequest(url: url))
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: 테마 — 웹이 "dark|light,#rrggbb" 를 보내면 창의 밝기와 배경색을 맞춘다 (제목 표시줄/깜빡임 방지)
+    func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
+        guard m.name == "theme", let s = m.body as? String else { return }
+        let parts = s.split(separator: ",").map(String.init)
+        guard parts.count == 2 else { return }
+        let appearance = NSAppearance(named: parts[0] == "light" ? .aqua : .darkAqua)
+        let hex = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        var rgb: UInt64 = 0
+        guard hex.count == 6, Scanner(string: hex).scanHexInt64(&rgb) else { return }
+        let color = NSColor(srgbRed: CGFloat((rgb >> 16) & 0xff) / 255, green: CGFloat((rgb >> 8) & 0xff) / 255, blue: CGFloat(rgb & 0xff) / 255, alpha: 1)
+        for w in windows { w.appearance = appearance; w.backgroundColor = color }
     }
 
     func windowWillClose(_ n: Notification) {
