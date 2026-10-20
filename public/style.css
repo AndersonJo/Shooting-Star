@@ -1,5 +1,6 @@
 :root {
   color-scheme: dark;
+  --cz: 1; /* 본문 글자 배율 (⌘/Ctrl + / - / 0). UI(사이드바·툴바·메뉴)는 고정 */
   --bg: #14161a; --bg2: #1a1d22; --bg3: #252930; --fg: #d4d8de; --fg2: #7f8794; --bd: #2a2e36;
   --accent: #7aa2ff; --accent-bg: #222c45; --err: #f07178; --ok: #8fd18a; --code: #1e2228;
   --num: #f0a869; --bool: #c49cf5; --star: #f2c94c;
@@ -67,7 +68,7 @@ textarea.editor.wrap { white-space: pre-wrap; word-break: break-word; }
 #status .ok { color: var(--ok); }
 
 /* markdown */
-.md { padding: 20px 32px 60px; max-width: 920px; margin: 0 auto; line-height: 1.65; font-size: 14.5px; word-wrap: break-word; }
+.md { padding: 20px 32px 60px; max-width: 920px; margin: 0 auto; line-height: 1.65; font-size: calc(14.5px * var(--cz)); word-wrap: break-word; }
 .md h1, .md h2 { border-bottom: 1px solid var(--bd); padding-bottom: .25em; }
 .md h1, .md h2, .md h3, .md h4 { margin: 1.4em 0 .6em; line-height: 1.25; }
 .md h1:first-child { margin-top: 0; }
@@ -75,7 +76,7 @@ textarea.editor.wrap { white-space: pre-wrap; word-break: break-word; }
 .md img { max-width: 100%; }
 .md code { font: .88em var(--mono); background: var(--code); padding: .15em .35em; border-radius: 4px; }
 .md pre { position: relative; background: var(--code); padding: 12px 14px; border-radius: 6px; overflow: auto; }
-.md pre code { background: none; padding: 0; font-size: 12.5px; }
+.md pre code { background: none; padding: 0; font-size: calc(12.5px * var(--cz)); }
 .md pre .cp { position: absolute; top: 6px; right: 6px; opacity: 0; font-size: 11px; padding: 0 6px; }
 .md pre:hover .cp { opacity: 1; }
 .md blockquote { margin: 0; padding: 0 1em; color: var(--fg2); border-left: 3px solid var(--bd); }
@@ -86,14 +87,14 @@ textarea.editor.wrap { white-space: pre-wrap; word-break: break-word; }
 .md li.task { list-style: none; margin-left: -1.4em; }
 
 /* csv table */
-table.csv { border-collapse: collapse; font: 12.5px var(--mono); }
+table.csv { border-collapse: collapse; font: 12.5px var(--mono); font-size: calc(12.5px * var(--cz)); }
 table.csv th, table.csv td { border: 1px solid var(--bd); padding: 2px 8px; white-space: pre; max-width: 480px; overflow: hidden; text-overflow: ellipsis; cursor: copy; }
 table.csv th { position: sticky; top: 0; background: var(--bg3); color: var(--fg); z-index: 1; text-align: left; }
 table.csv td.n, table.csv th.n { background: var(--bg2); color: var(--fg2); text-align: right; position: sticky; left: 0; cursor: default; }
 table.csv tr:hover td { background: var(--accent-bg); }
 
 /* json/yaml tree */
-.tree { padding: 12px 16px; font: 13px/1.6 var(--mono); }
+.tree { padding: 12px 16px; font: 13px/1.6 var(--mono); font-size: calc(13px * var(--cz)); }
 .tree details { margin-left: 16px; }
 .tree summary { cursor: pointer; list-style: none; }
 .tree summary::before { content: "▸"; display: inline-block; width: 14px; color: var(--fg2); font-size: 10px; }
@@ -256,3 +257,6 @@ table.csv tr:hover td { background: var(--accent-bg); }
 .memo:hover .mx { visibility: visible; } .memo .mx:hover { color: var(--err); }
 .memo-empty { padding: 16px 14px; color: var(--fg2); font-size: 12.5px; }
 .mv-foot { padding: 4px 10px; border-top: 1px solid var(--bd); font: 11px var(--mono); color: var(--fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 편집기 글자 배율 (색칠 레이어와 입력창은 반드시 같은 크기) */
+.ed pre.hl, .ed textarea.editor { font-size: calc(13px * var(--cz)); }

@@ -176,7 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         } else { decisionHandler(.allow) }
     }
 
-    // MARK: 메뉴 — ⌘C/V/Z 등 표준 편집 단축키용. ⌘S/P/O/B/E/W/, 는 웹 UI 가 처리하므로 메뉴에 두지 않는다.
+    // MARK: 메뉴 — ⌘C/V/Z 등 표준 편집 단축키용. ⌘S/P/O/B/E/W/,/+/-/0 는 웹 UI 가 처리하므로 메뉴에 두지 않는다 (⌘+/-/0 은 본문 글자만 바뀐다).
     func buildMenu() {
         let main = NSMenu()
         func add(_ title: String, _ items: [NSMenuItem]) {
@@ -205,9 +205,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         ])
         add("보기", [
             mi("새로고침", #selector(reloadPage), "r"),
-            mi("확대", #selector(zoomIn), "+"),
-            mi("축소", #selector(zoomOut), "-"),
-            mi("실제 크기", #selector(zoomReset), "0"),
         ])
         add("윈도우", [
             mi("최소화", #selector(NSWindow.performMiniaturize(_:)), "m"),
@@ -218,9 +215,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     }
     var keyWV: WKWebView? { NSApp.keyWindow?.contentView as? WKWebView }
     @objc func reloadPage() { keyWV?.reload() }
-    @objc func zoomIn() { if let w = keyWV { w.pageZoom = min(w.pageZoom + 0.1, 3) } }
-    @objc func zoomOut() { if let w = keyWV { w.pageZoom = max(w.pageZoom - 0.1, 0.5) } }
-    @objc func zoomReset() { keyWV?.pageZoom = 1 }
 }
 
 let app = NSApplication.shared

@@ -1023,6 +1023,25 @@ $('#root-name').onclick = openPicker; $('#root-name').style.cursor = 'pointer';
   });
 })();
 
+// ───────── 본문 글자 크기: ⌘/Ctrl + / - / 0 (UI 는 고정, 편집기·마크다운·CSV·트리뷰 글자만 변경) ─────────
+let contentScale = Math.min(3, Math.max(0.6, Number(store.get('contentScale', 1)) || 1));
+const applyScale = () => document.documentElement.style.setProperty('--cz', contentScale);
+function setScale(v) {
+  contentScale = Math.min(3, Math.max(0.6, Math.round(v * 10) / 10));
+  store.set('contentScale', contentScale); applyScale(); toast(`글자 크기 ${Math.round(contentScale * 100)}%`);
+}
+applyScale();
+document.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+  if (e.key === '+' || e.key === '=') { e.preventDefault(); setScale(contentScale + 0.1); }
+  else if (e.key === '-' || e.key === '_') { e.preventDefault(); setScale(contentScale - 0.1); }
+  else if (e.key === '0') { e.preventDefault(); setScale(1); }
+}, true);
+document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀치 (브라우저는 ctrlKey 로 전달)
+  if (!(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault(); setScale(contentScale + (e.deltaY < 0 ? 0.1 : -0.1));
+}, { passive: false });
+
 // ───────── 사이드바 리사이즈 ─────────
 (() => {
   const side = $('#sidebar'); side.style.width = store.get('sideW', 280) + 'px';
