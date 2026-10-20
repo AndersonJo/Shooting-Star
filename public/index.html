@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>shooting-star</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>★</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<aside id="sidebar">
+  <header>
+    <span id="root-name" title=""></span>
+    <button id="btn-fav" title="즐겨찾기 폴더 토글">☆</button>
+    <button id="btn-new-file" title="새 파일">＋</button>
+    <button id="btn-new-dir" title="새 폴더">▢</button>
+    <button id="btn-collapse" title="모두 접기">⊟</button>
+    <button id="btn-settings" title="설정 (⌘,)">⚙</button>
+  </header>
+  <div id="favs"></div>
+  <nav id="tree" tabindex="0"></nav>
+</aside>
+<div id="resizer"></div>
+<main>
+  <div id="tabs"></div>
+  <div id="toolbar"></div>
+  <div id="content">
+    <div id="empty">
+      <p>★ shooting-star</p>
+      <p><kbd>Shift</kbd>×2 / <kbd>⌘/Ctrl</kbd>+<kbd>P</kbd> 파일 검색 · <kbd>⌘/Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> 내용 검색 · <kbd>⌘/Ctrl</kbd>+<kbd>S</kbd> 저장 · <kbd>⌘/Ctrl</kbd>+<kbd>O</kbd> 폴더 열기 · <kbd>⌘/Ctrl</kbd>+<kbd>B</kbd> 사이드바 · <kbd>⌘/Ctrl</kbd>+<kbd>E</kbd> 보기/편집 전환</p>
+    </div>
+  </div>
+  <footer id="status"><span id="st-msg"></span><span id="st-idx"></span><span id="st-pos"></span></footer>
+</main>
+<div id="menu" hidden></div>
+<div id="palette" hidden><input id="pal-input" placeholder="파일 이름 검색…" autocomplete="off"><ul id="pal-list"></ul></div>
+<div id="picker" hidden><input id="pk-input" placeholder="/path/to/folder" autocomplete="off" spellcheck="false"><ul id="pk-list"></ul></div>
+<div id="toast" hidden></div>
+<script src="vendor/marked.js"></script>
+<script src="vendor/purify.min.js"></script>
+<script src="vendor/js-yaml.umd.min.js"></script>
+<script src="highlight.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
