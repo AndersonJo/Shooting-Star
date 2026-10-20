@@ -342,6 +342,16 @@ async function api(req, res, url, root) {
       else if (!ix.watcher && Date.now() - ix.ts > 10000) rebuild(root, ix); // 감시 불가 시 TTL
       return send(res, 200, indexFiles(ix));
     }
+    case 'GET /api/matchdirs': { // 지정한 확장자의 파일이 (하위 포함) 존재하는 폴더들. 비우면 파일이 있는 모든 폴더.
+      const ix = getIndex(root); if (!ix.ready) await ix.building;
+      const exts = new Set((url.searchParams.get('exts') || '').split(',').map((e) => e.trim().replace(/^\./, '').toLowerCase()).filter(Boolean));
+      const dirs = new Set();
+      for (const f of indexFiles(ix)) {
+        if (exts.size && !exts.has(path.extname(f).slice(1).toLowerCase())) continue;
+        for (let d = f.lastIndexOf('/'); d > 0; d = f.lastIndexOf('/', d - 1)) { const dir = f.slice(0, d); if (dirs.has(dir)) break; dirs.add(dir); }
+      }
+      return send(res, 200, [...dirs]);
+    }
     case 'GET /api/index': {
       const ix = getIndex(root);
       return send(res, 200, { ready: ix.ready, building: !!ix.building, count: ix.set.size, truncated: ix.truncated, watching: !!ix.watcher, ts: ix.ts });

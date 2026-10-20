@@ -91,6 +91,18 @@
     ['n', NUM],
   ]);
 
+  // ── Java
+  const java = compile([
+    ['c', String.raw`//[^\n]*|/\*[\s\S]*?\*/`],
+    ['s', String.raw`"""[\s\S]*?"""|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'`],
+    ['d', String.raw`@[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*`],
+    ['fn', String.raw`\b(?:class|interface|enum|record)\s+[A-Za-z_$][\w$]*`, (t) => { const n = t.trim().split(/\s+/); return span('kw', n[0]) + ' ' + span('fn', n[1]); }],
+    ['b', String.raw`\b(?:true|false|null|this|super)\b`],
+    ['kw', words('abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for goto if implements import instanceof int interface long native new package private protected public return short static strictfp switch synchronized throw throws transient try var void volatile while record sealed permits yield')],
+    ['bi', words('String Object Integer Long Double Boolean List Map Set Optional Exception RuntimeException System Override')],
+    ['n', NUM],
+  ]);
+
   // ── Shell
   const sh = compile([
     ['c', String.raw`(?<![\w$])#[^\n]*`],
@@ -142,8 +154,8 @@
     return out.join('\n');
   }
 
-  const LANGS = { json: (t) => lex(t, json), yaml, python: (t) => lex(t, python), js: (t) => lex(t, js), sh: (t) => lex(t, sh), sql: (t) => lex(t, sql), toml: (t) => lex(t, toml), markdown };
-  const EXT = { json: 'json', jsonc: 'json', jsonl: 'json', ndjson: 'json', geojson: 'json', yml: 'yaml', yaml: 'yaml', py: 'python', pyi: 'python',
+  const LANGS = { java: (t) => lex(t, java), json: (t) => lex(t, json), yaml, python: (t) => lex(t, python), js: (t) => lex(t, js), sh: (t) => lex(t, sh), sql: (t) => lex(t, sql), toml: (t) => lex(t, toml), markdown };
+  const EXT = { json: 'json', jsonc: 'json', jsonl: 'json', ndjson: 'json', geojson: 'json', yml: 'yaml', yaml: 'yaml', py: 'python', pyi: 'python', java: 'java',
     js: 'js', mjs: 'js', cjs: 'js', jsx: 'js', ts: 'js', tsx: 'js', sh: 'sh', bash: 'sh', zsh: 'sh', sql: 'sql', toml: 'toml', ini: 'toml', cfg: 'toml', conf: 'toml',
     md: 'markdown', markdown: 'markdown', mdx: 'markdown' };
   const ALIAS = { py: 'python', python3: 'python', yml: 'yaml', jsonc: 'json', javascript: 'js', typescript: 'js', ts: 'js', jsx: 'js', tsx: 'js', bash: 'sh', shell: 'sh', zsh: 'sh', console: 'sh', md: 'markdown', ini: 'toml' };

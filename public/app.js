@@ -109,12 +109,34 @@ const state = {
   active: null,
   expanded: new Set(),
   root: '',
+  filter: store.get('treeFilter', false),   // 트리 필터 on/off
+  filterDirs: null,
   selected: '',
   wrap: store.get('wrap', false),
 };
 const tabOf = (p) => state.tabs.find((t) => t.path === p);
 const cur = () => tabOf(state.active);
 const dirty = (t) => t.content !== t.orig;
+// ───────── 트리 필터 (설정의 '검색 대상 파일 형식' 기준) ─────────
+const fileMatchesFilter = (name) => {
+  const e = searchExts(); if (!e) return true;
+  return e.split(',').includes((name.match(/\.([^./]+)$/)?.[1] || '').toLowerCase());
+};
+async function fetchFilterDirs() {
+  try { state.filterDirs = new Set(await api('GET', 'matchdirs', { exts: searchExts() })); } catch { state.filterDirs = null; }
+}
+async function refreshFilter() { // 필터가 켜져 있으면 폴더 목록을 다시 계산해 트리를 갱신
+  drawFilterBtn(); if (!state.filter) return;
+  await fetchFilterDirs(); renderTree();
+}
+function drawFilterBtn() {
+  $('#btn-filter').classList.toggle('on', !!state.filter);
+  const info = $('#filter-info');
+  info.textContent = state.filter ? scopeLabel() + ' 파일이 있는 폴더만' : '';
+  info.title = '클릭: 대상 파일 형식 설정';
+}
+$('#btn-filter').onclick = async () => { state.filter = !state.filter; store.set('treeFilter', state.filter); await refreshFilter(); };
+$('#filter-info').onclick = () => openSettings();
 const wsKey = (k) => `ws:${state.root}:${k}`; // 폴더(워크스페이스)별 탭/펼침 상태
 const persistTabs = () => {
   if (!state.root) return;
@@ -137,6 +159,9 @@ async function renderTree() {
     if (!list) { try { list = await loadDir(dir); } catch { return; } }
     for (const e of list) {
       const p = dir ? dir + '/' + e.name : e.name;
+      if (state.filter && state.filterDirs) { // 필터: 설정된 형식의 파일이 있는 폴더 / 그 형식의 파일만
+        if (e.dir ? !state.filterDirs.has(p) : !fileMatchesFilter(e.name)) continue;
+      }
       const open = e.dir && state.expanded.has(p);
       const tab = !e.dir && tabOf(p);
       const row = el('div', { className: 'row' + (state.selected === p ? ' sel' : '') + (tab && dirty(tab) ? ' dirty' : '') },
@@ -151,6 +176,7 @@ async function renderTree() {
     }
   }
   await walk('', 0);
+  if (state.filter && state.filterDirs && !frag.childNodes.length) frag.append(el('div', { className: 'tree-empty', textContent: '설정된 파일 형식이 있는 폴더가 없습니다' }));
   root.replaceChildren(frag); root.scrollTop = scroll;
 }
 async function refreshDir(p) { // 변경 후 해당 폴더 재로딩
@@ -629,10 +655,11 @@ document.addEventListener('keydown', (e) => {
 
 // ───────── 파일 인덱스 상태 (서버가 백그라운드로 인덱싱) ─────────
 async function watchIndex() {
-  const box = $('#st-idx');
+  const box = $('#st-idx'); let lastTs = 0;
   for (let i = 0; i < 600; i++) {
     try {
       const s = await api('GET', 'index');
+      if (s.ts !== lastTs) { lastTs = s.ts; if (state.filter && s.ready) fetchFilterDirs().then(renderTree); } // 파일이 생기거나 사라지면 필터 갱신
       box.textContent = s.ready && !s.building ? `⚡ ${s.count.toLocaleString()} files indexed${s.truncated ? '+' : ''}` : `⏳ indexing… ${s.count ? s.count.toLocaleString() : ''}`;
       box.title = s.watching ? '파일 변경을 실시간으로 감시 중' : '변경 감시 불가: 10초 간격으로 갱신';
     } catch { return; }
@@ -642,11 +669,12 @@ async function watchIndex() {
 const s_wait = (i) => (i < 20 ? 700 : 5000); // 초반엔 빠르게, 이후엔 느리게 상태 갱신
 
 // ───────── 설정 (서버의 ~/.config/shooting-star/settings.json) ─────────
-// 내용 검색(Find in Files)에서 훑을 파일 형식. 기본은 YAML / JSON / Python.
+// 내용 검색(Find in Files)에서 훑을 파일 형식. 기본은 YAML / JSON / Python / Markdown / Java.
 const SEARCH_CATS = [
   { id: 'yaml', label: 'YAML', exts: 'yml,yaml' },
   { id: 'json', label: 'JSON', exts: 'json,jsonc,jsonl,ndjson,geojson' },
   { id: 'python', label: 'Python', exts: 'py,pyi' },
+  { id: 'java', label: 'Java', exts: 'java' },
   { id: 'markdown', label: 'Markdown', exts: 'md,markdown,mdx' },
   { id: 'csv', label: 'CSV / TSV', exts: 'csv,tsv' },
   { id: 'js', label: 'JavaScript / TypeScript', exts: 'js,mjs,cjs,jsx,ts,tsx' },
@@ -656,7 +684,7 @@ const SEARCH_CATS = [
   { id: 'web', label: 'HTML / CSS / XML', exts: 'html,htm,css,scss,xml,svg' },
   { id: 'text', label: '텍스트 / 로그', exts: 'txt,log,rst' },
 ];
-const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python'], searchAll: false, customExts: '' };
+const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '' };
 let settings = { ...SETTINGS_DEFAULT };
 async function loadSettings() {
   try { settings = { ...SETTINGS_DEFAULT, ...(await api('GET', 'settings')) }; } catch {}
@@ -688,7 +716,7 @@ function openSettings() {
     const cb = el('input', { type: 'checkbox', checked }); cb.onchange = () => onchange(cb.checked);
     return el('label', { className: 'st-row' }, cb, el('span', { className: 'st-l', textContent: label }), el('span', { className: 'st-s', textContent: sub || '' }));
   };
-  const apply = () => { saveSettings(); updateScope(); if (ff.built && !$('#find').hidden) runFind(); };
+  const apply = () => { saveSettings(); updateScope(); refreshFilter(); if (ff.built && !$('#find').hidden) runFind(); };
   const draw = () => {
     const all = row(settings.searchAll, '모든 파일', '아래 선택을 무시하고 전체 텍스트 파일 검색', (v) => { settings.searchAll = v; apply(); draw(); });
     const cats = SEARCH_CATS.map((c) => {
@@ -702,7 +730,7 @@ function openSettings() {
     const custom = el('input', { className: 'st-custom', placeholder: '추가 확장자 (예: env, proto, tf)', value: settings.customExts, spellcheck: false });
     custom.oninput = () => { settings.customExts = custom.value; clearTimeout(custom._t); custom._t = setTimeout(apply, 300); };
     const close = el('button', { textContent: '닫기', className: 'st-close' }); close.onclick = () => { box.hidden = true; };
-    const reset = el('button', { textContent: '기본값 (YAML · JSON · Python)', className: 'st-reset' });
+    const reset = el('button', { textContent: '기본값 (' + SEARCH_CATS.filter((c) => SETTINGS_DEFAULT.searchTypes.includes(c.id)).map((c) => c.label.split(' ')[0]).join(' · ') + ')', className: 'st-reset' });
     reset.onclick = () => { settings = { ...settings, ...SETTINGS_DEFAULT }; apply(); draw(); };
     box.replaceChildren(
       el('div', { className: 'st-h', textContent: '설정' }),
@@ -946,7 +974,7 @@ $('#root-name').onclick = openPicker; $('#root-name').style.cursor = 'pointer';
   api('PUT', 'last', {}, { root: info.root }).catch(() => {}); state.home = info.home;
   history.replaceState(null, '', '/?root=' + encodeURIComponent(info.root));
   $('#root-name').textContent = info.name; $('#root-name').title = info.root + '  (클릭 / ⌘O: 폴더 열기)';
-  addRecent(info.root); await loadFavs(); loadSettings(); watchIndex();
+  addRecent(info.root); await loadFavs(); await loadSettings(); if (state.filter) await fetchFilterDirs(); drawFilterBtn(); watchIndex();
   state.expanded = new Set(store.get(wsKey('expanded'), []));
   for (const s of store.get(wsKey('tabs'), [])) {
     try {
