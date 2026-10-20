@@ -965,9 +965,14 @@ $('#btn-fav').onclick = async () => {
   await saveFavs(); toast(favs.includes(state.root) ? '즐겨찾기에 추가됨' : '즐겨찾기에서 제거됨');
 };
 const go = (p) => { addRecent(p); location.href = '/?root=' + encodeURIComponent(p); };
+async function pruneRecents() { // 삭제되었거나 이동된 폴더는 최근 목록에서 제거
+  const alive = new Set();
+  await Promise.all(recents().map(async (r) => { try { await api('GET', 'browse', { path: r }); alive.add(r); } catch {} }));
+  store.set('recent', recents().filter((r) => alive.has(r)));
+}
 async function openPicker() {
   $('#picker').hidden = false; const inp = $('#pk-input');
-  inp.value = state.root + '/'; inp.focus(); await pkLoad();
+  inp.value = state.root + '/'; inp.focus(); await pruneRecents(); await pkLoad();
 }
 const closePicker = () => { $('#picker').hidden = true; };
 async function pkLoad() {
@@ -977,7 +982,7 @@ async function pkLoad() {
   try {
     const r = await api('GET', 'browse', { path: dir });
     pk.dir = r.path;
-    items.push({ label: '▶ 이 폴더 열기: ' + r.path, act: () => go(r.path) });
+    items.push({ label: '▶ 이 폴더 열기: ' + r.path, openPath: r.path, act: () => go(r.path) });
     if (r.parent) items.push({ label: '..', act: () => { $('#pk-input').value = r.parent.replace(/\/?$/, '/'); pkLoad(); } });
     for (const d of r.dirs) if (d.toLowerCase().startsWith(part))
       items.push({ label: '📁 ' + d, act: () => { $('#pk-input').value = r.path.replace(/\/$/, '') + '/' + d + '/'; pkLoad(); } });
@@ -991,7 +996,19 @@ async function pkLoad() {
 }
 function drawPicker() {
   $('#pk-list').replaceChildren(...pk.items.map((it, i) => {
-    const li = el('li', { className: i === pk.sel ? 'sel' : '', textContent: it.label }); li.onclick = it.act;
+    const li = el('li', { className: i === pk.sel ? 'sel' : '' }); li.onclick = it.act;
+    if (it.openPath) { // 경로의 각 폴더 이름을 눌러 바로 그 폴더로 열기 (예: /Users/me/projects/x 에서 'projects' 클릭)
+      li.append('▶ 이 폴더 열기: ');
+      let acc = '';
+      const root = el('span', { className: 'pseg', textContent: '/', title: '/ 열기' }); root.onclick = (e) => { e.stopPropagation(); go('/'); };
+      li.append(root);
+      it.openPath.split('/').filter(Boolean).forEach((seg, k, arr) => {
+        acc += '/' + seg; const target = acc;
+        const s = el('span', { className: 'pseg', textContent: seg, title: target + ' 열기' });
+        s.onclick = (e) => { e.stopPropagation(); go(target); };
+        li.append(s); if (k < arr.length - 1) li.append('/');
+      });
+    } else li.textContent = it.label;
     if (it.remove) { // 즐겨찾기 항목 제거 버튼
       const x = el('span', { textContent: '✕', title: '즐겨찾기에서 제거', style: 'float:right;opacity:.6' });
       x.onclick = async (e) => { e.stopPropagation(); favs = favs.filter((f) => f !== it.remove); await saveFavs(); pkLoad(); };

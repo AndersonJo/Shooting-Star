@@ -260,3 +260,7 @@ table.csv tr:hover td { background: var(--accent-bg); }
 
 /* 편집기 글자 배율 (색칠 레이어와 입력창은 반드시 같은 크기) */
 .ed pre.hl, .ed textarea.editor { font-size: calc(13px * var(--cz)); }
+
+/* 폴더 선택기: 경로 조각 클릭 */
+.pseg { cursor: pointer; border-radius: 3px; padding: 0 1px; }
+.pseg:hover { color: var(--accent); text-decoration: underline; background: #2d3a5a; }
