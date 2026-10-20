@@ -4,7 +4,7 @@
 
 ```bash
 ./install.sh          # 한 번만: `ss` 명령 설치
-ss .                   # IDE의 `code .` 처럼: 현재 폴더를 워크스페이스로 열기
+ss .                   # IDE의 `code .` 처럼 (네이티브 앱 창으로 열림): 현재 폴더를 워크스페이스로 열기
 ss ~/wiki              # 다른 폴더도 동일. 이미 실행 중이면 새 탭으로만 열림
 
 # 설치 없이 직접 실행
@@ -12,6 +12,8 @@ node server.js [디렉토리] [--port 4000] [--no-open]
 # 예: node server.js ~/wiki
 ```
 
+- 앱: macOS 는 `install.sh` 가 swiftc 로 네이티브 셸(`macos/ShootingStar.swift`, WKWebView)을 빌드해 `~/Applications/shooting-star.app` 설치 — Dock 에 자체 아이콘, Chrome 불필요 (swiftc 없으면 브라우저 창 방식). Ubuntu 는 앱 메뉴 항목 + Chromium 계열 `--app` 창
+- 시작 위치: 마지막으로 연 폴더, 없으면 `~/projects` (설정에서 변경)
 - 워크스페이스: 브라우저 탭마다 다른 폴더, ⌘/Ctrl+O 로 앱 안에서 폴더 전환(최근 폴더 포함), 폴더별 탭/펼침 상태 복원
 - 좌측 트리(접기/펼치기, 우클릭: 새 파일/폴더·이름변경·삭제·경로복사), ⌘/Ctrl+P 빠른 열기
 - 검색: Shift×2 / ⌘P 파일 이름 검색(백그라운드 인덱싱), ⌘/Ctrl+Shift+F 전체 파일 내용 검색(대소문자·단어·정규식·파일 마스크, 미리보기, 해당 줄로 이동). ripgrep 이 있으면 자동 사용

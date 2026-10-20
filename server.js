@@ -24,6 +24,12 @@ const FAV_FILE = path.join(process.env.XDG_CONFIG_HOME || path.join(HOME, '.conf
 const readFavs = () => { try { return JSON.parse(fs.readFileSync(FAV_FILE, 'utf8')).filter((x) => typeof x === 'string'); } catch { return []; } };
 const SETTINGS_FILE = path.join(path.dirname(FAV_FILE), 'settings.json');
 const readSettings = () => { try { const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); return s && typeof s === 'object' ? s : {}; } catch { return {}; } };
+// 마지막으로 연 폴더가 없을 때의 시작 위치: 설정(defaultRoot) > ~/projects > 홈
+const defaultWorkspace = () => {
+  const cfg = readSettings().defaultRoot;
+  for (const c of [cfg && String(cfg).replace(/^~(?=$|\/)/, HOME), path.join(HOME, 'projects')]) if (c && path.isAbsolute(c) && isDirSafe(c)) return fs.realpathSync(c);
+  return HOME;
+};
 const LAST_FILE = path.join(path.dirname(FAV_FILE), 'last.json'); // 마지막으로 연 워크스페이스
 const readLast = () => { try { const r = JSON.parse(fs.readFileSync(LAST_FILE, 'utf8')).root; return isDirSafe(r) ? r : null; } catch { return null; } };
 const MAX_SIZE = 5 * 1024 * 1024;
@@ -311,9 +317,9 @@ async function api(req, res, url, root) {
     }
     case 'GET /api/info':
       getIndex(root); // 워크스페이스를 열면 인덱싱 시작
-      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() });
+      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace() });
     case 'GET /api/browse': { // 폴더 선택기: 절대경로의 하위 폴더 목록
-      const dir = fs.realpathSync(path.resolve((p || HOME).replace(/^~(?=$|\/)/, HOME)));
+      const dir = fs.realpathSync(path.resolve((p || defaultWorkspace()).replace(/^~(?=$|\/)/, HOME)));
       const list = (await fsp.readdir(dir, { withFileTypes: true }))
         .filter((e) => (e.isDirectory() || (e.isSymbolicLink() && isDirSafe(path.join(dir, e.name)))) && !e.name.startsWith('.'))
         .map((e) => e.name).sort((a, b) => a.localeCompare(b));
@@ -402,6 +408,7 @@ async function serveStatic(res, pathname) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://x');
+    if (process.env.SS_LOG) fs.appendFileSync(process.env.SS_LOG, `${req.method} ${req.url.slice(0, 80)} | ${req.headers['user-agent']}\n`);
     // DNS rebinding / 타 사이트에서의 요청 방지
     const host = (req.headers.host || '').replace(/:\d+$/, '');
     if (!['127.0.0.1', 'localhost', '[::1]', HOST].includes(host)) throw httpError(403, 'bad host');
@@ -426,7 +433,7 @@ const server = http.createServer(async (req, res) => {
 // ───────── 실행 / 창 열기 ─────────
 const BASE = `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`;
 const appUrl = () => {
-  const last = LAST && readLast(); // --last: 마지막으로 연 폴더, 없으면 기본 폴더
+  const last = LAST && (readLast() || defaultWorkspace()); // --last: 마지막으로 연 폴더, 없으면 기본 프로젝트 위치
   return `${BASE}/?root=${encodeURIComponent(last || DEFAULT_ROOT)}`;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -434,8 +441,18 @@ async function running() {
   try { return (await (await fetch(`${BASE}/api/info`)).json()).app === 'shooting-star'; } catch { return false; }
 }
 // Chromium 계열이 있으면 주소창 없는 독립 창(--app)으로, 없으면 기본 브라우저로 연다
+function nativeApp() { // install.sh 가 만든 네이티브 macOS 앱 (shooting-star.app)
+  if (process.platform !== 'darwin' || process.env.SS_NATIVE === '0') return null;
+  for (const d of [path.join(HOME, 'Applications'), '/Applications']) {
+    const p = path.join(d, 'shooting-star.app');
+    if (fs.existsSync(path.join(p, 'Contents/Resources/config.json'))) return p;
+  }
+  return null;
+}
 function openWindow(url) {
   const sh = (c) => exec(c, () => {});
+  const native = nativeApp();
+  if (native) return sh(`open -a "${native}" "shooting-star://open?url=${encodeURIComponent(url)}"`);
   if (process.env.SS_APP_WINDOW !== '0') {
     if (process.platform === 'darwin') {
       for (const name of ['Google Chrome', 'Brave Browser', 'Microsoft Edge', 'Chromium', 'Vivaldi']) {
