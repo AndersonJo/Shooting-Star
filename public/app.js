@@ -197,6 +197,7 @@ async function renderTree() {
   if (state.filter && state.filterDirs && !frag.childNodes.length) frag.append(el('div', { className: 'tree-empty', textContent: '설정된 파일 형식이 있는 폴더가 없습니다' }));
   if (seq !== treeSeq) return;
   root.replaceChildren(frag); root.scrollTop = scroll;
+  paintTreeHits();
 }
 async function refreshDir(p) { // 변경 후 해당 폴더 재로딩
   const parent = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
@@ -218,7 +219,8 @@ $('#tree').addEventListener('click', async (ev) => {
   if (!state.expanded.has(p)) return toggleDir(p);    // 닫혀 있으면 펼치고 선택
   document.querySelectorAll('#tree .row.sel').forEach((r) => r.classList.remove('sel')); row.classList.add('sel');   // 이미 열려 있으면 선택만
 });
-$('#tree').addEventListener('keydown', (ev) => { // 키보드: ↑↓ 이동, → 펼치기, ← 접기, Enter 폴더 접기·펼치기/파일 열기
+$('#tree').addEventListener('keydown', (ev) => { // 키보드: ↑↓ 이동, → 펼치기, ← 접기, Enter 폴더 접기·펼치기/파일 열기, 글자 입력 = 이름 검색
+  if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && ((ev.key.length === 1 && ev.key !== ' ') || ev.key === 'Process')) { startTreeSearch(ev); return; }   // 한글(IME)은 'Process' 로 들어온다
   if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) return;
   const rows = [...document.querySelectorAll('#tree .row')]; if (!rows.length) return;
   let i = rows.findIndex((r) => r.dataset.path === state.selected); const row = rows[i], isDir = !!row?.dataset.dir, p = row?.dataset.path;
@@ -230,6 +232,99 @@ $('#tree').addEventListener('keydown', (ev) => { // 키보드: ↑↓ 이동, �
   else if (ev.key === 'Enter' && row) { ev.preventDefault(); isDir ? toggleDir(p) : openFile(p); }
 });
 $('#btn-collapse').onclick = () => { state.expanded.clear(); persistTabs(); renderTree(); };
+
+// ───────── 트리 이름 검색 (speed search) ─────────
+// 트리에서 글자를 치면, 선택한 위치(폴더면 그 폴더, 파일이면 그 파일이 있는 폴더) 안의 하위 전체에서 이름이 일치하는 곳을
+// 트리 위에 하이라이트한다. ↓/↑(Ctrl+N/P) 로 다음/이전 일치로 이동(접힌 폴더는 자동으로 펼침), Enter 열기, Esc 취소.
+const ts = { on: false, scope: '', anchor: '', files: [], hits: [], map: new Map(), idx: -1 };
+const dirOfSel = () => { const s = state.selected || ''; if (!s || isMemo(s)) return ''; const row = [...document.querySelectorAll('#tree .row')].find((r) => r.dataset.path === s); return row?.dataset.dir ? s : dirOf(s); };
+const treeCmp = (a, b) => {   // 트리에 보이는 순서 (같은 폴더 안에서는 폴더가 먼저)
+  const x = a.split('/'), y = b.split('/');
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue;
+    const xd = i < x.length - 1, yd = i < y.length - 1;
+    return xd !== yd ? (xd ? -1 : 1) : x[i].localeCompare(y[i]);
+  }
+  return x.length - y.length;
+};
+async function startTreeSearch(ev) {
+  if (ts.on) return;
+  const inp = $('#ts-input'), bar = $('#tsearch');
+  ts.on = true; ts.scope = dirOfSel(); ts.anchor = state.selected || ''; ts.hits = []; ts.map = new Map(); ts.idx = -1;
+  $('.ts-scope', bar).replaceChildren(el('bdi', { textContent: (ts.scope ? ts.scope + '/' : '전체') + ' ›' })); $('.ts-scope', bar).title = '검색 범위: ' + (ts.scope || '작업 폴더 전체') + ' (하위 폴더 포함)';
+  bar.hidden = false; inp.value = ''; inp.classList.remove('none'); $('.ts-count', bar).textContent = '';
+  inp.focus();
+  if (ev.key.length === 1) { ev.preventDefault(); inp.value = ev.key; }   // 한글은 입력창으로 포커스가 옮겨진 뒤 IME 가 이어서 입력한다
+  try { ts.files = await api('GET', 'files'); } catch { ts.files = []; }
+  runTreeSearch(inp.value);
+}
+function runTreeSearch(q) {
+  if (!ts.on) return;
+  q = q.trim(); const prefix = ts.scope ? ts.scope + '/' : '', cand = new Set(), hits = [];
+  if (q) {
+    const dirs = new Set();
+    for (const f of ts.files) {
+      if (prefix && !f.startsWith(prefix)) continue;
+      cand.add(f);
+      for (let i = f.indexOf('/', prefix.length); i > 0; i = f.indexOf('/', i + 1)) dirs.add(f.slice(0, i));   // 폴더 이름도 검색 대상 (범위 폴더 자신은 제외)
+    }
+    for (const d of dirs) cand.add(d + '/');
+    for (const c of cand) {
+      const isDir = c.endsWith('/'), path = isDir ? c.slice(0, -1) : c, m = matchFile(q, path);
+      if (!m || m.tier > 3) continue;   // 이름에서 일치한 것만 (경로 일치는 제외)
+      const b0 = path.lastIndexOf('/') + 1;
+      hits.push({ p: path, dir: isDir, pos: m.pos.map((k) => k - b0) });
+    }
+    hits.sort((a, b) => treeCmp(a.p, b.p));
+  }
+  ts.hits = hits; ts.map = new Map(hits.map((h) => [h.p, h]));
+  const first = hits.findIndex((h) => treeCmp(h.p, ts.anchor) >= 0);   // 시작한 위치 이후의 첫 일치부터
+  tsGo(hits.length ? (first < 0 ? 0 : first) : -1);
+}
+async function tsGo(i) {
+  const n = ts.hits.length, inp = $('#ts-input'), cnt = $('#tsearch .ts-count');
+  inp.classList.toggle('none', !n && !!inp.value.trim());
+  if (!n) { ts.idx = -1; cnt.textContent = inp.value.trim() ? '일치 없음' : ''; stripTreeHits(); return; }
+  ts.idx = (i + n) % n; const h = ts.hits[ts.idx];
+  cnt.textContent = `${ts.idx + 1}/${n}`;
+  let changed = false;
+  for (let k = h.p.indexOf('/'); k > 0; k = h.p.indexOf('/', k + 1)) { const d = h.p.slice(0, k); if (!state.expanded.has(d)) { state.expanded.add(d); changed = true; } }   // 가려진 일치는 상위 폴더를 펼쳐 보여 준다
+  state.selected = h.p;
+  if (changed) { persistTabs(); await renderTree(); } else { document.querySelectorAll('#tree .row').forEach((r) => r.classList.toggle('sel', r.dataset.path === h.p)); paintTreeHits(); }
+  [...document.querySelectorAll('#tree .row')].find((r) => r.dataset.path === h.p)?.scrollIntoView({ block: 'nearest' });
+}
+function stripTreeHits() {
+  for (const r of document.querySelectorAll('#tree .row.hit')) { r.classList.remove('hit', 'cur'); const nm = r.querySelector('.nm'); if (nm) nm.textContent = r.dataset.path.split('/').pop(); }
+}
+function paintTreeHits() {   // 일치한 글자에 <mark>, 현재 일치 행은 강조
+  if (!ts.on) return; stripTreeHits();
+  const cur = ts.hits[ts.idx]?.p;
+  for (const r of document.querySelectorAll('#tree .row')) {
+    const h = ts.map.get(r.dataset.path); if (!h) continue;
+    const nm = r.querySelector('.nm'), name = r.dataset.path.split('/').pop(), on = new Set(h.pos), f = document.createDocumentFragment(); let run = '', mark = false;
+    const flush = () => { if (run) f.append(mark ? el('mark', { textContent: run }) : run); run = ''; };
+    [...name].forEach((ch, k) => { const m = on.has(k); if (m !== mark) { flush(); mark = m; } run += ch; }); flush();
+    nm.replaceChildren(f); r.classList.add('hit'); r.classList.toggle('cur', r.dataset.path === cur);
+  }
+}
+function endTreeSearch(focusTree) {
+  if (!ts.on) return; ts.on = false; $('#tsearch').hidden = true; stripTreeHits(); ts.hits = []; ts.map = new Map(); ts.files = [];
+  if (focusTree) $('#tree').focus();
+}
+$('#ts-input').oninput = (e) => runTreeSearch(e.target.value);
+$('#ts-input').onblur = () => endTreeSearch(false);
+$('#ts-input').onkeydown = (e) => {
+  if (e.isComposing) return;   // 한글 조합 중에는 키를 가로채지 않는다
+  const k = e.key.toLowerCase();
+  if (e.key === 'Escape') { e.preventDefault(); endTreeSearch(true); }
+  else if (e.key === 'ArrowDown' || (e.ctrlKey && k === 'n')) { e.preventDefault(); tsGo(ts.idx + 1); }
+  else if (e.key === 'ArrowUp' || (e.ctrlKey && k === 'p')) { e.preventDefault(); tsGo(ts.idx - 1); }
+  else if (e.key === 'Enter') {
+    e.preventDefault(); const h = ts.hits[ts.idx]; endTreeSearch(true);
+    if (h) { state.selected = h.p; if (h.dir) { state.expanded.add(h.p); persistTabs(); renderTree(); } else openFile(h.p); }
+  } else if (e.key === 'Backspace' && !e.target.value) { e.preventDefault(); endTreeSearch(true); }
+};
+
 
 // ───────── 파일 열기/저장 ─────────
 async function openFile(p, mode, at) {
