@@ -873,3 +873,12 @@ table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
 .row.hit .nm mark { background: color-mix(in srgb, var(--accent) 38%, transparent); color: inherit; border-radius: 2px; }
 .row.hit.cur { background: var(--accent-bg); box-shadow: inset 2px 0 var(--accent); }
 .row.hit.cur .nm mark { background: var(--accent); color: var(--bg); }
+
+/* 트리: git 변경 표시 */
+.row[data-g]::after { content: attr(data-g); margin-left: auto; padding-left: 8px; font: 600 10px var(--mono); flex: none; }
+.row.g-dir[data-g]::after { font-size: 8px; }
+.row.g-M .nm, .row.g-M::after { color: var(--num); }
+.row.g-A .nm, .row.g-A::after { color: var(--ok); }
+.row.g-U .nm, .row.g-U::after { color: var(--err); }
+.row.g-dir .nm { color: inherit; }
+.row.g-dir.g-M::after { color: var(--num); } .row.g-dir.g-U::after { color: var(--err); }

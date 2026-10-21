@@ -182,13 +182,15 @@ async function renderTree() {
       }
       const open = e.dir && state.expanded.has(p);
       const tab = !e.dir && tabOf(p);
-      const row = el('div', { className: 'row' + (state.selected === p ? ' sel' : '') + (tab && dirty(tab) ? ' dirty' : '') },
+      const gm = e.dir ? gitMarks.dirs.get(p) : gitMarks.files.get(p);   // git 변경 표시 (M 수정 / A 새 파일 / U 충돌)
+      const row = el('div', { className: 'row' + (state.selected === p ? ' sel' : '') + (tab && dirty(tab) ? ' dirty' : '') + (gm ? ' g-' + gm + (e.dir ? ' g-dir' : '') : '') },
         el('span', { className: 'arrow', textContent: e.dir ? (open ? '▼' : '▶') : '' }),
         e.dir ? el('span', { className: 'ico dir' }) : el('span', { className: 'ico k-' + kindOf(e.name), textContent: ICON[kindOf(e.name)] }),
         el('span', { className: 'nm', textContent: e.name }));
       row.style.paddingLeft = 6 + depth * 14 + 'px';
       row.dataset.path = p; row.dataset.dir = e.dir ? '1' : '';
-      row.title = p;
+      if (gm) row.dataset.g = e.dir ? '●' : gm === 'A' ? 'N' : gm;
+      row.title = p + (gm ? (e.dir ? '\n(안에 git 변경 있음)' : gm === 'A' ? '\ngit: 새 파일' : gm === 'U' ? '\ngit: 충돌' : '\ngit: 수정됨') : '');
       frag.append(row);
       if (open) await walk(p, depth + 1);
     }
@@ -1045,7 +1047,7 @@ function applyTheme(name) {
 }
 lightMQ.addEventListener?.('change', () => { if (store.get('theme', 'dark') === 'system') applyTheme('system'); });
 
-const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark', checkUpdates: true, imageFit: 'fill', autoSave: '1' };
+const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark', checkUpdates: true, gitMarks: true, imageFit: 'fill', autoSave: '1' };
 
 // ───────── 업데이트 확인 (서버가 GitHub Releases 의 최신 버전과 비교) ─────────
 let updateInfo = null;
@@ -1182,6 +1184,8 @@ function openSettings() {
       all, el('div', { className: 'st-grid' }, ...cats), custom,
       el('div', { className: 'st-note', textContent: '파일 마스크를 직접 입력하면 마스크가 우선합니다. 파일 이름 검색(Shift×2)은 항상 모든 파일을 대상으로 합니다.' }),
       el('div', { className: 'st-sec', textContent: '버전 / 업데이트' }), verBox(),
+      el('div', { className: 'st-sec', textContent: 'Git' }),
+      row(settings.gitMarks !== false, '트리에 git 변경 표시', '변경된 파일/폴더에 색과 표시 (끄면 git 상태를 미리 읽지 않음)', (v) => { settings.gitMarks = v; saveSettings(); if (v) loadGit(); else computeGitMarks(); }),
       row(settings.checkUpdates !== false, '시작할 때 업데이트 자동 확인', 'GitHub 에 최신 버전 조회 요청 1건 (끄면 요청 없음)', (v) => { settings.checkUpdates = v; saveSettings(); if (!v) $('#st-update').hidden = true; }),
       el('div', { className: 'st-foot' }, reset, close));
   };
@@ -1367,12 +1371,27 @@ $('#memo-q').oninput = refreshMemos;
 // ───────── Git: 작업 폴더 안의 repo 별 변경 파일 → 커밋 / 푸시 ─────────
 const gitUi = { repos: [], expanded: new Set(), off: new Map(), msg: new Map(), busy: new Set(), err: new Map(), loaded: false };   // off: repo → 체크 해제한 파일들
 let gitTimer, gitSeq = 0;
-const refreshGit = () => { if (state.view !== 'git') return; clearTimeout(gitTimer); gitTimer = setTimeout(loadGit, 400); };
+const gitWanted = () => state.view === 'git' || settings.gitMarks !== false;   // 트리 색 표시가 켜져 있으면 git 보기가 아니어도 상태를 읽는다
+const refreshGit = () => { if (!gitWanted()) return; clearTimeout(gitTimer); gitTimer = setTimeout(loadGit, 600); };
+// 트리 표시용: 변경된 파일(경로 → M/A/U) 과 변경이 들어 있는 폴더
+let gitMarks = { files: new Map(), dirs: new Map(), sig: '' };
+function computeGitMarks() {
+  const files = new Map(), dirs = new Map();
+  if (settings.gitMarks !== false) for (const r of gitUi.repos) for (const f of r.files) {
+    if (!f.rp) continue;
+    const k = gitKind(f); if (k === 'D') continue;   // 삭제된 파일은 트리에 없다
+    files.set(f.rp, k === 'U' ? 'U' : k === '?' || k === 'A' ? 'A' : 'M');
+    for (let i = f.rp.indexOf('/'); i > 0; i = f.rp.indexOf('/', i + 1)) { const d = f.rp.slice(0, i); const cur = dirs.get(d); dirs.set(d, cur === 'U' || files.get(f.rp) === 'U' ? 'U' : 'M'); }
+  }
+  const sig = JSON.stringify([...files, ...dirs]);
+  if (sig === gitMarks.sig) return;
+  gitMarks = { files, dirs, sig }; renderTree();
+}
 async function loadGit() {
   const seq = ++gitSeq; let r;
-  try { r = await api('GET', 'git/repos'); } catch (e) { if (seq === gitSeq) $('#git-list').replaceChildren(el('div', { className: 'git-empty', textContent: 'Git 정보를 읽지 못했습니다: ' + e.message })); return; }
+  try { r = await api('GET', 'git/repos'); } catch (e) { if (seq === gitSeq && state.view === 'git') $('#git-list').replaceChildren(el('div', { className: 'git-empty', textContent: 'Git 정보를 읽지 못했습니다: ' + e.message })); return; }
   if (seq !== gitSeq) return;
-  gitUi.repos = r.repos; gitUi.loaded = true; drawGit();
+  gitUi.repos = r.repos; gitUi.loaded = true; if (state.view === 'git') drawGit(); computeGitMarks();
 }
 const GIT_LABEL = { M: '수정', A: '추가', D: '삭제', R: '이름 변경', '?': '새 파일', U: '충돌' };
 function gitKind(f) {   // 한 글자로 요약: M A D R ? U
@@ -2202,7 +2221,7 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
   api('PUT', 'last', {}, { root: info.root }).catch(() => {}); state.home = info.home;
   history.replaceState(null, '', '/?root=' + encodeURIComponent(info.root));
   $('#root-name').textContent = info.name; $('#root-name').title = info.root + '  (클릭 / ⌘O: 폴더 열기)';
-  addRecent(info.root); await loadFavs(); await loadSettings(); if (state.filter) await fetchFilterDirs(); drawFilterBtn(); watchIndex();
+  addRecent(info.root); await loadFavs(); await loadSettings(); refreshGit(); if (state.filter) await fetchFilterDirs(); drawFilterBtn(); watchIndex();
   state.expanded = new Set(store.get(wsKey('expanded'), []));
   for (const s of store.get(wsKey('tabs'), [])) {
     if (kindOf(s.path) === 'image') { state.tabs.push({ path: s.path, content: '', orig: '', mtime: 0, kind: 'image', mode: 'view' }); continue; }

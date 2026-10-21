@@ -617,7 +617,8 @@ async function api(req, res, url, root) {
       await Promise.all(Array.from({ length: Math.min(6, list.length) }, async () => {
         while (next < list.length) {
           const abs = list[next++], base = { abs, rel: path.relative(root, abs), name: path.basename(abs) };
-          try { const st = await gitStatus(abs); out.push({ ...base, ...st, hasRemote: !!(await git(abs, ['remote'])).trim() }); } catch (e) { out.push({ ...base, error: gitMsg(e), files: [] }); }
+          try { const st = await gitStatus(abs); st.files.forEach((f) => { const rp = path.relative(root, path.join(abs, f.path)); f.rp = rp.startsWith('..') || path.isAbsolute(rp) ? null : rp; });   // 작업 폴더 기준 경로 (트리 표시용)
+          out.push({ ...base, ...st, hasRemote: !!(await git(abs, ['remote'])).trim() }); } catch (e) { out.push({ ...base, error: gitMsg(e), files: [] }); }
         }
       }));
       out.sort((a, b) => a.abs.localeCompare(b.abs));
