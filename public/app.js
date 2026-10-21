@@ -820,10 +820,36 @@ let updateInfo = null;
 async function checkUpdates(force) {
   try { updateInfo = await api('GET', 'update', force ? { force: 1 } : {}); } catch { return null; }
   const z = $('#st-update'); z.hidden = !updateInfo.available;
-  if (updateInfo.available) { z.textContent = `⬆ v${updateInfo.latest}`; z.title = `새 버전 v${updateInfo.latest} 사용 가능 (현재 v${updateInfo.current}) — 클릭`; }
+  if (updateInfo.available) {
+    z.textContent = updateInfo.kind === 'git' ? `⬆ 업데이트 ${updateInfo.behind}` : `⬆ v${updateInfo.latest}`;
+    z.title = updateInfo.kind === 'git' ? `main 에 새 커밋 ${updateInfo.behind}개 — 클릭해서 업데이트` : `새 버전 v${updateInfo.latest} 사용 가능 (현재 v${updateInfo.current}) — 클릭해서 업데이트`;
+  }
   return updateInfo;
 }
 $('#st-update').onclick = () => openSettings();
+const UPD_LABEL = { git: 'git pull', brew: 'Homebrew', app: '릴리스 zip 으로 앱 교체', deb: '.deb 수동 설치', unknown: '수동 설치' };
+async function applyUpdate(msg) { // 서버가 설치 방식에 맞게 업데이트하고(git pull / brew / zip 교체), 끝나면 앱을 다시 시작한다
+  const u = updateInfo; if (!u?.available) return;
+  if (state.tabs.some(dirty)) { alert('저장하지 않은 변경이 있는 탭이 있습니다. 저장한 뒤 다시 시도하세요.'); return; }
+  const target = u.kind === 'git' ? `main 의 새 커밋 ${u.behind}개` : `v${u.latest}`;
+  if (!confirm(`업데이트합니다 (${UPD_LABEL[u.kind] || u.kind}).\n현재 v${u.current} → ${target}\n\n완료되면 앱이 다시 시작됩니다. 계속할까요?`)) return;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const oldBuild = (await api('GET', 'info').catch(() => ({}))).build;
+  try { await api('POST', 'update/apply', {}, {}); } catch (e) { msg.textContent = '시작하지 못했습니다: ' + e.message; return; }
+  for (;;) { // 진행 상황
+    await sleep(800);
+    let j; try { j = await api('GET', 'update/status'); } catch { break; }   // 서버가 내려갔다 = 재시작 중
+    msg.textContent = j.log?.at(-1) || '진행 중…';
+    if (j.state === 'error') { msg.textContent = '실패: ' + j.error; return; }
+    if (j.state === 'manual') { msg.textContent = '이 설치 방식은 자동 업데이트를 지원하지 않습니다: ' + j.manual; return; }
+    if (j.state === 'done') { msg.textContent = '완료 — 다시 시작하는 중…'; break; }
+  }
+  for (let i = 0; i < 90; i++) { // 새 서버가 뜰 때까지 기다렸다가 새로고침 (앱 교체/brew 는 앱 자체가 다시 열린다)
+    await sleep(1000);
+    try { const d = await api('GET', 'info'); if (d.build !== oldBuild || (u.kind === 'git' && i >= 3)) { location.reload(); return; } } catch {}
+  }
+  msg.textContent = '완료 — 앱을 한 번 종료했다가 다시 열어 주세요.';
+}
 let settings = { ...SETTINGS_DEFAULT };
 async function loadSettings() {
   try { settings = { ...SETTINGS_DEFAULT, ...(await api('GET', 'settings')) }; } catch {}
@@ -856,17 +882,20 @@ function openSettings() {
     const cb = el('input', { type: 'checkbox', checked }); cb.onchange = () => onchange(cb.checked);
     return el('label', { className: 'st-row' }, cb, el('span', { className: 'st-l', textContent: label }), el('span', { className: 'st-s', textContent: sub || '' }));
   };
-  const verBox = () => { // 현재 버전 + 수동 확인
+  const mk0 = (txt, fn) => { const b = el('button', { textContent: txt }); b.onclick = fn; return b; };
+  const verBox = () => { // 현재 버전 + 수동 확인 + 업데이트
     const msg = el('span', { className: 'st-vmsg' });
+    const upd = mk0('지금 업데이트', () => applyUpdate(msg)); upd.classList.add('st-upd'); upd.hidden = true;
     const show = (u) => {
-      if (!u || u.latest == null) msg.textContent = '확인하지 못했습니다 (네트워크?)';
-      else if (u.available) msg.textContent = `새 버전 v${u.latest} — brew upgrade --cask shooting-star  또는 릴리스 페이지에서 받기`;
+      upd.hidden = !u?.available;
+      if (!u || (u.latest == null && u.behind == null)) msg.textContent = '확인하지 못했습니다 (네트워크?)';
+      else if (u.available) msg.textContent = (u.kind === 'git' ? `main 에 새 커밋 ${u.behind}개` : `새 버전 v${u.latest}`) + ` — 업데이트 방식: ${UPD_LABEL[u.kind] || u.kind}` + (u.dirty ? ' (로컬 변경이 있어 자동 업데이트 불가)' : '');
       else msg.textContent = '최신 버전입니다';
     };
     if (updateInfo) show(updateInfo);
     const chk = el('button', { textContent: '업데이트 확인' }); chk.onclick = async () => { msg.textContent = '확인 중…'; show(await checkUpdates(true)); };
     const rel = el('button', { textContent: '릴리스 페이지' }); rel.onclick = () => window.open(updateInfo?.url || 'https://github.com/AndersonJo/Shooting-Star/releases', '_blank');
-    return el('div', { className: 'st-ver' }, el('span', { textContent: `shooting-star v${state.version || '?'}` }), chk, rel, msg);
+    return el('div', { className: 'st-ver' }, el('span', { textContent: `shooting-star v${state.version || '?'}` }), chk, rel, upd, msg);
   };
   const apply = () => { saveSettings(); updateScope(); refreshFilter(); if (ff.built && !$('#find').hidden) runFind(); };
   const draw = () => {

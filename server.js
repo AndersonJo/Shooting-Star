@@ -43,13 +43,38 @@ const cmpVer = (a, b) => { const x = String(a).split('.').map(Number), y = Strin
 // 서버 코드의 지문: 버전은 그대로여도 코드가 바뀌면(git pull 등) 이전 코드로 떠 있는 서버를 알아볼 수 있다
 const BUILD = crypto.createHash('sha1').update(fs.readFileSync(__filename)).digest('hex').slice(0, 12);
 let updateCache = { t: 0, data: null };
+const API_BASE = process.env.SS_GITHUB_API || 'https://api.github.com';
+// 설치 방식: git(소스) / brew(cask) / app(zip 으로 설치한 앱) / deb / unknown — 업데이트 방법이 다르다
+function installKind() {
+  if (process.env.SS_INSTALL_KIND) return { kind: process.env.SS_INSTALL_KIND, app: process.env.SS_APP_PATH || null, dir: __dirname };
+  const m = /^(.*\.app)\/Contents\/Resources\/app$/.exec(__dirname);
+  if (m) return { kind: ['/opt/homebrew/Caskroom/shooting-star', '/usr/local/Caskroom/shooting-star'].some(fs.existsSync) ? 'brew' : 'app', app: m[1] };
+  if (__dirname.startsWith('/opt/shooting-star')) return { kind: 'deb' };
+  if (fs.existsSync(path.join(__dirname, '.git'))) return { kind: 'git', dir: __dirname };
+  return { kind: 'unknown' };
+}
+const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
+async function gitStatus(dir) { // 소스 설치: 원격보다 몇 커밋 뒤처졌는지
+  try {
+    await execP('git', ['-C', dir, 'fetch', '--quiet'], { env: GIT_ENV, timeout: 30000 });
+    const up = (await execP('git', ['-C', dir, 'rev-parse', '--abbrev-ref', '@{u}'], { env: GIT_ENV })).trim();
+    const behind = Number((await execP('git', ['-C', dir, 'rev-list', '--count', `HEAD..${up}`], { env: GIT_ENV })).trim());
+    const dirty = (await execP('git', ['-C', dir, 'status', '--porcelain', '--untracked-files=no'], { env: GIT_ENV })).trim().length > 0;
+    return { behind, upstream: up, dirty };
+  } catch { return null; }
+}
 async function checkUpdate(force) {
   if (!force && updateCache.data && Date.now() - updateCache.t < 6 * 3600e3) return updateCache.data;
-  let data = { current: VERSION, latest: null, available: false, url: `https://github.com/${REPO}/releases` };
+  const ik = installKind();
+  let data = { current: VERSION, latest: null, available: false, url: `https://github.com/${REPO}/releases`, kind: ik.kind };
   try {
-    const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { 'User-Agent': 'shooting-star', Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(5000) });
+    const r = await fetch(`${API_BASE}/repos/${REPO}/releases/latest`, { headers: { 'User-Agent': 'shooting-star', Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(5000) });
     if (r.ok) { const j = await r.json(), latest = String(j.tag_name || '').replace(/^v/, ''); if (/^\d+\.\d+\.\d+/.test(latest)) data = { ...data, latest, available: cmpVer(latest, VERSION) > 0, url: j.html_url || data.url }; }
   } catch {}
+  if (ik.kind === 'git') { // 소스 설치는 릴리스가 아니라 main 의 새 커밋을 기준으로 한다
+    const g = await gitStatus(ik.dir);
+    if (g) data = { ...data, behind: g.behind, dirty: g.dirty, available: g.behind > 0 };
+  }
   updateCache = { t: Date.now(), data }; return data;
 }
 const MAX_SIZE = 5 * 1024 * 1024;
@@ -167,7 +192,7 @@ function imageSize(b) {
   return null;
 }
 async function readHead(abs, n = 262144) { const fh = await fsp.open(abs, 'r'); try { const b = Buffer.alloc(n); const { bytesRead } = await fh.read(b, 0, n, 0); return b.subarray(0, bytesRead); } finally { await fh.close(); } }
-const execP = (cmd, args) => new Promise((res, rej) => execFile(cmd, args, { timeout: 60000, maxBuffer: 1 << 20 }, (e, out) => (e ? rej(e) : res(String(out)))));
+const execP = (cmd, args, opts = {}) => new Promise((res, rej) => execFile(cmd, args, { timeout: 60000, maxBuffer: 1 << 20, ...opts }, (e, out, err) => (e ? rej(Object.assign(e, { stderr: String(err || '') })) : res(String(out)))));
 const RESIZER = (() => { // 축소본 생성 도구: macOS 는 sips(기본 탑재), Linux 는 있으면 vips/ImageMagick
   if (process.platform === 'darwin') return 'sips';
   for (const c of ['vipsthumbnail', 'magick', 'convert']) if (spawnSync('which', [c]).status === 0) return c;
@@ -223,6 +248,70 @@ function sendFile(req, res, abs, type, st, extra = {}) { // ETag 로 재검증(3
   if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
   res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, ...headers });
   fs.createReadStream(abs).on('error', () => res.destroy()).pipe(res);
+}
+
+// ───────── 업데이트 적용 ─────────
+let updateJob = null; // { state: running|done|error|manual, kind, log: [], error, manual }
+const findBrew = () => ['/opt/homebrew/bin/brew', '/usr/local/bin/brew', '/home/linuxbrew/.linuxbrew/bin/brew'].find((p) => fs.existsSync(p)) || null;
+function relaunchApp(app) { // 앱을 종료하고 새 버전으로 다시 연다. (서버는 새 앱이 시작될 때 코드가 다르면 스스로 교체된다)
+  if (process.env.SS_NO_RELAUNCH) return;
+  setTimeout(() => {
+    spawn('sh', ['-c', 'sleep 1; pkill -TERM -f "$1/Contents/MacOS/shooting-star"; sleep 1; open -a "$1"', 'sh', app], { detached: true, stdio: 'ignore' }).unref();
+  }, 800);
+}
+function restartServer() { // 새 코드로 서버 교체: 기본 모드의 ss 가 '코드가 다른 서버'를 알아보고 종료/재시작한다
+  if (process.env.SS_NO_RELAUNCH) return;
+  setTimeout(() => spawn(process.execPath, [__filename, '--no-open', '--port', String(PORT)], { detached: true, stdio: 'ignore', cwd: HOME }).unref(), 800);
+}
+async function downloadTo(url, file) {
+  const r = await fetch(url, { headers: { 'User-Agent': 'shooting-star' }, redirect: 'follow', signal: AbortSignal.timeout(300000) });
+  if (!r.ok) throw new Error(`다운로드 실패 (${r.status}): ${url}`);
+  await require('stream/promises').pipeline(require('stream').Readable.fromWeb(r.body), fs.createWriteStream(file));
+}
+async function doUpdate(job) {
+  const log = (m) => job.log.push(m);
+  const ik = installKind(); job.kind = ik.kind;
+  const info = await checkUpdate(true);
+  if (ik.kind === 'git') {
+    if (info.dirty) throw new Error('로컬에 커밋하지 않은 변경이 있어 자동 업데이트할 수 없습니다 (git stash 후 다시 시도).');
+    log('git pull --ff-only …');
+    const before = (await execP('git', ['-C', ik.dir, 'rev-parse', 'HEAD'], { env: GIT_ENV })).trim();
+    const out = await execP('git', ['-C', ik.dir, 'pull', '--ff-only'], { env: GIT_ENV, timeout: 120000 });
+    log(out.trim().split('\n').slice(-2).join(' / '));
+    const changed = (await execP('git', ['-C', ik.dir, 'diff', '--name-only', before, 'HEAD'], { env: GIT_ENV })).split('\n');
+    const app = nativeApp();
+    if (app && changed.some((f) => f.startsWith('macos/') || f === 'scripts/make-app.sh')) { log('네이티브 앱 다시 빌드 …'); await execP(path.join(ik.dir, 'scripts/make-app.sh'), [app, 'dev'], { timeout: 600000 }); job.relaunchApp = app; }
+    log('서버를 새 코드로 재시작합니다'); job.restart = true;
+  } else if (ik.kind === 'brew') {
+    const brew = findBrew(); if (!brew) throw new Error('brew 를 찾을 수 없습니다.');
+    log('brew upgrade --cask shooting-star … (1~2분 걸릴 수 있습니다)');
+    const out = await execP(brew, ['upgrade', '--cask', 'shooting-star'], { timeout: 900000, env: { ...process.env, PATH: `${path.dirname(brew)}:${process.env.PATH || '/usr/bin:/bin'}` } });
+    log(out.trim().split('\n').slice(-2).join(' / ')); job.relaunchApp = ik.app || '/Applications/shooting-star.app';
+  } else if (ik.kind === 'app') {
+    const rel = await (await fetch(`${API_BASE}/repos/${REPO}/releases/latest`, { headers: { 'User-Agent': 'shooting-star' }, signal: AbortSignal.timeout(10000) })).json();
+    const zipA = (rel.assets || []).find((a) => /-macos\.zip$/.test(a.name)), shaA = (rel.assets || []).find((a) => zipA && a.name === zipA.name + '.sha256');
+    if (!zipA || !shaA) throw new Error('릴리스에서 macOS 앱을 찾지 못했습니다.');
+    const parent = path.dirname(ik.app), work = path.join(parent, `.shooting-star-update-${process.pid}`);
+    try { await fsp.mkdir(work, { recursive: true }); } catch { throw new Error(`${parent} 에 쓸 권한이 없습니다. 릴리스 페이지에서 직접 받아 주세요.`); }
+    try {
+      log(`${zipA.name} 다운로드 …`); const zip = path.join(work, zipA.name); await downloadTo(zipA.browser_download_url, zip);
+      const want = (await (await fetch(shaA.browser_download_url, { headers: { 'User-Agent': 'shooting-star' } })).text()).trim().split(/\s+/)[0];
+      const got = crypto.createHash('sha256').update(await fsp.readFile(zip)).digest('hex');
+      if (want !== got) throw new Error('다운로드 파일의 sha256 이 일치하지 않습니다. 중단합니다.');
+      log('sha256 확인됨 · 압축 해제 …'); await execP('ditto', ['-x', '-k', zip, path.join(work, 'x')]);
+      const fresh = path.join(work, 'x', 'shooting-star.app');
+      if (!fs.existsSync(path.join(fresh, 'Contents/Info.plist'))) throw new Error('압축 파일 안에서 앱을 찾지 못했습니다.');
+      log('앱 교체 …'); const backup = `${ik.app}.old-${Date.now()}`;
+      await fsp.rename(ik.app, backup);
+      try { await fsp.rename(fresh, ik.app); } catch (e) { await fsp.rename(backup, ik.app); throw e; }   // 실패하면 원래 앱 복구
+      fsp.rm(backup, { recursive: true, force: true }).catch(() => {});
+      job.relaunchApp = ik.app;
+    } finally { fsp.rm(work, { recursive: true, force: true }).catch(() => {}); }
+  } else if (ik.kind === 'deb') {
+    job.manual = `sudo apt install ./shooting-star_${info.latest ?? 'X.Y.Z'}_all.deb   (${info.url} 에서 .deb 를 받은 뒤)`; job.state = 'manual'; return;
+  } else { job.manual = `${info.url} 에서 새 버전을 받아 설치하세요.`; job.state = 'manual'; return; }
+  job.state = 'done'; updateCache = { t: 0, data: null };
+  if (job.relaunchApp) relaunchApp(job.relaunchApp); else if (job.restart) restartServer();
 }
 
 // ───────── 파일 인덱스 ─────────
@@ -462,6 +551,14 @@ async function api(req, res, url, root) {
       if (!st.isFile() || !IMG_MIME[path.extname(abs).toLowerCase()]) throw httpError(415, 'not an image');
       return send(res, 200, await imageInfo(abs, st));
     }
+    case 'POST /api/update/apply': {
+      if (updateJob?.state === 'running') throw httpError(409, 'update already running');
+      const job = (updateJob = { state: 'running', kind: installKind().kind, log: [], error: null, manual: null });
+      doUpdate(job).catch((e) => { job.state = 'error'; job.error = (e.stderr || e.message || String(e)).trim().split('\n').slice(-3).join(' / '); });
+      return send(res, 200, { ok: true });
+    }
+    case 'GET /api/update/status':
+      return send(res, 200, updateJob || { state: 'idle' });
     case 'GET /api/update':
       return send(res, 200, await checkUpdate(url.searchParams.get('force') === '1'));
     case 'GET /api/info':
