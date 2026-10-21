@@ -367,6 +367,7 @@ function renderToolbar() {
   items.push(
     btn('복사', '전체 내용 복사', () => copy(t.content, '전체 복사됨')),
     btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) ? state.memoDir + '/' + t.path.slice(6) : e.shiftKey ? state.root + '/' + t.path : t.path, '경로 복사됨')),
+    ...(t.kind === 'md' && (t.mode === 'edit' || t.mode === 'split') ? [btn('🖼 이미지', '이미지 첨부 — 붙여넣기·끌어놓기도 됩니다 (문서 폴더의 images/ 에 저장)', pickImages)] : []),
     btn('✨ Prettify', '정리/포맷 (⌘⌥L)', prettify),
   );
   if (t.kind === 'json') items.push(btn('Minify', 'JSON 압축', minify));
@@ -462,6 +463,19 @@ function renderContent() {
       $('#st-pos').textContent = `Ln ${before.length}, Col ${before.at(-1).length + 1}`;
     };
     ta.onkeyup = ta.onclick = upd;
+    if (t.kind === 'md') { // 이미지 붙여넣기 / 끌어놓기
+      ta.addEventListener('paste', (e) => {
+        const cd = e.clipboardData, files = [...(cd?.files || [])].filter((f) => f.type.startsWith('image/'));
+        if (!files.length || cd.getData('text/plain')) return;   // 텍스트가 같이 있으면(엑셀 등) 평소대로 붙여넣기
+        e.preventDefault(); attachImages(files);
+      });
+      ta.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
+      ta.addEventListener('drop', (e) => {
+        const all = [...(e.dataTransfer?.files || [])]; if (!all.length) return;   // 선택한 텍스트를 끌어놓는 경우는 기본 동작
+        e.preventDefault(); const imgs = all.filter((f) => f.type.startsWith('image/'));
+        imgs.length ? attachImages(imgs) : toast('이미지 파일만 첨부할 수 있습니다');
+      });
+    }
     return el('div', { className: 'pane' }, el('div', { className: 'ed' }, fm, pre, ta));
   };
   if (t.mode === 'edit') panes.push(editor());
@@ -506,7 +520,10 @@ function renderMarkdown(t) {
   const base = dirOf(t.path);
   doc.querySelectorAll('img').forEach((img) => {
     const s = img.getAttribute('src');
-    if (s && !/^([a-z]+:|\/\/|data:)/i.test(s)) img.src = '/raw?root=' + encodeURIComponent(state.root) + '&path=' + encodeURIComponent(resolveRel(base, decodeURI(s)));
+    if (s && !/^([a-z]+:|\/\/|data:)/i.test(s)) {
+      const rp = resolveRel(base, decodeURI(s));
+      img.src = isMemo(t.path) ? '/raw?root=' + encodeURIComponent(state.memoDir) + '&path=' + encodeURIComponent(rp.replace(/^@memo\//, '')) : '/raw?root=' + encodeURIComponent(state.root) + '&path=' + encodeURIComponent(rp);   // 메모는 ~/.shooting-star/memos 기준
+    }
   });
   doc.querySelectorAll('a').forEach((a) => {
     const h = a.getAttribute('href') || '';
@@ -1077,7 +1094,8 @@ function openHit(i) {
 
 // ───────── 메모 (~/.shooting-star/memos/*.md) ─────────
 const isMemo = (p) => typeof p === 'string' && p.startsWith('@memo/');
-const memoTitle = (text) => ((text || '').split('\n').map((l) => l.trim()).find(Boolean) || '').replace(/^#+\s*/, '');
+const mdPlain = (t) => t.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim();   // 이미지/링크 문법은 제목에서 제외
+const memoTitle = (text) => mdPlain(((text || '').split('\n').map((l) => l.trim()).find(Boolean) || '').replace(/^#+\s*/, ''));
 const pad2 = (n) => String(n).padStart(2, '0');
 let memoTimer;
 const refreshMemos = () => { if (state.view !== 'memo') return; clearTimeout(memoTimer); memoTimer = setTimeout(loadMemos, 150); };
@@ -1400,6 +1418,40 @@ function imageViewer(t) {
     if (list.includes(t.path)) { v.list = list; v.idx = list.indexOf(t.path); hud(null); hud(v.info ? { info: v.info } : null); preload(v.idx); }
   })();
   return box;
+}
+
+// ───────── 마크다운 이미지 첨부 ─────────
+// 편집기에 이미지를 붙여넣거나 끌어놓으면 <문서 폴더>/images/ 에 저장하고, 커서 위치에 ![이름](images/파일) 을 넣는다.
+async function uploadImage(destRel, file) {
+  let root = state.root, p = destRel;
+  if (isMemo(p)) { root = state.memoDir; p = p.slice(6); }   // 메모는 ~/.shooting-star/memos/images/
+  const r = await fetch('/api/upload?path=' + encodeURIComponent(p), { method: 'POST', headers: { 'X-SS': '1', 'X-SS-Root': encodeURIComponent(root), 'Content-Type': file.type || 'application/octet-stream' }, body: file });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+const imgStamp = () => { const d = new Date(); return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`; };
+async function attachImages(files) {
+  const t = cur(), ta = $('textarea.editor'); if (!t || t.kind !== 'md' || !ta) return;
+  const dir = dirOf(t.path), parts = []; let reused = 0;
+  toast(`이미지 업로드 중… (${files.length}개)`);
+  for (const f of files) {
+    const ext = ((f.name.match(/\.([A-Za-z0-9]+)$/) || [])[1] || (f.type.split('/')[1] || 'png').replace('svg+xml', 'svg')).toLowerCase();
+    const stem = !f.name || /^image\.\w+$/i.test(f.name) ? `image-${imgStamp()}` : f.name.replace(/\.[^.]+$/, '');   // 붙여넣은 스크린샷은 시각으로 이름을 붙인다
+    try {
+      const j = await uploadImage(`${dir ? dir + '/' : ''}images/${stem}.${ext}`, f);
+      if (j.reused) reused++;
+      parts.push(`![${j.name.replace(/\.[^.]+$/, '')}](images/${j.name})`);
+    } catch (e) { toast('이미지 첨부 실패: ' + e.message); }
+  }
+  if (!parts.length) return;
+  ta.focus(); document.execCommand('insertText', false, parts.join('\n'));   // 커서 위치에 삽입 (⌘Z 로 되돌릴 수 있다)
+  toast(`이미지 ${parts.length}개 첨부됨 → ${dir ? dir + '/' : ''}images/` + (reused ? ` (같은 이미지 ${reused}개는 재사용)` : ''));
+}
+function pickImages() {
+  const inp = el('input', { type: 'file', accept: 'image/*', multiple: true });
+  inp.onchange = () => attachImages([...inp.files]);
+  inp.click();
 }
 
 // ───────── 폴더 열기 (⌘O) ─────────

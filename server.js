@@ -125,6 +125,24 @@ const readBody = (req) => new Promise((resolve, reject) => {
   req.on('error', reject);
 });
 
+const readRaw = (req, limit) => new Promise((resolve, reject) => { // 이미지 같은 바이너리 업로드용 (JSON 이 아님)
+  const chunks = []; let size = 0;
+  req.on('data', (c) => { size += c.length; if (size > limit) { reject(httpError(413, `too large (>${Math.round(limit / 1048576)}MB)`)); req.destroy(); return; } chunks.push(c); });
+  req.on('end', () => resolve(Buffer.concat(chunks)));
+  req.on('error', reject);
+});
+// 내용이 실제로 그 확장자의 이미지인지 확인 (확장자만 바꾼 임의 파일을 막는다)
+function sniffImage(buf, ext) {
+  const head = buf.subarray(0, 16);
+  if (ext === '.png') return head.readUInt32BE(0) === 0x89504e47;
+  if (ext === '.jpg' || ext === '.jpeg') return head[0] === 0xff && head[1] === 0xd8;
+  if (ext === '.gif') return head.toString('latin1', 0, 4) === 'GIF8';
+  if (ext === '.webp') return head.toString('latin1', 0, 4) === 'RIFF' && head.toString('latin1', 8, 12) === 'WEBP';
+  if (ext === '.bmp') return head.toString('latin1', 0, 2) === 'BM';
+  if (ext === '.avif') return head.toString('latin1', 4, 8) === 'ftyp';
+  if (ext === '.svg') return /<svg[\s>]/i.test(buf.subarray(0, 2048).toString('utf8'));
+  return false;
+}
 async function listDir(root, rel) {
   const abs = resolveSafe(root, rel);
   const entries = await fsp.readdir(abs, { withFileTypes: true });
@@ -597,7 +615,8 @@ async function api(req, res, url, root) {
         try { st = await fsp.stat(abs); text = (await fsp.readFile(abs, 'utf8')).slice(0, 200000); } catch { continue; }
         if (q && !(name + '\n' + text).toLowerCase().includes(q)) continue;
         const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-        out.push({ name, mtime: st.mtimeMs, title: (lines[0] || '').replace(/^#+\s*/, '') || '제목 없음', snippet: (lines[1] || '').replace(/^#+\s*/, '').slice(0, 90) });
+        const plain = (t) => t.replace(/^#+\s*/, '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim();   // 이미지/링크 문법 제외
+        out.push({ name, mtime: st.mtimeMs, title: plain(lines[0] || '') || (lines[0] ? '(이미지)' : '제목 없음'), snippet: plain(lines[1] || '').slice(0, 90) });
       }
       return send(res, 200, out.sort((a, b) => b.mtime - a.mtime));
     }
@@ -645,6 +664,27 @@ async function api(req, res, url, root) {
       else { await fsp.mkdir(path.dirname(abs), { recursive: true }); await fsp.writeFile(abs, '', { flag: 'wx' }); }
       markDirty(root);
       return send(res, 200, { ok: true });
+    }
+    case 'POST /api/upload': { // 마크다운에 붙여넣은/끌어놓은 이미지를 <문서 폴더>/images/ 에 저장
+      const rel = String(p).split('/').filter(Boolean);
+      if (rel.length < 2 || rel.at(-2) !== 'images') throw httpError(400, 'images 폴더에만 저장할 수 있습니다');
+      let name = rel.at(-1).normalize('NFC').replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^[.-]+/, '').slice(-100);
+      const ext = path.extname(name).toLowerCase();
+      if (!['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.svg', '.bmp'].includes(ext)) throw httpError(415, '지원하지 않는 이미지 형식');
+      const buf = await readRaw(req, 30 * 1048576);
+      if (!buf.length || !sniffImage(buf, ext)) throw httpError(415, '이미지 파일이 아닙니다');
+      const dirRel = rel.slice(0, -1).join('/'), dir = resolveSafe(root, dirRel);
+      await fsp.mkdir(dir, { recursive: true });
+      const stem = name.slice(0, name.length - ext.length) || 'image', sha = (b) => crypto.createHash('sha1').update(b).digest('hex');
+      for (let i = 0; i < 1000; i++) {
+        const cand = i ? `${stem}-${i}${ext}` : `${stem}${ext}`, abs = path.join(dir, cand);
+        try { await fsp.writeFile(abs, buf, { flag: 'wx' }); return send(res, 200, { path: `${dirRel}/${cand}`, name: cand, reused: false }); }
+        catch (e) {
+          if (e.code !== 'EEXIST') throw e;
+          if (sha(await fsp.readFile(abs)) === sha(buf)) return send(res, 200, { path: `${dirRel}/${cand}`, name: cand, reused: true });   // 같은 이미지를 다시 붙여넣으면 재사용
+        }
+      }
+      throw httpError(409, 'too many files with the same name');
     }
     case 'POST /api/rename': {
       const { to } = JSON.parse(await readBody(req));
