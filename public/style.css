@@ -473,7 +473,7 @@ table.csv tr:hover td { background: var(--accent-bg); }
 #activity .act.on::before { content: ""; position: absolute; left: -4px; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--accent); }
 
 /* 메모 패널 */
-#sidebar.memo > header, #sidebar.memo > #favs, #sidebar.memo > #tree-bar, #sidebar.memo > #tree { display: none; }
+#sidebar.memo > header, #sidebar.memo > #favs, #sidebar.memo > #tree-bar, #sidebar.memo > #tree, #sidebar.git > header, #sidebar.git > #favs, #sidebar.git > #tree-bar, #sidebar.git > #tree { display: none; }
 #memo-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #memo-view[hidden] { display: none; }
 .mv-head { display: flex; align-items: center; padding: 6px 10px; font-weight: 600; border-bottom: 1px solid var(--bd); }
@@ -813,3 +813,51 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 
 /* 파일 검색/폴더 선택 목록: 창이 낮아도 화면 밖으로 넘치지 않게 (입력창 + 위쪽 여백을 뺀 높이까지만) */
 #pal-list, #pk-list { max-height: min(50vh, calc(100vh - 12vh - 100px)); }
+
+/* ───── Git 보기 ───── */
+#git-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#git-view[hidden] { display: none; }
+#git-list { flex: 1; overflow: auto; padding-bottom: 8px; }
+.git-empty { padding: 18px 14px; color: var(--fg2); font-size: 13px; line-height: 1.5; }
+.gr { border-bottom: 1px solid var(--bd); }
+.gr-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; cursor: pointer; user-select: none; }
+.gr-head:hover { background: var(--hover); }
+.gr-head .gr-arrow { width: 10px; color: var(--fg2); font-size: 10px; }
+.gr-head .gr-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gr-head .gr-br { color: var(--fg2); font: 11.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.gr-head .gr-sp { flex: 1; }
+.gr-badge { flex: none; font: 600 11px var(--sans); padding: 0 6px; border-radius: 9px; background: var(--accent-bg); color: var(--accent); }
+.gr-sync { flex: none; font: 11px var(--mono); color: var(--fg2); }
+.gr.clean .gr-name { font-weight: 500; color: var(--fg2); }
+.gr-body { padding: 0 0 8px; }
+.gf { display: flex; align-items: center; gap: 6px; padding: 2px 10px 2px 14px; cursor: pointer; font-size: 12.5px; }
+.gf:hover { background: var(--hover); }
+.gf input { margin: 0; flex: none; }
+.gf .gf-s { flex: none; width: 14px; text-align: center; font: 600 11px var(--mono); }
+.gf .gf-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.gf .gf-n bdi { direction: ltr; unicode-bidi: plaintext; }
+.gf .gf-d { flex: none; color: var(--fg2); border: 0; padding: 0 4px; font: 11px var(--sans); visibility: hidden; }
+.gf:hover .gf-d { visibility: visible; }
+.gf .gf-d:hover { color: var(--accent); background: none; }
+.gf.s-M .gf-s { color: var(--num); } .gf.s-A .gf-s, .gf.s-U .gf-s { color: var(--ok); } .gf.s-D .gf-s { color: var(--err); text-decoration: none; } .gf.s-R .gf-s { color: var(--accent); }
+.gf.s-D .gf-n { text-decoration: line-through; color: var(--fg2); }
+.gr-sel { display: flex; gap: 10px; padding: 2px 14px 4px; font-size: 11.5px; color: var(--fg2); }
+.gr-sel a { cursor: pointer; } .gr-sel a:hover { color: var(--accent); }
+.gr-msg { display: block; width: calc(100% - 20px); margin: 4px 10px 6px; box-sizing: border-box; min-height: 54px; resize: vertical; background: var(--bg); color: var(--fg); border: 1px solid var(--bd); border-radius: 6px; padding: 6px 9px; font: 13px var(--sans); outline: 0; }
+.gr-msg:focus { border-color: var(--accent); }
+.gr-btns { display: flex; gap: 6px; padding: 0 10px; flex-wrap: wrap; }
+.gr-btns button { flex: 1; padding: 5px 8px; border-radius: 6px; font-size: 12.5px; white-space: nowrap; }
+.gr-btns button.pri { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+.gr-btns button:disabled { opacity: .45; cursor: default; }
+.gr-err { margin: 6px 10px 0; padding: 6px 8px; border-radius: 6px; background: var(--hover); color: var(--err); font: 11.5px var(--mono); white-space: pre-wrap; word-break: break-word; }
+.gr-note { margin: 4px 14px 0; font-size: 12px; color: var(--fg2); }
+#git-diff { position: fixed; z-index: 36; top: 6vh; left: 50%; transform: translateX(-50%); width: min(900px, 96vw); max-height: 88vh; display: flex; flex-direction: column; background: var(--bg3); border: 1px solid var(--bd); border-radius: 8px; box-shadow: 0 16px 48px var(--shadow); }
+#git-diff[hidden] { display: none; }
+#git-diff .gd-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--bd); font: 13px var(--mono); }
+#git-diff .gd-head span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#git-diff pre { margin: 0; padding: 8px 0; overflow: auto; font: 12px/1.5 var(--mono); }
+#git-diff pre div { padding: 0 14px; white-space: pre; }
+#git-diff .d-add { background: color-mix(in srgb, var(--ok) 16%, transparent); }
+#git-diff .d-del { background: color-mix(in srgb, var(--err) 16%, transparent); }
+#git-diff .d-hunk { color: var(--accent); }
+#git-diff .d-meta { color: var(--fg2); }

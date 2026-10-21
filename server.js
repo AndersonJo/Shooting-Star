@@ -506,6 +506,70 @@ async function searchFiles(root, o, signal) {
   return { ...out, files: out.results.length };
 }
 
+
+// ───────── Git: 작업 폴더 안의 repo 들과 변경된 파일 ─────────
+const GIT_VIEW_ENV = { ...GIT_ENV, GIT_OPTIONAL_LOCKS: '0' };   // status 가 index.lock 을 잡아 사용자의 git 명령과 부딪히지 않게
+const git = (repo, args, opts = {}) => execP('git', ['-c', 'core.quotepath=off', '-C', repo, ...args], { env: GIT_VIEW_ENV, maxBuffer: 16 << 20, ...opts });
+const gitMsg = (e) => ((e.stderr || '') + (e.stdout || '') || e.message).trim().split('\n').slice(-6).join('\n');
+
+// root 아래(깊이 5)의 repo 를 찾는다. root 가 어떤 repo 의 하위 폴더라면 그 repo 도 포함.
+async function findRepos(root) {
+  const repos = []; let visited = 0, level = [root];
+  for (let depth = 0; depth <= 5 && level.length && visited < 4000; depth++) {
+    const next = [];
+    for (const dir of level) {
+      visited++;
+      let ents; try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { continue; }
+      if (ents.some((e) => e.name === '.git')) repos.push(dir);
+      for (const e of ents) if (e.isDirectory() && !e.isSymbolicLink() && !e.name.startsWith('.') && !IGNORE.has(e.name) && !SEARCH_IGNORE.has(e.name)) next.push(path.join(dir, e.name));
+    }
+    level = next;
+  }
+  if (!repos.includes(root)) {
+    try { const top = fs.realpathSync((await git(root, ['rev-parse', '--show-toplevel'])).trim()); if (top && !repos.includes(top)) repos.unshift(top); } catch {}
+  }
+  return repos.sort();
+}
+async function gitRepoOf(root, p) {   // 요청의 repo(절대경로)가 이 워크스페이스의 repo 인지 확인
+  if (!p || !path.isAbsolute(p)) throw httpError(400, 'bad repo');
+  const abs = path.resolve(p);
+  if (!(await findRepos(root)).includes(abs)) throw httpError(403, 'not a repo of this workspace');
+  return abs;
+}
+// `git status --porcelain=v1 -b -z` 해석
+function parseStatus(out) {
+  const recs = out.split('\0'); const head = recs.shift() || '', files = [];
+  const m = /^## (?:No commits yet on |Initial commit on )?(.*)$/.exec(head); let branch = m ? m[1] : '', upstream = '', ahead = 0, behind = 0;
+  const um = /^(.*?)\.\.\.(\S+)(?: \[(.*)\])?$/.exec(branch);
+  if (um) {
+    branch = um[1]; upstream = um[2];
+    const a = /ahead (\d+)/.exec(um[3] || ''), b = /behind (\d+)/.exec(um[3] || '');
+    ahead = a ? +a[1] : 0; behind = b ? +b[1] : 0;
+  }
+  if (/^HEAD \(no branch\)/.test(branch)) branch = 'HEAD (detached)';
+  for (let i = 0; i < recs.length; i++) {
+    const r = recs[i]; if (r.length < 4) continue;
+    const x = r[0], y = r[1], f = { path: r.slice(3), x, y };
+    if (x === 'R' || x === 'C') f.from = recs[++i];
+    files.push(f);
+  }
+  return { branch, upstream, ahead, behind, files };
+}
+async function gitPush(repo) {
+  const st = await gitStatus(repo);
+  let args = ['push'];
+  if (!st.upstream) {   // 처음 push 하는 브랜치: origin(없으면 첫 remote)에 upstream 설정
+    const remotes = (await git(repo, ['remote'])).split('\n').filter(Boolean);
+    if (!remotes.length) throw httpError(400, '원격 저장소(remote)가 설정되어 있지 않습니다');
+    args = ['push', '-u', remotes.includes('origin') ? 'origin' : remotes[0], 'HEAD'];
+  }
+  try { await git(repo, args, { timeout: 120000 }); } catch (e) { throw httpError(500, gitMsg(e)); }
+}
+async function gitStatus(repo) {
+  const out = await git(repo, ['status', '--porcelain=v1', '-b', '-z', '-uall']);
+  return parseStatus(out);
+}
+
 async function api(req, res, url, root) {
   const p = url.searchParams.get('path') || '';
   const route = `${req.method} ${url.pathname}`;
@@ -546,6 +610,55 @@ async function api(req, res, url, root) {
       const hb = setInterval(() => { try { res.write(': hb\n\n'); } catch {} }, 25000);
       res.on('close', () => { clearInterval(hb); set.delete(res); });
       return;
+    }
+    case 'GET /api/git/repos': { // 작업 폴더 안의 모든 repo 와 변경된 파일
+      const list = await findRepos(root), out = [];
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(6, list.length) }, async () => {
+        while (next < list.length) {
+          const abs = list[next++], base = { abs, rel: path.relative(root, abs), name: path.basename(abs) };
+          try { const st = await gitStatus(abs); out.push({ ...base, ...st, hasRemote: !!(await git(abs, ['remote'])).trim() }); } catch (e) { out.push({ ...base, error: gitMsg(e), files: [] }); }
+        }
+      }));
+      out.sort((a, b) => a.abs.localeCompare(b.abs));
+      return send(res, 200, { root, repos: out });
+    }
+    case 'GET /api/git/diff': { // 변경 내용 (HEAD 대비). 새 파일은 전체를 추가로 표시
+      const repo = await gitRepoOf(root, url.searchParams.get('repo')), f = url.searchParams.get('file') || '';
+      resolveSafe(repo, f);
+      let diff = '';
+      try { diff = await git(repo, ['diff', 'HEAD', '--no-color', '--', f]); }
+      catch { try { diff = await git(repo, ['diff', '--no-color', '--', f]); } catch {} }   // 첫 커밋 전에는 HEAD 가 없다
+      if (!diff.trim()) {
+        const r = spawnSync('git', ['-C', repo, 'diff', '--no-color', '--no-index', '--', '/dev/null', f], { env: GIT_VIEW_ENV, maxBuffer: 4 << 20 });   // 추적되지 않는 새 파일 (변경이 있으면 종료 코드 1)
+        diff = String(r.stdout || '');
+      }
+      const MAX = 200000;
+      return send(res, 200, { diff: diff.length > MAX ? diff.slice(0, MAX) + '\n… (이하 생략)' : diff });
+    }
+    case 'POST /api/git/commit': { // 선택한 파일만 커밋 (선택 사항: 이어서 push)
+      const { repo: r, files, message, push } = JSON.parse(await readBody(req));
+      const repo = await gitRepoOf(root, r);
+      if (typeof message !== 'string' || !message.trim()) throw httpError(400, '커밋 메시지를 입력하세요');
+      if (!Array.isArray(files) || !files.length || !files.every((f) => typeof f === 'string' && f)) throw httpError(400, '커밋할 파일을 선택하세요');
+      for (const f of files) resolveSafe(repo, f);
+      try {
+        await git(repo, ['add', '-A', '--', ...files]);
+        await git(repo, ['commit', '-m', message.trim(), '--', ...files]);
+      } catch (e) { throw httpError(500, gitMsg(e)); }
+      let pushed = false, pushErr = '';
+      if (push) { try { await gitPush(repo); pushed = true; } catch (e) { pushErr = e.message; } }
+      return send(res, 200, { ok: true, pushed, pushErr });
+    }
+    case 'POST /api/git/push': {
+      const { repo: r } = JSON.parse(await readBody(req));
+      await gitPush(await gitRepoOf(root, r));
+      return send(res, 200, { ok: true });
+    }
+    case 'POST /api/git/pull': { // fast-forward 만 허용 (병합 커밋/충돌을 만들지 않는다)
+      const { repo: r } = JSON.parse(await readBody(req));
+      try { await git(await gitRepoOf(root, r), ['pull', '--ff-only'], { timeout: 120000 }); } catch (e) { throw httpError(500, gitMsg(e)); }
+      return send(res, 200, { ok: true });
     }
     case 'POST /api/reveal': { // Finder / 파일 관리자 / 터미널 / 기본 앱으로 열기
       const { action = 'reveal' } = JSON.parse((await readBody(req)) || '{}');

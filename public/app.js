@@ -121,7 +121,7 @@ const state = {
   active: null,
   expanded: new Set(),
   root: '',
-  view: store.get('view', 'files'),   // 사이드바 보기: files | memo
+  view: store.get('view', 'files'),   // 사이드바 보기: files | memo | git
   memoDir: '',
   filter: store.get('treeFilter', false),   // 트리 필터 on/off
   filterDirs: null,
@@ -298,11 +298,13 @@ function autosave(t) {
   clearTimeout(t._as);
   t._as = setTimeout(() => { if (dirty(t) && !t.conflict && !t.missing && syntaxOk(t)) save(t, true, true).then(refreshMemos); }, secs * 1000);
 }
-function flushAll() { // 지금 바로 저장 (대기 중인 타이머는 취소)
+function flushAll() { // 지금 바로 저장 (대기 중인 타이머는 취소). 모든 저장이 끝나면 resolve
+  const jobs = [];
   for (const t of state.tabs) {
     if (t.kind === 'image' || !dirty(t) || t.conflict || t.missing || !autoSaveSecs(t)) continue;
-    clearTimeout(t._as); save(t, true, true);
+    clearTimeout(t._as); jobs.push(save(t, true, true));
   }
+  return Promise.allSettled(jobs);
 }
 let savedFlash;
 function showSaved() {
@@ -389,7 +391,7 @@ function onFsEvent(d) { // d: { paths, all }
       if (!isMemo(t.path) && (!set || set.has(t.path))) syncTab(t);
     }
     if (isMemo(state.active)) syncTab(cur());
-    refreshMemos();
+    refreshMemos(); refreshGit();
   }, 150);
 }
 function connectEvents() {
@@ -402,7 +404,7 @@ function connectEvents() {
 let lastActivate = 0;
 function onActivate() {
   if (document.hidden || Date.now() - lastActivate < 400) return;
-  lastActivate = Date.now(); onFsEvent({ all: true, paths: [] });
+  lastActivate = Date.now(); onFsEvent({ all: true, paths: [] }); refreshGit();
 }
 window.addEventListener('focus', onActivate);
 document.addEventListener('visibilitychange', onActivate);
@@ -1255,13 +1257,132 @@ async function deleteMemo(name, title) {
 $('#btn-memo-new').onclick = newMemo;
 $('#memo-q').oninput = refreshMemos;
 
+
+// ───────── Git: 작업 폴더 안의 repo 별 변경 파일 → 커밋 / 푸시 ─────────
+const gitUi = { repos: [], collapsed: new Set(), off: new Map(), msg: new Map(), busy: new Set(), err: new Map(), loaded: false };   // off: repo → 체크 해제한 파일들
+let gitTimer, gitSeq = 0;
+const refreshGit = () => { if (state.view !== 'git') return; clearTimeout(gitTimer); gitTimer = setTimeout(loadGit, 400); };
+async function loadGit() {
+  const seq = ++gitSeq; let r;
+  try { r = await api('GET', 'git/repos'); } catch (e) { if (seq === gitSeq) $('#git-list').replaceChildren(el('div', { className: 'git-empty', textContent: 'Git 정보를 읽지 못했습니다: ' + e.message })); return; }
+  if (seq !== gitSeq) return;
+  gitUi.repos = r.repos; gitUi.loaded = true; drawGit();
+}
+const GIT_LABEL = { M: '수정', A: '추가', D: '삭제', R: '이름 변경', '?': '새 파일', U: '충돌' };
+function gitKind(f) {   // 한 글자로 요약: M A D R ? U
+  if (f.x === '?' ) return '?';
+  if (f.x === 'U' || f.y === 'U' || (f.x === 'A' && f.y === 'A') || (f.x === 'D' && f.y === 'D')) return 'U';
+  if (f.x === 'R' || f.x === 'C') return 'R';
+  if (f.x === 'D' || f.y === 'D') return 'D';
+  if (f.x === 'A') return 'A';
+  return 'M';
+}
+function drawGit() {
+  const box = $('#git-list'), repos = gitUi.repos;
+  if (!repos.length) { box.replaceChildren(el('div', { className: 'git-empty', textContent: '이 작업 폴더 안에서 git repo 를 찾지 못했습니다.' })); return; }
+  const keep = box.scrollTop, focusId = document.activeElement?.dataset?.repo;
+  box.replaceChildren(...repos.map(gitRepoView));
+  box.scrollTop = keep;
+  if (focusId) box.querySelector(`textarea[data-repo="${CSS.escape(focusId)}"]`)?.focus();
+}
+function gitRepoView(r) {
+  const n = r.files.length, key = r.abs, open = !gitUi.collapsed.has(key) && (n > 0 || r.ahead > 0 || r.error);
+  const head = el('div', { className: 'gr-head', title: r.abs },
+    el('span', { className: 'gr-arrow', textContent: n > 0 || r.ahead > 0 || r.error ? (open ? '▾' : '▸') : '' }),
+    el('span', { className: 'gr-name', textContent: r.rel === '' ? r.name + ' (작업 폴더)' : r.rel.startsWith('..') ? r.name : r.rel }),
+    el('span', { className: 'gr-br', textContent: r.branch || '' }),
+    el('span', { className: 'gr-sp' }),
+    r.ahead || r.behind ? el('span', { className: 'gr-sync', title: `원격보다 ${r.ahead} 앞섬 / ${r.behind} 뒤처짐`, textContent: (r.ahead ? '↑' + r.ahead : '') + (r.behind ? ' ↓' + r.behind : '') }) : '',
+    n ? el('span', { className: 'gr-badge', textContent: String(n) }) : '');
+  head.onclick = () => { if (gitUi.collapsed.has(key)) gitUi.collapsed.delete(key); else gitUi.collapsed.add(key); drawGit(); };
+  const wrap = el('div', { className: 'gr' + (n ? '' : ' clean') }, head);
+  if (!open) return wrap;
+  const body = el('div', { className: 'gr-body' }); wrap.append(body);
+  const busy = gitUi.busy.has(key), off = gitUi.off.get(key) || new Set(); gitUi.off.set(key, off);
+  if (r.error) body.append(el('div', { className: 'gr-err', textContent: r.error }));
+  const liveOff = new Set([...off].filter((p) => r.files.some((f) => f.path === p))), picked = r.files.filter((f) => !liveOff.has(f.path));
+  if (n) {
+    body.append(el('div', { className: 'gr-sel' },
+      Object.assign(el('a', { textContent: '모두 선택' }), { onclick: () => { off.clear(); drawGit(); } }),
+      Object.assign(el('a', { textContent: '모두 해제' }), { onclick: () => { r.files.forEach((f) => off.add(f.path)); drawGit(); } }),
+      el('span', { textContent: `${picked.length}/${n} 선택` })));
+    for (const f of r.files) {
+      const k = gitKind(f), cb = el('input', { type: 'checkbox', checked: !off.has(f.path) });
+      cb.onclick = (e) => e.stopPropagation();
+      cb.onchange = () => { if (cb.checked) off.delete(f.path); else off.add(f.path); drawGit(); };
+      const rel = r.rel && !r.rel.startsWith('..') ? r.rel + '/' + f.path : r.rel.startsWith('..') ? null : f.path;   // 작업 폴더 기준 경로 (밖이면 null)
+      const dbtn = el('button', { className: 'gf-d', textContent: '변경 보기', title: '변경 내용 (diff)' });
+      dbtn.onclick = (e) => { e.stopPropagation(); showGitDiff(r, f); };
+      const row = el('div', { className: 'gf s-' + k, title: `${GIT_LABEL[k]} — ${f.path}${f.from ? ` (← ${f.from})` : ''}${rel && k !== 'D' ? '\n클릭: 파일 열기' : ''}` },
+        cb, el('span', { className: 'gf-s', textContent: k }), el('span', { className: 'gf-n' }, el('bdi', { textContent: f.path })), dbtn);
+      row.onclick = () => { if (rel && k !== 'D') openFile(rel); else showGitDiff(r, f); };
+      body.append(row);
+    }
+    const ta = el('textarea', { className: 'gr-msg', placeholder: '커밋 메시지  (⌘/Ctrl+Enter: 커밋 & 푸시)', value: gitUi.msg.get(key) || '', spellcheck: false });
+    ta.dataset.repo = key; plainInput(ta);
+    ta.oninput = () => { gitUi.msg.set(key, ta.value); updBtns(); };
+    ta.onkeydown = (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !busy) { e.preventDefault(); gitCommit(r, true); } };
+    const mk = (txt, fn, cls = '') => Object.assign(el('button', { textContent: txt, className: cls }), { onclick: fn });
+    const bCommit = mk('커밋', () => gitCommit(r, false)), bBoth = mk('커밋 & 푸시', () => gitCommit(r, true), 'pri');
+    const updBtns = () => { const ok = !busy && picked.length > 0 && ta.value.trim().length > 0; bCommit.disabled = bBoth.disabled = !ok; };
+    updBtns();
+    body.append(ta, el('div', { className: 'gr-btns' }, bCommit, bBoth));
+  }
+  if (!n && (r.ahead > 0 || (!r.upstream && r.hasRemote && !r.error))) {   // 커밋은 끝났고 푸시만 남은 경우
+    body.append(el('div', { className: 'gr-note', textContent: r.ahead ? `푸시하지 않은 커밋 ${r.ahead}개` : '원격(upstream)이 아직 없는 브랜치' }),
+      el('div', { className: 'gr-btns', style: 'margin-top:6px' }, Object.assign(el('button', { textContent: busy ? '푸시 중…' : '푸시', className: 'pri', disabled: busy }), { onclick: () => gitRun(r, 'push') })));
+  }
+  if (r.behind > 0) body.append(el('div', { className: 'gr-btns', style: 'margin-top:6px' }, Object.assign(el('button', { textContent: `풀 (↓${r.behind}, fast-forward)`, disabled: busy }), { onclick: () => gitRun(r, 'pull') })));
+  if (gitUi.err.get(key)) body.append(el('div', { className: 'gr-err', textContent: gitUi.err.get(key) }));
+  return wrap;
+}
+async function gitRun(r, what) {   // push | pull
+  const key = r.abs; gitUi.busy.add(key); gitUi.err.delete(key); drawGit(); setStatus(`${r.name}: ${what === 'push' ? '푸시' : '풀'} 중…`);
+  try { await api('POST', 'git/' + what, {}, { repo: r.abs }); toast(`${r.name}: ${what === 'push' ? '푸시 완료' : '풀 완료'}`); setStatus(''); }
+  catch (e) { gitUi.err.set(key, e.message); setStatus(`${r.name}: ${what} 실패`, 'err'); }
+  gitUi.busy.delete(key); await loadGit();
+}
+async function gitCommit(r, push) {
+  const key = r.abs, off = gitUi.off.get(key) || new Set(), files = r.files.filter((f) => !off.has(f.path)).map((f) => f.path), message = (gitUi.msg.get(key) || '').trim();
+  if (!files.length || !message) return;
+  if (r.files.some((f) => gitKind(f) === 'U')) { if (!confirm('충돌 상태의 파일이 있습니다. 그래도 커밋할까요?')) return; }
+  await flushAll();   // 편집 중인 내용이 먼저 디스크에 저장되도록
+  gitUi.busy.add(key); gitUi.err.delete(key); drawGit(); setStatus(`${r.name}: ${push ? '커밋 & 푸시' : '커밋'} 중…`);
+  try {
+    const res = await api('POST', 'git/commit', {}, { repo: r.abs, files, message, push });
+    gitUi.msg.delete(key); gitUi.off.delete(key); setStatus('');
+    if (push && !res.pushed) { gitUi.err.set(key, '커밋은 완료, 푸시 실패:\n' + res.pushErr); setStatus(`${r.name}: 푸시 실패`, 'err'); }
+    else toast(push ? `${r.name}: 커밋 & 푸시 완료` : `${r.name}: 커밋 완료`);
+  } catch (e) { gitUi.err.set(key, e.message); setStatus(`${r.name}: 커밋 실패`, 'err'); }
+  gitUi.busy.delete(key); await loadGit();
+}
+async function showGitDiff(r, f) {
+  let box = $('#git-diff');
+  if (!box) {
+    box = el('div', { id: 'git-diff', hidden: true }); document.body.append(box);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !box.hidden) { e.preventDefault(); box.hidden = true; } }, true);
+  }
+  const close = Object.assign(el('button', { textContent: '닫기' }), { onclick: () => { box.hidden = true; } });
+  const pre = el('pre', {}, el('div', { className: 'd-meta', textContent: '불러오는 중…' }));
+  box.replaceChildren(el('div', { className: 'gd-head' }, el('span', { textContent: `${r.name} — ${f.path}` }), close), pre); box.hidden = false;
+  try {
+    const { diff } = await api('GET', 'git/diff', { repo: r.abs, file: f.path });
+    if (!diff.trim()) { pre.replaceChildren(el('div', { className: 'd-meta', textContent: '(표시할 텍스트 변경이 없습니다)' })); return; }
+    pre.replaceChildren(...diff.split('\n').map((l) => el('div', { className: l.startsWith('@@') ? 'd-hunk' : /^(\+\+\+|---|diff |index |new file|deleted file|similarity|rename|old mode|new mode)/.test(l) ? 'd-meta' : l[0] === '+' ? 'd-add' : l[0] === '-' ? 'd-del' : '', textContent: l || ' ' })));
+  } catch (e) { pre.replaceChildren(el('div', { className: 'd-meta', textContent: e.message })); }
+}
+$('#btn-git-refresh').onclick = loadGit;
+
 // ───────── 아이콘 바: 파일 / 메모 ─────────
 function setView(v, forceShow) {
   state.view = v; store.set('view', v);
   $('#sidebar').classList.toggle('memo', v === 'memo');
+  $('#sidebar').classList.toggle('git', v === 'git');
   $('#memo-view').hidden = v !== 'memo';
+  $('#git-view').hidden = v !== 'git';
   document.querySelectorAll('#activity .act').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
   if (forceShow) document.body.classList.remove('no-side');
+  if (v === 'git') loadGit();
   if (v === 'memo') { $('#memo-path').textContent = (state.memoDir || '').replace(state.home || '\u0000', '~'); loadMemos(); }
 }
 document.querySelectorAll('#activity .act').forEach((b) => {
@@ -1739,7 +1860,7 @@ function smartEditor(t) {
 
 // ───────── 하단 상태바의 전체 경로 (조각을 클릭하면 왼쪽 트리에서 그 위치로 이동) ─────────
 async function revealInTree(rel, isDir) { // 해당 항목까지 폴더를 펼치고 선택한 뒤 화면 가운데로 스크롤
-  if (document.body.classList.contains('no-side') || state.view === 'memo') setView('files', true);
+  if (document.body.classList.contains('no-side') || state.view === 'memo' || state.view === 'git') setView('files', true);
   const parts = rel ? rel.split('/') : []; let acc = '';
   for (let i = 0; i < parts.length - (isDir ? 0 : 1); i++) { acc = acc ? acc + '/' + parts[i] : parts[i]; state.expanded.add(acc); }
   state.selected = rel; persistTabs(); await renderTree();
@@ -1760,7 +1881,7 @@ function drawPath(t) {
     const seg = el('span', { className: 'seg', textContent: s.label, title: inside ? (last ? '트리에서 파일 위치 보기' : '트리에서 이 폴더 보기') : isRoot ? '프로젝트 루트 (트리 맨 위로)' : '이 폴더를 워크스페이스로 열기' });
     seg.onclick = () => {
       if (inside) revealInTree(s.abs.slice(state.root.length + 1), !last);   // 프로젝트 안: 트리에서 펼치고 선택
-      else if (isRoot) { if (document.body.classList.contains('no-side') || state.view === 'memo') setView('files', true); state.selected = ''; renderTree().then(() => { $('#tree').scrollTop = 0; }); }
+      else if (isRoot) { if (document.body.classList.contains('no-side') || state.view === 'memo' || state.view === 'git') setView('files', true); state.selected = ''; renderTree().then(() => { $('#tree').scrollTop = 0; }); }
       else go(s.abs);   // 프로젝트 루트보다 위: 그 폴더를 워크스페이스로 연다
     };
     inner.append(seg); if (i < view.length - 1) inner.append(el('span', { className: 'sep', textContent: '/' }));
