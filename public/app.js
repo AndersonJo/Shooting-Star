@@ -953,6 +953,18 @@ $('#pal-input').onkeydown = (e) => {
 };
 document.addEventListener('mousedown', (e) => { if (!$('#palette').hidden && !e.target.closest('#palette')) closePalette(); });
 
+// Home / End: 페이지 처음·끝이 아니라 현재 줄의 처음·끝으로 (macOS 의 textarea 기본 동작 대체. ⌘/Ctrl 조합은 기본 동작 유지)
+document.addEventListener('keydown', (e) => {
+  const ta = e.target;
+  if (ta?.tagName !== 'TEXTAREA' || (e.key !== 'Home' && e.key !== 'End') || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+  e.preventDefault();
+  const v = ta.value, from = ta.selectionDirection === 'backward' ? ta.selectionStart : ta.selectionEnd;   // 움직이는 쪽 끝
+  const anchor = ta.selectionDirection === 'backward' ? ta.selectionEnd : ta.selectionStart;
+  const pos = e.key === 'Home' ? v.lastIndexOf('\n', from - 1) + 1 : (v.indexOf('\n', from) < 0 ? v.length : v.indexOf('\n', from));
+  if (e.shiftKey) ta.setSelectionRange(Math.min(anchor, pos), Math.max(anchor, pos), pos < anchor ? 'backward' : 'forward');
+  else ta.setSelectionRange(pos, pos);
+  ta.blur(); ta.focus();   // 긴 줄에서 커서가 보이도록 가로 스크롤 (선택은 유지됨)
+}, true);
 // ───────── 트리에서 ⌘/Ctrl+C → 선택한 파일/폴더의 전체 경로 복사 (Shift 를 같이 누르면 프로젝트 기준 상대 경로) ─────────
 function selectedPath(relative) {
   const sel = state.selected || '';
