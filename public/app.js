@@ -673,6 +673,7 @@ function renderContent() {
     ta.onkeyup = ta.onclick = upd;
     if (t.kind === 'md') { // 이미지 붙여넣기 / 끌어놓기
       ta.addEventListener('paste', (e) => {
+        if (pasteLink(e, ta)) return;
         const cd = e.clipboardData, files = [...(cd?.files || [])].filter((f) => f.type.startsWith('image/'));
         if (!files.length || cd.getData('text/plain')) return;   // 텍스트가 같이 있으면(엑셀 등) 평소대로 붙여넣기
         e.preventDefault(); attachImages(files);
@@ -1848,6 +1849,19 @@ async function uploadImages(t, files) { // 이미지들을 <문서 폴더>/image
   if (parts.length) toast(`이미지 ${parts.length}개 첨부됨 → ${dir ? dir + '/' : ''}images/` + (reused ? ` (같은 이미지 ${reused}개는 재사용)` : ''));
   return { parts, reused };
 }
+// 텍스트를 선택한 채 URL 을 붙여넣으면 [선택한 글](URL) 로 바꿈 (처리했으면 true)
+function pasteLink(e, ta) {
+  const url = (e.clipboardData?.getData('text/plain') || '').trim();
+  if (!/^(https?:\/\/|mailto:)\S+$/i.test(url)) return false;
+  const a = ta.selectionStart, b = ta.selectionEnd, sel = ta.value.slice(a, b);
+  if (a === b || /\n/.test(sel) || /^\[.*\]\(.*\)$/.test(sel)) return false;
+  e.preventDefault();
+  const out = `[${sel}](${url})`;
+  if (!document.execCommand('insertText', false, out)) { // 실행취소를 유지하려 execCommand 우선
+    ta.setRangeText(out, a, b, 'end'); ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  return true;
+}
 async function attachImages(files, taOverride) {
   const t = cur(); if (!t || t.kind !== 'md') return;
   if (t.mode === 'smart' && !taOverride) return smartCtx?.attach(files);   // 스마트 편집: 편집 중이 아니면 이미지 블록으로 추가
@@ -1922,7 +1936,7 @@ function smartEditor(t) {
     ta.oninput = () => { fit(ta); live(); };
     ta.onkeydown = (e) => onKey(e, ta);
     ta.onblur = () => setTimeout(() => { if (editIdx >= 0 && !doc.contains(document.activeElement)) { commitEdit(); render(); } }, 0);
-    ta.addEventListener('paste', (e) => { const f = imgFiles(e); if (f.length) { e.preventDefault(); attachImages(f, ta); } });
+    ta.addEventListener('paste', (e) => { if (pasteLink(e, ta)) return; const f = imgFiles(e); if (f.length) { e.preventDefault(); attachImages(f, ta); } });
     ta.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
     ta.addEventListener('drop', (e) => { const all = [...(e.dataTransfer?.files || [])]; if (!all.length) return; e.preventDefault(); const im = all.filter((f) => f.type.startsWith('image/')); im.length ? attachImages(im, ta) : toast('이미지 파일만 첨부할 수 있습니다'); });
     return ta;
