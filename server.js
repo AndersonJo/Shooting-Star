@@ -16,7 +16,7 @@ const opt = (name, def) => {
 const flag = (n) => args.includes('--' + n) && args.splice(args.indexOf('--' + n), 1).length > 0;
 const PORT = Number(opt('port', 4000));
 const HOST = opt('host', '127.0.0.1');
-const FG = flag('fg'), STOP = flag('stop'), STATUS = flag('status'), LAST = flag('last'), NO_OPEN = flag('no-open');
+const FG = flag('fg'), STOP = flag('stop'), STATUS = flag('status'), DOCTOR = flag('doctor'), LAST = flag('last'), NO_OPEN = flag('no-open');
 const HOME = os.homedir();
 const DEFAULT_ROOT = fs.realpathSync(path.resolve((args[0] || process.cwd()).replace(/^~(?=$|\/)/, HOME)));
 const PUBLIC = path.join(__dirname, 'public');
@@ -336,7 +336,7 @@ async function api(req, res, url, root) {
       return send(res, 200, await checkUpdate(url.searchParams.get('force') === '1'));
     case 'GET /api/info':
       getIndex(root); // 워크스페이스를 열면 인덱싱 시작
-      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir(), version: VERSION });
+      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir(), version: VERSION, dir: __dirname, pid: process.pid });
     case 'GET /api/browse': { // 폴더 선택기: 절대경로의 하위 폴더 목록
       const dir = fs.realpathSync(path.resolve((p || defaultWorkspace()).replace(/^~(?=$|\/)/, HOME)));
       const list = (await fsp.readdir(dir, { withFileTypes: true }))
@@ -444,7 +444,9 @@ async function serveStatic(res, pathname) {
   try {
     const data = await fsp.readFile(abs);
     send(res, 200, data, MIME[path.extname(abs)] || 'application/octet-stream');
-  } catch { send(res, 404, 'not found', 'text/plain'); }
+  } catch {
+    send(res, 404, `shooting-star: 파일을 찾을 수 없습니다: ${pathname}\n\n서버 설치 위치: ${__dirname}\npublic 폴더: ${PUBLIC} (${fs.existsSync(path.join(PUBLIC, 'index.html')) ? 'index.html 있음' : 'index.html 없음 — 설치 폴더가 삭제/이동되었을 수 있습니다'})\n서버 버전: v${VERSION}\n\n해결: 터미널에서 \`ss --stop\` 후 앱을 다시 여세요. 진단: \`ss --doctor\``, 'text/plain; charset=utf-8');
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -485,13 +487,18 @@ const appUrl = () => {
   return `${baseOf(ACTIVE_PORT)}/?root=${encodeURIComponent(last || DEFAULT_ROOT)}`;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function runningAt(port) { // 그 포트에 '우리' 서버가 떠 있는지 (다른 프로그램이면 false)
-  try { return (await (await fetch(`${baseOf(port)}/api/info`, { signal: AbortSignal.timeout(1500) })).json()).app === 'shooting-star'; } catch { return false; }
+async function infoAt(port) { // 그 포트에 '우리' 서버가 있으면 /api/info, 아니면(다른 프로그램/없음) null
+  try { const j = await (await fetch(`${baseOf(port)}/api/info`, { signal: AbortSignal.timeout(1500) })).json(); return j.app === 'shooting-star' ? j : null; } catch { return null; }
 }
-async function findServer() {
+const runningAt = async (port) => !!(await infoAt(port));
+async function findServer() { // { port, info } | null
   const st = readState();
-  if (st && (await runningAt(st.port))) return st.port;
-  return (await runningAt(PORT)) ? PORT : null;
+  for (const p of [...new Set([st?.port, PORT].filter(Boolean))]) { const info = await infoAt(p); if (info) return { port: p, info }; }
+  return null;
+}
+async function quitAt(port) {
+  try { await fetch(`${baseOf(port)}/api/quit`, { method: 'POST', headers: { 'X-SS': '1' }, signal: AbortSignal.timeout(2000) }); } catch {}
+  for (let i = 0; i < 30 && (await runningAt(port)); i++) await sleep(100);
 }
 // Chromium 계열이 있으면 주소창 없는 독립 창(--app)으로, 없으면 기본 브라우저로 연다
 function nativeApp() { // install.sh 가 만든 네이티브 macOS 앱 (shooting-star.app)
@@ -543,21 +550,45 @@ function listenAuto(port, left = 20) { // 사용 중인 포트는 건너뛰고 �
 process.on('exit', () => { const st = readState(); if (st && st.pid === process.pid) try { fs.unlinkSync(STATE_FILE); } catch {} });
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => process.exit(0));
 
-async function main() {
-  if (STOP || STATUS) {
-    const port = await findServer();
-    if (STATUS) {
-      if (!port) { console.log('실행 중이 아닙니다'); const l = (() => { try { return fs.readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(-5).join('\n'); } catch { return ''; } })(); if (l) console.log('--- 최근 로그 (' + LOG_FILE + ')\n' + l); return; }
-      const st = readState() || {};
-      console.log(`실행 중: ${baseOf(port)}  (pid ${st.pid ?? '?'}, v${st.version ?? '?'})`); return;
+function doctor() { // 설치/실행 상태 진단 (문제 신고 시 이 출력을 붙여 주세요)
+  const line = (k, v) => console.log(k.padEnd(18) + v);
+  console.log(`shooting-star doctor  (${new Date().toISOString()})`);
+  line('버전', `v${VERSION}`); line('node', `${process.version}  ${process.execPath}`);
+  line('플랫폼', `${process.platform} ${process.arch} ${os.release()}`);
+  line('서버 위치', __dirname);
+  line('public/index.html', fs.existsSync(path.join(PUBLIC, 'index.html')) ? '있음' : '없음  ← 설치 폴더가 삭제/이동되었을 수 있음');
+  line('상태 파일', fs.existsSync(STATE_FILE) ? JSON.stringify(readState()) : '없음');
+  return (async () => {
+    for (let p = PORT; p <= PORT + 5; p++) {
+      const info = await infoAt(p); let who = '';
+      if (!info) { const r = spawnSync('lsof', ['-nP', `-iTCP:${p}`, '-sTCP:LISTEN']); who = (r.stdout || '').toString().trim().split('\n')[1] || ''; }
+      line(`포트 ${p}`, info ? `shooting-star v${info.version ?? '?'} (pid ${info.pid ?? '?'}, 위치 ${info.dir ?? '알 수 없음(구버전)'})` : who ? `다른 프로그램: ${who.replace(/\s+/g, ' ').slice(0, 70)}` : '비어 있음');
     }
-    if (!port) return console.log('실행 중이 아닙니다');
-    try { await fetch(`${baseOf(port)}/api/quit`, { method: 'POST', headers: { 'X-SS': '1' } }); console.log('stopped'); } catch { console.log('stopped'); }
+    try { const t = fs.readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(-8).join('\n'); if (t) console.log(`\n--- 최근 로그 (${LOG_FILE})\n${t}`); } catch {}
+  })();
+}
+
+async function main() {
+  if (DOCTOR) return doctor();
+  if (STOP || STATUS) {
+    const found = await findServer();
+    if (STATUS) {
+      if (!found) { console.log('실행 중이 아닙니다'); const l = (() => { try { return fs.readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(-5).join('\n'); } catch { return ''; } })(); if (l) console.log('--- 최근 로그 (' + LOG_FILE + ')\n' + l); return; }
+      console.log(`실행 중: ${baseOf(found.port)}  (pid ${found.info.pid ?? '?'}, v${found.info.version ?? '?'}, 위치 ${found.info.dir ?? '알 수 없음'})`); return;
+    }
+    if (!found) return console.log('실행 중이 아닙니다');
+    await quitAt(found.port); console.log('stopped');
     return;
   }
   if (FG) return listenAuto(PORT);   // 포그라운드 서버
   // 기본: 백그라운드로 띄우고(이미 있으면 재사용) 이 폴더를 창으로 연다 — `code .` 처럼
-  let port = await findServer();
+  let found = await findServer();
+  if (found && (found.info.dir !== __dirname || found.info.version !== VERSION)) {
+    // 다른 설치 위치/버전의 서버가 떠 있으면(업데이트 후 남은 프로세스, 지워진 폴더 등) 재사용하지 않고 재시작한다
+    console.log(`다른 ${found.info.dir !== __dirname ? '위치' : '버전'}의 서버(v${found.info.version ?? '?'}, ${found.info.dir ?? '위치 불명'})가 실행 중이라 재시작합니다`);
+    await quitAt(found.port); found = null;
+  }
+  let port = found?.port ?? null;
   if (!port) {
     const before = readState()?.pid;
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
@@ -569,7 +600,7 @@ async function main() {
       const st = readState();
       if (st && st.pid !== before && (await runningAt(st.port))) port = st.port;
     }
-    if (!port) { console.error(`서버를 시작하지 못했습니다. 로그: ${LOG_FILE}`); process.exit(1); }
+    if (!port) { console.error(`서버를 시작하지 못했습니다. 로그: ${LOG_FILE}  /  진단: ss --doctor`); process.exit(1); }
   }
   ACTIVE_PORT = port;
   if (!NO_OPEN) openWindow(appUrl());
