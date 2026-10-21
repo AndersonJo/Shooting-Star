@@ -224,6 +224,7 @@ $('#btn-collapse').onclick = () => { state.expanded.clear(); persistTabs(); rend
 
 // ───────── 파일 열기/저장 ─────────
 async function openFile(p, mode, at) {
+  flushAll();   // 다른 파일로 넘어가기 전에 마지막 편집까지 저장
   let t = tabOf(p);
   if (!t && kindOf(p) === 'image') { t = { path: p, content: '', orig: '', mtime: 0, kind: 'image', mode: 'view' }; state.tabs.push(t); }   // 이미지는 뷰어가 직접 불러온다
   if (!t) {
@@ -255,13 +256,17 @@ function taScrollTo(ta, lines, line, col) { // 해당 줄/열이 화면 가운�
     ta.scrollLeft = x > ta.clientWidth - 120 ? x - ta.clientWidth / 3 : 0;
   }
 }
-async function save(t = cur(), silent = false) {
+async function save(t = cur(), silent = false, auto = false) {
   if (!t || !dirty(t)) return;
   try {
     const sent = t.content; t._savedAt = Date.now();
     const r = await api('PUT', 'file', { path: t.path }, { content: sent, mtime: t.mtime });
-    t.orig = sent; t.mtime = r.mtime; t.conflict = false; t.missing = false; t._savedAt = Date.now(); if (!silent) toast('저장됨'); renderChrome();
+    t.orig = sent; t.mtime = r.mtime; t.conflict = false; t.missing = false; t._savedAt = Date.now(); if (!silent) toast('저장됨'); renderChrome(); if (auto && !isMemo(t.path)) showSaved();
   } catch (e) {
+    if (e.status === 409 && auto) { // 자동 저장은 외부에서 바뀐 파일을 덮어쓰지 않는다
+      if (!t.conflict) toast('⚠ 외부에서도 수정되어 자동 저장을 건너뜁니다 (⌘S 로 저장하면 덮어쓰기 확인)');
+      t.conflict = true; renderTabs(); return;
+    }
     if (e.status === 409 && confirm('디스크에서 파일이 변경되었습니다. 덮어쓸까요?')) {
       t._savedAt = Date.now();
       const r = await api('PUT', 'file', { path: t.path }, { content: t.content });
@@ -269,8 +274,50 @@ async function save(t = cur(), silent = false) {
     } else if (e.status !== 409) toast('저장 실패: ' + e.message);
   }
 }
-function closeTab(p) {
+// ───────── 자동 저장 ─────────
+// 입력을 멈추면 저장 (메모는 항상 0.8초, 그 외 파일은 설정). 창/탭을 벗어나거나 탭을 닫거나 앱을 닫을 때도 마지막 편집까지 저장한다.
+// 외부에서 먼저 수정된 파일은 덮어쓰지 않는다 (충돌 표시만). 문법 오류 중인 JSON/YAML 은 입력 중에는 건너뛰고, 창/탭을 벗어날 때 저장한다.
+const autoSaveSecs = (t) => (isMemo(t.path) ? 0.8 : settings.autoSave === 'off' ? 0 : Number(settings.autoSave) || 1);
+const syntaxOk = (t) => {
+  try {
+    if (t.kind === 'json') JSON.parse(stripJsonc(t.content)); else if (t.kind === 'yaml') jsyaml.loadAll(t.content);
+    else if (t.kind === 'jsonl') t.content.split('\n').forEach((l) => l.trim() && JSON.parse(l));
+    return true;
+  } catch { return false; }
+};
+function autosave(t) {
+  const secs = t && t.kind !== 'image' ? autoSaveSecs(t) : 0; if (!secs) return;
+  clearTimeout(t._as);
+  t._as = setTimeout(() => { if (dirty(t) && !t.conflict && !t.missing && syntaxOk(t)) save(t, true, true).then(refreshMemos); }, secs * 1000);
+}
+function flushAll() { // 지금 바로 저장 (대기 중인 타이머는 취소)
+  for (const t of state.tabs) {
+    if (t.kind === 'image' || !dirty(t) || t.conflict || t.missing || !autoSaveSecs(t)) continue;
+    clearTimeout(t._as); save(t, true, true);
+  }
+}
+let savedFlash;
+function showSaved() {
+  const z = $('#st-save'), d = new Date(), p2 = (n) => String(n).padStart(2, '0');
+  z.textContent = `✓ 자동 저장 ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`; z.hidden = false;
+  clearTimeout(savedFlash); savedFlash = setTimeout(() => { z.hidden = true; }, 3500);
+}
+function beaconSave(t) { // 페이지를 닫는 중에도 전달되도록 keepalive 로 저장 (용량이 작은 파일만)
+  let root = state.root, p = t.path; if (isMemo(p)) { root = state.memoDir; p = p.slice(6); }
+  fetch('/api/file?path=' + encodeURIComponent(p), { method: 'PUT', keepalive: true, headers: { 'X-SS': '1', 'X-SS-Root': encodeURIComponent(root), 'Content-Type': 'application/json' }, body: JSON.stringify({ content: t.content, mtime: t.mtime }) }).catch(() => {});
+}
+window.addEventListener('blur', flushAll);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
+window.addEventListener('beforeunload', (e) => {
+  const d = state.tabs.filter(dirty); if (!d.length) return;
+  let unsafe = false;
+  for (const t of d) { if (t.kind === 'image' || t.conflict || t.missing || !autoSaveSecs(t) || t.content.length > 40000) unsafe = true; else beaconSave(t); }
+  if (unsafe) e.preventDefault();   // 자동으로 저장하지 못하는 변경이 남아 있을 때만 확인창
+});
+
+function closeTab(p, saved) {
   const t = tabOf(p); if (!t) return;
+  if (dirty(t) && !saved && t.kind !== 'image' && !t.conflict && !t.missing && autoSaveSecs(t)) { clearTimeout(t._as); save(t, true, true).then(() => closeTab(p, true)); return; }   // 자동 저장이 켜져 있으면 저장하고 닫는다
   if (dirty(t) && !confirm(`${p}\n저장하지 않은 변경이 있습니다. 닫을까요?`)) return;
   const i = state.tabs.indexOf(t); state.tabs.splice(i, 1);
   if (isMemo(p) && !t.content.replace(/#/g, '').trim()) api('DELETE', 'file', { path: p }).then(refreshMemos).catch(() => {}); // 비어 있는 메모는 닫을 때 삭제
@@ -285,7 +332,6 @@ async function reload(t = cur()) {
   Object.assign(t, { content: f.content, orig: f.content, mtime: f.mtime }); renderAll();
 }
 // 창 포커스 시 외부 변경 감지
-window.addEventListener('beforeunload', (e) => { if (state.tabs.some(dirty)) e.preventDefault(); });
 
 // ───────── 외부 변경 동기화 ─────────
 // 다른 에디터/터미널/git 이 파일을 바꾸면 서버가 감시(fs.watch)해서 SSE 로 알려 준다.
@@ -354,7 +400,7 @@ function renderTabs() {
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.path); };
     const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : ''), title: t.path + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
       el('span', { textContent: isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.path.split('/').pop() }), x);
-    tab.onclick = () => { state.active = t.path; state.selected = t.path; persistTabs(); renderAll(); };
+    tab.onclick = () => { flushAll(); state.active = t.path; state.selected = t.path; persistTabs(); renderAll(); };
     tab.onauxclick = (e) => e.button === 1 && closeTab(t.path);
     return tab;
   }));
@@ -467,7 +513,7 @@ function renderContent() {
       t.content = ta.value;
       renderTabs(); renderToolbarDirtyOnly(); validate(); updatePreview(); paint();
       if (fb.open) { clearTimeout(fb.timer); fb.timer = setTimeout(() => runFileFind(false), 120); }
-      if (isMemo(t.path)) { clearTimeout(t._as); t._as = setTimeout(() => save(t, true).then(refreshMemos), 800); } // 메모는 입력을 멈추면 자동 저장
+      autosave(t);   // 입력을 멈추면 자동 저장 (설정)
     };
     paint();
     ta.onkeydown = (e) => {
@@ -848,7 +894,7 @@ function applyTheme(name) {
 }
 lightMQ.addEventListener?.('change', () => { if (store.get('theme', 'dark') === 'system') applyTheme('system'); });
 
-const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark', checkUpdates: true, imageFit: 'fill' };
+const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark', checkUpdates: true, imageFit: 'fill', autoSave: '1' };
 
 // ───────── 업데이트 확인 (서버가 GitHub Releases 의 최신 버전과 비교) ─────────
 let updateInfo = null;
@@ -959,6 +1005,15 @@ function openSettings() {
       r.onchange = () => { settings.imageFit = id; saveSettings(); imgv.cur?.refit(); };   // 열려 있는 이미지에도 바로 적용
       return el('label', { className: 'st-row' }, r, el('span', { className: 'st-l', textContent: label }), el('span', { className: 'st-s', textContent: sub }));
     }));
+    const autoOpts = el('div', { className: 'st-radios' }, ...[
+      ['1', '입력 멈추고 1초 뒤 저장 (기본)', '창이나 탭을 벗어날 때, 탭을 닫을 때도 저장합니다'],
+      ['3', '입력 멈추고 3초 뒤 저장', '조금 더 느긋하게 (파일 변경 감시 도구가 자주 반응하는 경우)'],
+      ['off', '끄기', '⌘/Ctrl+S 로만 저장합니다'],
+    ].map(([id, label, sub]) => {
+      const r = el('input', { type: 'radio', name: 'autosave', checked: (settings.autoSave || '1') === id });
+      r.onchange = () => { settings.autoSave = id; saveSettings(); if (id !== 'off') flushAll(); };
+      return el('label', { className: 'st-row' }, r, el('span', { className: 'st-l', textContent: label }), el('span', { className: 'st-s', textContent: sub }));
+    }));
     const root = el('input', { className: 'st-custom', placeholder: '~/projects', value: settings.defaultRoot || '', spellcheck: false });
     root.oninput = () => { settings.defaultRoot = root.value.trim(); clearTimeout(root._t); root._t = setTimeout(saveSettings, 400); };
     const custom = el('input', { className: 'st-custom', placeholder: '추가 확장자 (예: env, proto, tf)', value: settings.customExts, spellcheck: false });
@@ -970,6 +1025,7 @@ function openSettings() {
       el('div', { className: 'st-h', textContent: '설정' }),
       el('div', { className: 'st-sec', textContent: '테마' }), themeGrid,
       el('div', { className: 'st-sec', textContent: '이미지 보기 (⌘/Ctrl +/- 는 이미지 확대/축소)' }), imgFit,
+      el('div', { className: 'st-sec', textContent: '자동 저장 (외부에서 수정된 파일은 덮어쓰지 않습니다 · 메모는 항상 자동 저장)' }), autoOpts,
       el('div', { className: 'st-sec', textContent: '기본 프로젝트 위치 (마지막으로 연 폴더가 없을 때 여기서 시작, 비우면 ~/projects)' }), root,
       el('div', { className: 'st-sec', textContent: '내용 검색 (⌘/Ctrl+Shift+F) 대상 파일 형식' }),
       all, el('div', { className: 'st-grid' }, ...cats), custom,
@@ -1496,7 +1552,7 @@ function smartEditor(t) {
     const tail = tailOf(blocks[i].raw), next = blocks[i + 1];
     return body + tail + (!tail && next && next.type !== 'space' ? '\n\n' : '');
   };
-  const afterChange = () => { renderTabs(); renderToolbarDirtyOnly(); validate(); if (isMemo(t.path)) { clearTimeout(t._as); t._as = setTimeout(() => save(t, true).then(refreshMemos), 800); } };
+  const afterChange = () => { renderTabs(); renderToolbarDirtyOnly(); validate(); autosave(t); };
   function changed(push = true) {
     t.content = toContent(src());
     if (push) { const s = src(); if (hist[hpos] !== s) { hist.length = hpos + 1; hist.push(s); hpos++; if (hist.length > 200) { hist.shift(); hpos--; } } }

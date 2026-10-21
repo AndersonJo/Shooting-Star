@@ -591,3 +591,5 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 .sb-ta.quote { color: var(--fg2); }
 .sb-tail { color: var(--fg2); font-size: 12.5px; padding: 10px 0; cursor: text; opacity: 0; transition: opacity .15s; }
 .smart-doc:hover .sb-tail, .smart-doc .sb-tail:only-child { opacity: .75; }
+
+#st-save { color: var(--ok); }
