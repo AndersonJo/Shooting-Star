@@ -570,3 +570,7 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 
 .iv-err { flex-direction: column; gap: 8px; text-align: center; padding: 0 24px; }
 .iv-err-sub { color: #aab0b8; font-size: 12.5px; }
+
+.st-radios { margin-bottom: 4px; }
+.st-radios .st-s { white-space: normal; }
+.st-row input[type=radio] { accent-color: var(--accent); transform: translateY(2px); }

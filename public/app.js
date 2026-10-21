@@ -813,7 +813,7 @@ function applyTheme(name) {
 }
 lightMQ.addEventListener?.('change', () => { if (store.get('theme', 'dark') === 'system') applyTheme('system'); });
 
-const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark', checkUpdates: true };
+const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark', checkUpdates: true, imageFit: 'fill' };
 
 // ───────── 업데이트 확인 (서버가 GitHub Releases 의 최신 버전과 비교) ─────────
 let updateInfo = null;
@@ -887,6 +887,14 @@ function openSettings() {
       card.onclick = () => { settings.theme = t.id; applyTheme(t.id); saveSettings(); draw(); };
       return card;
     }));
+    const imgFit = el('div', { className: 'st-radios' }, ...[
+      ['fill', '화면에 꽉 채우기 (기본)', '작은 이미지도 창 크기에 맞춰 확대해서 보여줍니다'],
+      ['actual', '원본 크기 우선', '이미지가 작으면 그대로, 창보다 크면 줄여서 보여줍니다'],
+    ].map(([id, label, sub]) => {
+      const r = el('input', { type: 'radio', name: 'imgfit', checked: (settings.imageFit || 'fill') === id });
+      r.onchange = () => { settings.imageFit = id; saveSettings(); imgv.cur?.refit(); };   // 열려 있는 이미지에도 바로 적용
+      return el('label', { className: 'st-row' }, r, el('span', { className: 'st-l', textContent: label }), el('span', { className: 'st-s', textContent: sub }));
+    }));
     const root = el('input', { className: 'st-custom', placeholder: '~/projects', value: settings.defaultRoot || '', spellcheck: false });
     root.oninput = () => { settings.defaultRoot = root.value.trim(); clearTimeout(root._t); root._t = setTimeout(saveSettings, 400); };
     const custom = el('input', { className: 'st-custom', placeholder: '추가 확장자 (예: env, proto, tf)', value: settings.customExts, spellcheck: false });
@@ -897,6 +905,7 @@ function openSettings() {
     box.replaceChildren(
       el('div', { className: 'st-h', textContent: '설정' }),
       el('div', { className: 'st-sec', textContent: '테마' }), themeGrid,
+      el('div', { className: 'st-sec', textContent: '이미지 보기 (⌘/Ctrl +/- 는 이미지 확대/축소)' }), imgFit,
       el('div', { className: 'st-sec', textContent: '기본 프로젝트 위치 (마지막으로 연 폴더가 없을 때 여기서 시작, 비우면 ~/projects)' }), root,
       el('div', { className: 'st-sec', textContent: '내용 검색 (⌘/Ctrl+Shift+F) 대상 파일 형식' }),
       all, el('div', { className: 'st-grid' }, ...cats), custom,
@@ -1251,16 +1260,16 @@ function imageViewer(t) {
   const spin = el('div', { className: 'iv-spin' }); spin.hidden = true;
   box.append(stage, mk('‹', '이전 (←)', () => go(-1), 'iv-nav l'), mk('›', '다음 (→)', () => go(1), 'iv-nav r'),
     el('div', { className: 'iv-hud' }, name, count, meta, zoomL),
-    el('div', { className: 'iv-tools' }, mk('－', '축소 (-)', () => zoomBy(0.8)), mk('＋', '확대 (+)', () => zoomBy(1.25)), mk('맞춤', '화면에 맞춤 (0)', () => cmd('fit')), mk('100%', '원본 크기 (1)', () => cmd('actual')), mk('⛶', '전체화면 (F)', () => cmd('fs'))), spin);
+    el('div', { className: 'iv-tools' }, mk('－', '축소 (- 또는 Ctrl -)', () => zoomBy(0.8)), mk('＋', '확대 (+ 또는 Ctrl +)', () => zoomBy(1.25)), mk('맞춤', '화면에 맞춤 (0)', () => cmd('fit')), mk('100%', '원본 크기 (1)', () => cmd('actual')), mk('⛶', '전체화면 (F)', () => cmd('fs'))), spin);
   const v = { path: t.path, list: [t.path], idx: 0, el: null, iw: 1, ih: 1, s: 1, tx: 0, ty: 0, fitMode: true, thumbMode: false, tok: 0, dir: 1, fs: false, info: null, noUpscale: true };
   const cw = () => stage.clientWidth || 1, ch = () => stage.clientHeight || 1;
-  const fitScale = () => Math.min(cw() / v.iw, ch() / v.ih, v.noUpscale ? 1 : Infinity);
+  const fitScale = () => Math.min(cw() / v.iw, ch() / v.ih, settings.imageFit === 'actual' ? 1 : Infinity);   // fill: 작은 이미지도 창에 맞춰 확대 / actual: 작으면 원본 크기 그대로
   function clampPan() { const w = v.iw * v.s, h = v.ih * v.s; v.tx = w <= cw() ? (cw() - w) / 2 : Math.min(0, Math.max(cw() - w, v.tx)); v.ty = h <= ch() ? (ch() - h) / 2 : Math.min(0, Math.max(ch() - h, v.ty)); }
-  function apply() { if (v.el) v.el.style.transform = `translate(${v.tx}px,${v.ty}px) scale(${v.s})`; zoomL.textContent = Math.round(v.s * 100) + '%'; stage.classList.toggle('pannable', !v.fitMode); }
+  function apply() { if (v.el) { v.el.style.transform = `translate(${v.tx}px,${v.ty}px) scale(${v.s})`; v.el.style.imageRendering = v.s > 3 ? 'pixelated' : 'auto'; /* 3배 넘게 확대하면 픽셀이 보이게 */ } zoomL.textContent = Math.round(v.s * 100) + '%'; stage.classList.toggle('pannable', !v.fitMode); }
   function setFit() { v.fitMode = true; v.s = fitScale(); v.tx = v.ty = 0; clampPan(); apply(); }
   function zoomAt(ns, cx, cy) {
     if (!v.el) return; const fs = fitScale();
-    ns = Math.min(32, Math.max(ns, fs)); const r = ns / v.s;
+    ns = Math.min(32, Math.max(ns, Math.min(fs, 1))); const r = ns / v.s;   // 하한: 맞춤 또는 100% 중 작은 값 (확대 맞춤 상태에서도 100% 로 내려갈 수 있다)
     v.tx = cx - (cx - v.tx) * r; v.ty = cy - (cy - v.ty) * r; v.s = ns; v.fitMode = Math.abs(ns - fs) < 1e-3;
     clampPan(); apply(); ensureFull();
   }
@@ -1297,7 +1306,7 @@ function imageViewer(t) {
     const info = e.info || {}, L = Math.max(info.w || 0, info.h || 0), tl = Math.max(e.img.naturalWidth, e.img.naturalHeight);
     const k = L && tl ? L / tl : 1;   // 축소본 → 원본 픽셀 배율 (긴 변 기준이라 EXIF 회전과 무관)
     v.iw = Math.max(1, Math.round(e.img.naturalWidth * k)); v.ih = Math.max(1, Math.round(e.img.naturalHeight * k));
-    v.thumbMode = k > 1.02; v.noUpscale = !/\.svg$/i.test(p); v.info = info;
+    v.thumbMode = k > 1.02; v.info = info;
     place(e.img); setFit(); hud(e);
     if (t.path !== p) { const wasActive = state.active === t.path; t.path = p; if (wasActive) state.active = p; state.selected = p; persistTabs(); renderChrome(); }   // 탭 이름/활성 탭/트리 선택도 따라간다
     preload(i);
@@ -1320,7 +1329,7 @@ function imageViewer(t) {
     }
   }
   // 입력: 휠(확대/가로 스와이프=이동), 드래그(이동), 더블클릭(맞춤↔원본), 핀치, 키보드
-  stage.addEventListener('wheel', (e) => {
+  box.addEventListener('wheel', (e) => {
     e.preventDefault(); if (!v.el) return;
     if (v.fitMode && !e.ctrlKey && Math.abs(e.deltaX) > Math.abs(e.deltaY) * 1.5) { const now = performance.now(); if (Math.abs(e.deltaX) > 24 && now - (v.swipeT || 0) > 450) { v.swipeT = now; go(e.deltaX > 0 ? 1 : -1); } return; }
     const r = stage.getBoundingClientRect(); zoomAt(v.s * Math.exp(-e.deltaY * (e.ctrlKey ? 0.012 : 0.0018)), e.clientX - r.left, e.clientY - r.top);
@@ -1330,7 +1339,7 @@ function imageViewer(t) {
   stage.addEventListener('pointermove', (e) => { if (!drag) return; v.tx = drag.tx + e.clientX - drag.x; v.ty = drag.ty + e.clientY - drag.y; clampPan(); apply(); });
   const endDrag = () => { drag = null; stage.classList.remove('grab'); };
   stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
-  stage.addEventListener('dblclick', (e) => { const r = stage.getBoundingClientRect(); if (v.fitMode) zoomAt(fitScale() < 1 ? 1 : 2, e.clientX - r.left, e.clientY - r.top); else setFit(); });
+  stage.addEventListener('dblclick', (e) => { const r = stage.getBoundingClientRect(); if (v.fitMode) zoomAt(Math.abs(fitScale() - 1) > 0.01 ? 1 : 2, e.clientX - r.left, e.clientY - r.top); else setFit(); });   // 맞춤 → 100% (이미 100% 면 2배), 다시 누르면 맞춤
   let gs = 1; // Safari/WKWebView 핀치
   stage.addEventListener('gesturestart', (e) => { e.preventDefault(); gs = v.s; });
   stage.addEventListener('gesturechange', (e) => { e.preventDefault(); const r = stage.getBoundingClientRect(); zoomAt(gs * e.scale, (e.clientX ?? r.width / 2 + r.left) - r.left, (e.clientY ?? r.height / 2 + r.top) - r.top); });
@@ -1354,7 +1363,7 @@ function imageViewer(t) {
   const onFsChange = () => setFs(document.fullscreenElement === box);
   document.addEventListener('keydown', onKey, true); document.addEventListener('fullscreenchange', onFsChange);
   window.onNativeFullscreen = (on) => { if (box.isConnected) setFs(!!on); };
-  imgv.cur = { cmd };
+  imgv.cur = { cmd, zoomBy, refit: () => { if (v.el) setFit(); } };
   (async () => { // 같은 폴더의 이미지 목록 (트리와 같은 정렬)
     show(0);
     const dir = dirOf(t.path); let ls = childrenCache.get(dir); if (!ls) { try { ls = await loadDir(dir); } catch { ls = []; } }
@@ -1496,12 +1505,17 @@ function setScale(v) {
 applyScale(); drawZoom(false);
 document.addEventListener('keydown', (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+  if (cur()?.kind === 'image') { // 이미지 탭: ⌘/Ctrl +/-/0 은 이미지 확대/축소/맞춤 (텍스트 글자 크기는 바뀌지 않는다)
+    const f = e.key === '+' || e.key === '=' ? 1.25 : e.key === '-' || e.key === '_' ? 0.8 : e.key === '0' ? 0 : null;
+    if (f !== null) { e.preventDefault(); e.stopPropagation(); f ? imgv.cur?.zoomBy(f) : imgv.cur?.cmd('fit'); }
+    return;
+  }
   if (e.key === '+' || e.key === '=') { e.preventDefault(); setScale(contentScale + 0.1); }
   else if (e.key === '-' || e.key === '_') { e.preventDefault(); setScale(contentScale - 0.1); }
   else if (e.key === '0') { e.preventDefault(); setScale(1); }
 }, true);
 document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀치 (브라우저는 ctrlKey 로 전달)
-  if (!(e.ctrlKey || e.metaKey)) return;
+  if (!(e.ctrlKey || e.metaKey) || cur()?.kind === 'image') return;   // 이미지 탭에서는 뷰어가 처리
   e.preventDefault(); setScale(contentScale + (e.deltaY < 0 ? 0.1 : -0.1));
 }, { passive: false });
 
