@@ -35,6 +35,20 @@ const MEMO_DIR = path.join(HOME, '.shooting-star', 'memos');
 const ensureMemoDir = () => { fs.mkdirSync(MEMO_DIR, { recursive: true }); return MEMO_DIR; };
 const LAST_FILE = path.join(path.dirname(FAV_FILE), 'last.json'); // 마지막으로 연 워크스페이스
 const readLast = () => { try { const r = JSON.parse(fs.readFileSync(LAST_FILE, 'utf8')).root; return isDirSafe(r) ? r : null; } catch { return null; } };
+// 버전 / 업데이트 확인 (GitHub Releases 의 최신 태그와 비교. 설정에서 끌 수 있음)
+const REPO = 'AndersonJo/Shooting-Star-';
+const VERSION = (() => { try { return require('./package.json').version; } catch { return '0.0.0'; } })();
+const cmpVer = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); return 0; };
+let updateCache = { t: 0, data: null };
+async function checkUpdate(force) {
+  if (!force && updateCache.data && Date.now() - updateCache.t < 6 * 3600e3) return updateCache.data;
+  let data = { current: VERSION, latest: null, available: false, url: `https://github.com/${REPO}/releases` };
+  try {
+    const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { 'User-Agent': 'shooting-star', Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(5000) });
+    if (r.ok) { const j = await r.json(), latest = String(j.tag_name || '').replace(/^v/, ''); if (/^\d+\.\d+\.\d+/.test(latest)) data = { ...data, latest, available: cmpVer(latest, VERSION) > 0, url: j.html_url || data.url }; }
+  } catch {}
+  updateCache = { t: Date.now(), data }; return data;
+}
 const MAX_SIZE = 5 * 1024 * 1024;
 const IGNORE = new Set(['.git', 'node_modules', '.DS_Store', '.venv', '__pycache__']);
 // 파일 검색에서만 제외하는 빌드/캐시 폴더 (트리에는 그대로 보임)
@@ -318,9 +332,11 @@ async function api(req, res, url, root) {
       fs.writeFileSync(FAV_FILE, JSON.stringify([...new Set(list)], null, 2) + '\n');
       return send(res, 200, { ok: true });
     }
+    case 'GET /api/update':
+      return send(res, 200, await checkUpdate(url.searchParams.get('force') === '1'));
     case 'GET /api/info':
       getIndex(root); // 워크스페이스를 열면 인덱싱 시작
-      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir() });
+      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir(), version: VERSION });
     case 'GET /api/browse': { // 폴더 선택기: 절대경로의 하위 폴더 목록
       const dir = fs.realpathSync(path.resolve((p || defaultWorkspace()).replace(/^~(?=$|\/)/, HOME)));
       const list = (await fsp.readdir(dir, { withFileTypes: true }))

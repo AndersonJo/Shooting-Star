@@ -4,8 +4,8 @@ import Cocoa
 import WebKit
 
 struct Config: Decodable {
-    let node: String
-    let server: String
+    let node: String?     // dev 설치: 고정 경로. 없으면 실행 시점에 찾는다.
+    let server: String?   // dev 설치: 저장소의 server.js. 없으면 앱 안에 번들된 서버를 쓴다.
     let port: Int
 }
 
@@ -57,11 +57,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         }
     }
 
+    // Node 실행 파일 찾기: 설정값 → Homebrew → 시스템 → nvm/volta/asdf. (GUI 앱은 셸 PATH 를 못 받는다)
+    func findNode() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var c: [String] = []
+        if let n = cfg.node { c.append(n) }
+        c += ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node", "\(home)/.volta/bin/node", "\(home)/.asdf/shims/node"]
+        let nvm = "\(home)/.nvm/versions/node"
+        if let vs = try? FileManager.default.contentsOfDirectory(atPath: nvm) {
+            for v in vs.sorted(by: { $0.compare($1, options: .numeric) == .orderedDescending }) { c.append("\(nvm)/\(v)/bin/node") }
+        }
+        return c.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+    var serverPath: String { cfg.server ?? Bundle.main.resourceURL!.appendingPathComponent("app/server.js").path }
+
+    func alertNodeMissing() {
+        let a = NSAlert()
+        a.messageText = "Node.js 가 필요합니다"
+        a.informativeText = "shooting-star 는 Node.js 18 이상으로 동작합니다.\n터미널에서 `brew install node` 를 실행하거나 nodejs.org 에서 설치한 뒤 다시 열어 주세요."
+        a.addButton(withTitle: "nodejs.org 열기"); a.addButton(withTitle: "닫기")
+        if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(URL(string: "https://nodejs.org/")!) }
+    }
+
     // 서버가 없으면 백그라운드로 띄운다 (server.js 의 기본 동작: 이미 있으면 재사용하고 바로 종료)
     func ensureServer() {
+        guard let node = findNode() else {
+            DispatchQueue.main.async { self.alertNodeMissing(); NSApp.terminate(nil) }
+            return
+        }
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: cfg.node)
-        p.arguments = [cfg.server, "--no-open", "--port", String(cfg.port)]
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = [serverPath, "--no-open", "--port", String(cfg.port)]
         p.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice

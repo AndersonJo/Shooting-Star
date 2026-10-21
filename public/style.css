@@ -518,3 +518,9 @@ table.csv tr:hover td { background: var(--accent-bg); }
 .pl .pnum { flex: none; width: 52px; padding-right: 12px; text-align: right; color: var(--fg2); user-select: none; }
 .pl .pt { flex: 1; min-width: 0; padding-right: 16px; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .pl.cur { background: var(--bar); }
+
+/* 업데이트 알림 */
+#st-update { cursor: pointer; padding: 0 6px; border-radius: 4px; color: var(--accent); background: var(--accent-bg); }
+.st-ver { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 2px 6px 6px; font-size: 12.5px; }
+.st-ver button { border-color: var(--bd); padding: 1px 8px; }
+.st-vmsg { flex-basis: 100%; color: var(--fg2); font-size: 12px; }

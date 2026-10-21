@@ -1,6 +1,21 @@
 # ★ shooting-star
 
-경량 로컬 문서 관리 도구 (markdown / yaml / csv / json). 의존성 없음, Node 18+ 만 필요 (mac / ubuntu).
+경량 로컬 문서 관리 도구 (markdown / yaml / csv / json).
+
+## 설치
+
+| | 설치 | 업데이트 |
+|---|---|---|
+| **macOS (Homebrew)** | `brew install --cask AndersonJo/tap/shooting-star` | `brew upgrade --cask shooting-star` |
+| **macOS (수동)** | [Releases](https://github.com/AndersonJo/Shooting-Star-/releases) 의 `shooting-star-*-macos.zip` → 압축 해제 후 `/Applications` 로 이동 | 새 zip 으로 교체 |
+| **Ubuntu / Debian** | Releases 의 `.deb` 더블클릭, 또는 `sudo apt install ./shooting-star_*_all.deb` | 새 `.deb` 설치 |
+| **개발 (소스)** | `git clone … && ./install.sh` | `git pull && ./install.sh` |
+
+- Node.js 18+ 필요 (Homebrew / apt 가 자동 설치). 설치 후 Spotlight/Raycast 에서 `shooting-star`, 터미널에서 `ss .`
+- 수동 설치한 mac 앱을 처음 열 때 "확인되지 않은 개발자" 경고가 뜨면 우클릭 → 열기 (또는 `xattr -dr com.apple.quarantine /Applications/shooting-star.app`)
+- 새 버전이 나오면 앱 상태바에 `⬆ vX.Y.Z` 로 알려 줍니다 (설정에서 끌 수 있음)
+
+## 사용
 
 ```bash
 ./install.sh          # 한 번만: `ss` 명령 설치

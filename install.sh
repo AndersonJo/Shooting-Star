@@ -29,46 +29,18 @@ esac
 # 2) 앱
 if [ "$(uname)" = Darwin ]; then
   APP="${APPDIR:-$HOME/Applications}/shooting-star.app"
-  PORT="${SS_PORT:-4000}"
-  rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-
-  # 아이콘
-  ICONSET="$(mktemp -d)/icon.iconset"; mkdir -p "$ICONSET"
-  for s in 16 32 128 256 512; do
-    sips -z $s $s "$DIR/assets/icon.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-    sips -z $((s*2)) $((s*2)) "$DIR/assets/icon.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
-  done
-  iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/icon.icns"
-
-  if command -v swiftc >/dev/null && swiftc -O -swift-version 5 "$DIR/macos/ShootingStar.swift" \
-        -o "$APP/Contents/MacOS/shooting-star" -framework Cocoa -framework WebKit 2>/dev/null; then
+  if command -v swiftc >/dev/null && "$DIR/scripts/make-app.sh" "$APP" dev >/dev/null 2>&1; then
     # 네이티브 셸 (WKWebView): Dock 에 자체 아이콘/이름으로 표시. Chrome 불필요.
-    printf '{"node":"%s","server":"%s","port":%s}\n' "$NODE" "$DIR/server.js" "$PORT" > "$APP/Contents/Resources/config.json"
-    cat > "$APP/Contents/Info.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleName</key><string>shooting-star</string>
-<key>CFBundleDisplayName</key><string>shooting-star</string>
-<key>CFBundleIdentifier</key><string>dev.shooting-star</string>
-<key>CFBundleExecutable</key><string>shooting-star</string>
-<key>CFBundleIconFile</key><string>icon</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>1</string>
-<key>LSMinimumSystemVersion</key><string>12.0</string>
-<key>NSHighResolutionCapable</key><true/>
-<key>NSPrincipalClass</key><string>NSApplication</string>
-<key>CFBundleURLTypes</key><array><dict>
-  <key>CFBundleURLName</key><string>shooting-star</string>
-  <key>CFBundleURLSchemes</key><array><string>shooting-star</string></array>
-</dict></array>
-</dict></plist>
-EOF
-    codesign --force --sign - "$APP" >/dev/null 2>&1 || true
-    touch "$APP"
     echo "✓ 앱(네이티브): $APP  (Spotlight / Raycast 에서 'shooting-star' 검색)"
   else
     # swiftc 가 없거나 빌드 실패: Chrome/기본 브라우저 창으로 여는 런처 앱
+    rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+    ICONSET="$(mktemp -d)/icon.iconset"; mkdir -p "$ICONSET"
+    for s in 16 32 128 256 512; do
+      sips -z $s $s "$DIR/assets/icon.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+      sips -z $((s*2)) $((s*2)) "$DIR/assets/icon.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/icon.icns"
     cat > "$APP/Contents/MacOS/shooting-star" <<EOF
 #!/bin/sh
 cd "\$HOME"
@@ -90,7 +62,7 @@ EOF
 </dict></plist>
 EOF
     touch "$APP"
-    echo "✓ 앱(브라우저 창 방식): $APP  — 네이티브 앱은 'xcode-select --install' 후 ./install.sh 를 다시 실행하세요"
+    echo "✓ 앱(브라우저 창 방식): $APP — 네이티브 앱은 'xcode-select --install' 후 ./install.sh 를 다시 실행하세요"
   fi
 else
   mkdir -p "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/512x512/apps"

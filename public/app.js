@@ -736,11 +736,22 @@ function applyTheme(name) {
 }
 lightMQ.addEventListener?.('change', () => { if (store.get('theme', 'dark') === 'system') applyTheme('system'); });
 
-const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark' };
+const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark', checkUpdates: true };
+
+// ───────── 업데이트 확인 (서버가 GitHub Releases 의 최신 버전과 비교) ─────────
+let updateInfo = null;
+async function checkUpdates(force) {
+  try { updateInfo = await api('GET', 'update', force ? { force: 1 } : {}); } catch { return null; }
+  const z = $('#st-update'); z.hidden = !updateInfo.available;
+  if (updateInfo.available) { z.textContent = `⬆ v${updateInfo.latest}`; z.title = `새 버전 v${updateInfo.latest} 사용 가능 (현재 v${updateInfo.current}) — 클릭`; }
+  return updateInfo;
+}
+$('#st-update').onclick = () => openSettings();
 let settings = { ...SETTINGS_DEFAULT };
 async function loadSettings() {
   try { settings = { ...SETTINGS_DEFAULT, ...(await api('GET', 'settings')) }; } catch {}
   applyTheme(settings.theme); updateScope();
+  if (settings.checkUpdates !== false) checkUpdates(false);
 }
 const saveSettings = () => api('PUT', 'settings', {}, { settings }).catch(() => toast('설정 저장 실패'));
 function searchExts() { // 서버로 보낼 확장자 목록 (빈 문자열 = 제한 없음)
@@ -767,6 +778,18 @@ function openSettings() {
   const row = (checked, label, sub, onchange) => {
     const cb = el('input', { type: 'checkbox', checked }); cb.onchange = () => onchange(cb.checked);
     return el('label', { className: 'st-row' }, cb, el('span', { className: 'st-l', textContent: label }), el('span', { className: 'st-s', textContent: sub || '' }));
+  };
+  const verBox = () => { // 현재 버전 + 수동 확인
+    const msg = el('span', { className: 'st-vmsg' });
+    const show = (u) => {
+      if (!u || u.latest == null) msg.textContent = '확인하지 못했습니다 (네트워크?)';
+      else if (u.available) msg.textContent = `새 버전 v${u.latest} — brew upgrade --cask shooting-star  또는 릴리스 페이지에서 받기`;
+      else msg.textContent = '최신 버전입니다';
+    };
+    if (updateInfo) show(updateInfo);
+    const chk = el('button', { textContent: '업데이트 확인' }); chk.onclick = async () => { msg.textContent = '확인 중…'; show(await checkUpdates(true)); };
+    const rel = el('button', { textContent: '릴리스 페이지' }); rel.onclick = () => window.open(updateInfo?.url || 'https://github.com/AndersonJo/Shooting-Star-/releases', '_blank');
+    return el('div', { className: 'st-ver' }, el('span', { textContent: `shooting-star v${state.version || '?'}` }), chk, rel, msg);
   };
   const apply = () => { saveSettings(); updateScope(); refreshFilter(); if (ff.built && !$('#find').hidden) runFind(); };
   const draw = () => {
@@ -801,6 +824,8 @@ function openSettings() {
       el('div', { className: 'st-sec', textContent: '내용 검색 (⌘/Ctrl+Shift+F) 대상 파일 형식' }),
       all, el('div', { className: 'st-grid' }, ...cats), custom,
       el('div', { className: 'st-note', textContent: '파일 마스크를 직접 입력하면 마스크가 우선합니다. 파일 이름 검색(Shift×2)은 항상 모든 파일을 대상으로 합니다.' }),
+      el('div', { className: 'st-sec', textContent: '버전 / 업데이트' }), verBox(),
+      row(settings.checkUpdates !== false, '시작할 때 업데이트 자동 확인', 'GitHub 에 최신 버전 조회 요청 1건 (끄면 요청 없음)', (v) => { settings.checkUpdates = v; saveSettings(); if (!v) $('#st-update').hidden = true; }),
       el('div', { className: 'st-foot' }, reset, close));
   };
   draw(); box.hidden = false;
@@ -1156,7 +1181,7 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
     const last = info.last || recents()[0];
     if (last && last !== info.root) return location.replace('/?root=' + encodeURIComponent(last));
   }
-  state.root = info.root; state.memoDir = info.memoDir; state.home = info.home;
+  state.root = info.root; state.version = info.version; state.memoDir = info.memoDir; state.home = info.home;
   api('PUT', 'last', {}, { root: info.root }).catch(() => {}); state.home = info.home;
   history.replaceState(null, '', '/?root=' + encodeURIComponent(info.root));
   $('#root-name').textContent = info.name; $('#root-name').title = info.root + '  (클릭 / ⌘O: 폴더 열기)';

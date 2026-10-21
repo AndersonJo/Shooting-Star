@@ -1,0 +1,58 @@
+# 태그(v*)를 푸시하면 macOS 앱(.zip, universal)과 Ubuntu 패키지(.deb)를 빌드해 GitHub Release 에 올린다.
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag matches package.json version
+        run: |
+          V="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' package.json | head -1)"
+          test "v$V" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != package.json v$V"; exit 1; }
+  macos:
+    needs: check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: build universal app
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          scripts/make-app.sh dist/shooting-star.app bundle --universal
+          ditto -c -k --keepParent dist/shooting-star.app "dist/shooting-star-${V}-macos.zip"
+          (cd dist && shasum -a 256 "shooting-star-${V}-macos.zip" > "shooting-star-${V}-macos.zip.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/*.zip
+            dist/*.sha256
+  linux:
+    needs: check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: build deb
+        run: scripts/make-deb.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.deb
+  release:
+    needs: [macos, linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/*/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
