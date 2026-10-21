@@ -897,11 +897,16 @@ const SEARCH_CATS = [
 const THEMES = [
   { id: 'system', label: '시스템 설정 따르기', colors: ["#14161a", "#ffffff", "#7aa2ff", "#0969da"] },
   { id: 'dark', label: '다크', colors: ["#14161a", "#1a1d22", "#7aa2ff", "#d4d8de"] },
-  { id: 'light', label: '라이트', colors: ["#ffffff", "#f6f8fa", "#0969da", "#1f2328"] },
   { id: 'midnight', label: '미드나잇', colors: ["#000000", "#0a0a0c", "#6ea0ff", "#d8dbe0"] },
   { id: 'nord', label: 'Nord', colors: ["#2e3440", "#292e39", "#88c0d0", "#d8dee9"] },
   { id: 'solarized', label: 'Solarized Dark', colors: ["#002b36", "#00232c", "#268bd2", "#93a1a1"] },
   { id: 'dracula', label: 'Dracula', colors: ["#282a36", "#21222c", "#bd93f9", "#f8f8f2"] },
+  { id: 'light', label: '라이트', colors: ["#ffffff", "#f6f8fa", "#0969da", "#1f2328"] },
+  { id: 'solarized-light', label: 'Solarized Light', colors: ["#fdf6e3", "#eee8d5", "#1a6aa0", "#34464c"] },
+  { id: 'gruvbox-light', label: 'Gruvbox Light', colors: ["#fbf1c7", "#f2e5bc", "#076678", "#3c3836"] },
+  { id: 'paper', label: '페이퍼 (세피아)', colors: ["#f4ecd8", "#ebe2cb", "#94531a", "#433422"] },
+  { id: 'snow', label: 'Snow', colors: ["#eceff4", "#e5e9f0", "#436793", "#2e3440"] },
+  { id: 'rose', label: 'Rosé', colors: ["#fdf6f6", "#f7ebeb", "#b83a5f", "#3d2f33"] },
 ];
 const THEME_BY_ID = Object.fromEntries(THEMES.map((t) => [t.id, t]));
 const lightMQ = matchMedia('(prefers-color-scheme: light)');

@@ -35,7 +35,7 @@ node server.js [디렉토리] [--port 4000] [--no-open]
 # 예: node server.js ~/wiki
 ```
 
-- 테마: 설정(⚙ / ⌘,)에서 선택 — 시스템 설정 따르기, 다크, 라이트, 미드나잇, Nord, Solarized Dark, Dracula. 네이티브 앱은 창 밝기/배경도 함께 변경
+- 테마: 설정(⚙ / ⌘,)에서 선택 — 시스템 설정 따르기 / 다크 계열(다크, 미드나잇, Nord, Solarized Dark, Dracula) / 라이트 계열(라이트, Solarized Light, Gruvbox Light, 페이퍼(세피아), Snow, Rosé). 네이티브 앱은 창 밝기/배경도 함께 변경
 - 앱: macOS 는 `install.sh` 가 swiftc 로 네이티브 셸(`macos/ShootingStar.swift`, WKWebView)을 빌드해 `~/Applications/shooting-star.app` 설치 — Dock 에 자체 아이콘, Chrome 불필요 (swiftc 없으면 브라우저 창 방식). Ubuntu 는 앱 메뉴 항목 + Chromium 계열 `--app` 창
 - 시작 위치: 마지막으로 연 폴더, 없으면 `~/projects` (설정에서 변경)
 - 워크스페이스: 브라우저 탭마다 다른 폴더, ⌘/Ctrl+O 로 앱 안에서 폴더 전환(최근 폴더 포함), 폴더별 탭/펼침 상태 복원
