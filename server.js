@@ -432,6 +432,7 @@ async function searchNode(root, o, signal) {
   const re = buildRegex(o);
   const exts = o.glob ? null : (o.exts.length ? new Set(o.exts) : null); // 마스크를 직접 쓰면 그것이 우선
   const files = indexFiles(ix).filter((f) => {
+    if (o.dir && !f.startsWith(o.dir + '/')) return false;
     const ext = path.extname(f).slice(1).toLowerCase();
     if (BINARY_EXT.has(ext)) return false;
     if (exts) return exts.has(ext);
@@ -473,7 +474,7 @@ function searchRg(root, o, signal) {
     for (const d of [...IGNORE, ...SEARCH_IGNORE]) args.push('-g', '!' + d);
     if (o.glob) for (const g of o.glob.split(',').map((x) => x.trim()).filter(Boolean)) args.push('-g', g);
     else for (const e of o.exts) args.push('-g', '*.' + e);
-    args.push('-e', o.q, '--', '.');
+    args.push('-e', o.q, '--', o.dir || '.');
     const child = spawn(RG, args, { cwd: root });
     const byPath = new Map(); let matches = 0, truncated = false, err = '', buf = '';
     const stop = () => { try { child.kill(); } catch {} };
@@ -712,7 +713,9 @@ async function api(req, res, url, root) {
       res.on('close', () => { if (!res.writableEnded) ac.abort(); }); // 클라이언트가 취소하면 중단
       const flag = (k) => url.searchParams.get(k) === '1';
       const exts = (url.searchParams.get('exts') || '').split(',').map((e) => e.trim().replace(/^\./, '').toLowerCase()).filter((e) => /^[\w+-]+$/.test(e));
-      return send(res, 200, await searchFiles(root, { q, cs: flag('case'), word: flag('word'), regex: flag('regex'), glob: url.searchParams.get('glob') || '', exts }, ac.signal));
+      const dirRel = (url.searchParams.get('dir') || '').replace(/^\/+|\/+$/g, ''); // 폴더 안에서만 검색
+      if (dirRel) { const st = await fsp.stat(resolveSafe(root, dirRel)).catch(() => null); if (!st?.isDirectory()) throw httpError(400, 'no such folder'); }
+      return send(res, 200, await searchFiles(root, { dir: dirRel, q, cs: flag('case'), word: flag('word'), regex: flag('regex'), glob: url.searchParams.get('glob') || '', exts }, ac.signal));
     }
     case 'GET /api/files': {
       const ix = getIndex(root);

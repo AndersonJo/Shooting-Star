@@ -1211,7 +1211,9 @@ function buildFind() {
       el('input', { id: 'ff-q', placeholder: '전체 파일에서 찾기…', autocomplete: 'off', spellcheck: false }),
       tg('case', 'Cc', '대소문자 구분'), tg('word', 'W', '단어 단위'), tg('regex', '.*', '정규식'),
       el('input', { id: 'ff-glob', placeholder: '파일 마스크 (*.py, *.md)', autocomplete: 'off', spellcheck: false }),
-      el('button', { id: 'ff-scope', onclick: openSettings }), close),
+      el('button', { id: 'ff-scope', onclick: openSettings }),
+      el('div', { id: 'ff-where', title: '검색 범위: 전체 | 트리에서 선택한 폴더' },
+        el('button', { id: 'ff-all', textContent: '전체' }), el('button', { id: 'ff-dir' })), close),
     el('div', { id: 'ff-sum' }),
     el('div', { className: 'ff-body' }, el('div', { id: 'ff-list' }), el('div', { id: 'ff-prev' })));
   document.body.append(panel);
@@ -1226,10 +1228,20 @@ function buildFind() {
     else if (e.key === 'Enter') { e.preventDefault(); if (ff.sel >= 0) openHit(ff.sel); else { clearTimeout(ff.timer); runFind(); } }
   };
   q.onkeydown = g.onkeydown = keys;
+  $('#ff-all').onclick = () => { store.set('ffInDir', false); setFindScope(false); }; $('#ff-dir').onclick = () => { store.set('ffInDir', true); setFindScope(true); };
   document.addEventListener('mousedown', (e) => { if (!panel.hidden && !e.target.closest('#find') && !e.target.closest('#settings')) closeFind(); });
+}
+// 검색 범위: 전체 | 선택한 폴더 (폴더가 없으면 전체)
+function setFindScope(inDir, run = true) {
+  ff.inDir = inDir && !!ff.dir;
+  $('#ff-all').classList.toggle('on', !ff.inDir); $('#ff-dir').classList.toggle('on', ff.inDir);
+  $('#ff-dir').textContent = '📁 ' + (ff.dir ? ff.dir.split('/').pop() : '선택한 폴더'); $('#ff-dir').title = ff.dir || '트리에서 폴더를 선택하세요';
+  $('#ff-dir').disabled = !ff.dir; $('#ff-q').placeholder = ff.inDir ? ff.dir + ' 안에서 찾기…' : '전체 파일에서 찾기…';
+  if (run) { runFind(); $('#ff-q').focus(); }
 }
 function openFind() {
   buildFind();
+  ff.dir = dirOfSel(); setFindScope(store.get('ffInDir', false), false);
   const ta = $('textarea.editor'); let sel = '';
   if (ta && ta.selectionEnd > ta.selectionStart) sel = ta.value.slice(ta.selectionStart, ta.selectionEnd);
   else sel = String(getSelection());
@@ -1246,7 +1258,7 @@ async function runFind() {
   if (!q) { $('#ff-list').replaceChildren(); $('#ff-prev').replaceChildren(); ff.items = []; ff.sel = -1; sum.textContent = ''; return; }
   sum.className = ''; sum.textContent = '검색 중…'; const t0 = performance.now();
   try {
-    const r = await api('GET', 'search', { q, glob: $('#ff-glob').value, exts: searchExts(), case: +ff.opts.case, word: +ff.opts.word, regex: +ff.opts.regex }, null, ctl.signal);
+    const r = await api('GET', 'search', { q, dir: ff.inDir ? ff.dir : '', glob: $('#ff-glob').value, exts: searchExts(), case: +ff.opts.case, word: +ff.opts.word, regex: +ff.opts.regex }, null, ctl.signal);
     renderFind(r, performance.now() - t0);
   } catch (e) {
     if (e.name === 'AbortError') return;
