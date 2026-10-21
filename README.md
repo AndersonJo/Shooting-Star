@@ -44,3 +44,10 @@ node server.js [디렉토리] [--port 4000] [--no-open]
 
 ## Third-party (public/vendor)
 [marked](https://github.com/markedjs/marked) (MIT), [DOMPurify](https://github.com/cure53/DOMPurify) (Apache-2.0 / MPL-2.0), [js-yaml](https://github.com/nodeca/js-yaml) (MIT) — 오프라인 동작을 위해 번들. 앱 아이콘은 `assets/icon.png`.
+
+## 릴리스 (관리자용)
+```bash
+scripts/release.sh 0.2.0   # 버전 올림 → 커밋/태그/푸시 → Actions 가 zip·deb 빌드 → Homebrew tap 갱신
+```
+태그(`v*`)를 푸시하면 `.github/workflows/release.yml` 이 macOS universal 앱(zip)과 Ubuntu `.deb` 를 빌드해 GitHub Release 에 올립니다.
+사용자는 `brew upgrade --cask shooting-star` 로 업데이트하고, 앱은 새 버전이 있으면 상태바에 알려 줍니다.
