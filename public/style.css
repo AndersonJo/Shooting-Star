@@ -546,3 +546,24 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 /* 외부 변경 충돌 / 삭제 표시 */
 .tab.conflict::before { content: "⚠"; color: var(--err); font-size: 11px; }
 .tab.missing { text-decoration: line-through; opacity: .7; }
+
+/* 이미지 뷰어 */
+.imgv { position: relative; flex: 1; min-width: 0; overflow: hidden; background: #0b0c0e; color: #e8eaed; user-select: none; }
+.imgv.fs { position: fixed; inset: 0; z-index: 100; background: #000; }
+.iv-stage { position: absolute; inset: 0; overflow: hidden; touch-action: none; }
+.iv-stage.pannable { cursor: grab; } .iv-stage.grab { cursor: grabbing; }
+.iv-stage img { background: repeating-conic-gradient(#2b2b2b 0% 25%, #222 0% 50%) 50% / 16px 16px; will-change: transform; image-rendering: auto; }
+.iv-hud { position: absolute; left: 0; right: 0; top: 0; padding: 10px 16px; display: flex; gap: 14px; align-items: baseline; background: linear-gradient(#000b, transparent); font-size: 13px; pointer-events: none; transition: opacity .25s; }
+.iv-name { font-weight: 600; } .iv-count, .iv-meta, .iv-zoom { color: #aab0b8; font-size: 12px; } .iv-zoom { margin-left: auto; }
+.iv-tools { position: absolute; right: 14px; bottom: 14px; display: flex; gap: 4px; padding: 5px; border-radius: 10px; background: #000a; backdrop-filter: blur(6px); transition: opacity .25s; }
+.iv-btn { color: #e8eaed; background: transparent; border: 0; border-radius: 6px; padding: 4px 9px; cursor: pointer; font-size: 13px; }
+.iv-btn:hover { background: #ffffff22; }
+.iv-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 46px; height: 84px; font-size: 38px; line-height: 1; padding: 0; background: #0008; border-radius: 10px; transition: opacity .25s; }
+.iv-nav.l { left: 12px; } .iv-nav.r { right: 12px; }
+.imgv:not(.active) .iv-hud, .imgv:not(.active) .iv-tools, .imgv:not(.active) .iv-nav { opacity: 0; pointer-events: none; }
+.imgv:not(.active) { cursor: none; }
+.iv-spin { position: absolute; left: 50%; top: 50%; width: 34px; height: 34px; margin: -17px; border: 3px solid #ffffff33; border-top-color: #fff; border-radius: 50%; animation: iv-rot .8s linear infinite; pointer-events: none; }
+.iv-spin[hidden] { display: none; }
+@keyframes iv-rot { to { transform: rotate(360deg); } }
+.iv-err { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #f07178; }
+.row .ico.k-image, #pal-list .ico.k-image, .ff-file .ico.k-image { color: var(--tk-a); }

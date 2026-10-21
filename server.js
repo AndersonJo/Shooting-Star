@@ -6,7 +6,8 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
-const { exec, spawn, spawnSync } = require('child_process');
+const { exec, execFile, spawn, spawnSync } = require('child_process');
+const crypto = require('crypto');
 
 const args = process.argv.slice(2);
 const opt = (name, def) => {
@@ -132,6 +133,94 @@ async function walkAll(root, start = '') {
     level = next;
   }
   return { files: acc.slice(0, FILE_LIMIT), truncated: acc.length >= FILE_LIMIT };
+}
+
+// ───────── 이미지: 크기 읽기 / 화면용 축소본 / 스트리밍 ─────────
+const IMG_MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.tif': 'image/tiff', '.tiff': 'image/tiff', '.heic': 'image/heic', '.heif': 'image/heif' };
+const THUMB_DIR = path.join(HOME, '.shooting-star', 'cache', 'thumbs');
+// 헤더만 읽어 픽셀 크기를 얻는다 (디코딩 없이). 모르면 null.
+function imageSize(b) {
+  try {
+    if (b.length > 24 && b.readUInt32BE(0) === 0x89504e47) return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };                       // PNG
+    if (b.toString('latin1', 0, 4) === 'GIF8') return { w: b.readUInt16LE(6), h: b.readUInt16LE(8) };                                      // GIF
+    if (b.toString('latin1', 0, 2) === 'BM') return { w: Math.abs(b.readInt32LE(18)), h: Math.abs(b.readInt32LE(22)) };                    // BMP
+    if (b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP') {                                                  // WebP
+      const t = b.toString('latin1', 12, 16);
+      if (t === 'VP8 ') return { w: b.readUInt16LE(26) & 0x3fff, h: b.readUInt16LE(28) & 0x3fff };
+      if (t === 'VP8L') { const v = b.readUInt32LE(21); return { w: (v & 0x3fff) + 1, h: ((v >> 14) & 0x3fff) + 1 }; }
+      if (t === 'VP8X') return { w: 1 + (b[24] | (b[25] << 8) | (b[26] << 16)), h: 1 + (b[27] | (b[28] << 8) | (b[29] << 16)) };
+    }
+    if (b[0] === 0xff && b[1] === 0xd8) {                                                                                                   // JPEG: SOF 마커 탐색
+      let i = 2;
+      while (i + 9 < b.length) {
+        if (b[i] !== 0xff) { i++; continue; }
+        const m = b[i + 1];
+        if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return { h: b.readUInt16BE(i + 5), w: b.readUInt16BE(i + 7) };
+        if (m === 0xd8 || (m >= 0xd0 && m <= 0xd7) || m === 0x01 || m === 0xff) { i += m === 0xff ? 1 : 2; continue; }
+        i += 2 + b.readUInt16BE(i + 2);
+      }
+    }
+  } catch {}
+  return null;
+}
+async function readHead(abs, n = 262144) { const fh = await fsp.open(abs, 'r'); try { const b = Buffer.alloc(n); const { bytesRead } = await fh.read(b, 0, n, 0); return b.subarray(0, bytesRead); } finally { await fh.close(); } }
+const execP = (cmd, args) => new Promise((res, rej) => execFile(cmd, args, { timeout: 60000, maxBuffer: 1 << 20 }, (e, out) => (e ? rej(e) : res(String(out)))));
+const RESIZER = (() => { // 축소본 생성 도구: macOS 는 sips(기본 탑재), Linux 는 있으면 vips/ImageMagick
+  if (process.platform === 'darwin') return 'sips';
+  for (const c of ['vipsthumbnail', 'magick', 'convert']) if (spawnSync('which', [c]).status === 0) return c;
+  return null;
+})();
+async function imageInfo(abs, st) {
+  const ext = path.extname(abs).toLowerCase();
+  let dim = imageSize(await readHead(abs));
+  if (!dim && RESIZER === 'sips' && ['.heic', '.heif', '.tif', '.tiff', '.avif'].includes(ext)) { // 헤더 파서가 없는 형식은 sips 로
+    try { const o = await execP('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', abs]); dim = { w: +/pixelWidth: (\d+)/.exec(o)?.[1], h: +/pixelHeight: (\d+)/.exec(o)?.[1] }; if (!dim.w) dim = null; } catch {}
+  }
+  return { w: dim?.w ?? null, h: dim?.h ?? null, size: st.size, mtime: st.mtimeMs, ext: ext.slice(1) };
+}
+let thumbRunning = 0; const thumbQueue = [], thumbJobs = new Map();
+const limited = (fn) => new Promise((resolve, reject) => {   // 동시에 3개까지만 변환
+  const run = () => { thumbRunning++; fn().then(resolve, reject).finally(() => { thumbRunning--; thumbQueue.shift()?.(); }); };
+  thumbRunning < 3 ? run() : thumbQueue.push(run);
+});
+// 화면 크기에 맞게 줄인 이미지(캐시). 필요 없거나 만들 수 없으면 null → 원본을 그대로 보낸다.
+async function thumbFor(abs, st, w) {
+  const ext = path.extname(abs).toLowerCase();
+  if (!RESIZER || !['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.heic', '.heif'].includes(ext)) return null;
+  const needsConvert = ['.tif', '.tiff', '.heic', '.heif'].includes(ext);     // 브라우저가 못 보는 형식은 항상 변환
+  if (!needsConvert) {
+    if (st.size < 300 * 1024) return null;
+    const dim = imageSize(await readHead(abs)); if (dim && Math.max(dim.w, dim.h) <= w) return null;   // 이미 화면보다 작음
+  }
+  const png = ext === '.png', key = crypto.createHash('sha1').update(`${abs}|${st.mtimeMs}|${st.size}|${w}|${png}`).digest('hex');
+  const out = path.join(THUMB_DIR, `${key}.${png ? 'png' : 'jpg'}`);
+  if (fs.existsSync(out)) return { file: out, type: png ? 'image/png' : 'image/jpeg' };
+  if (!thumbJobs.has(out)) {
+    thumbJobs.set(out, limited(async () => {   // 같은 이미지를 동시에 요청해도 한 번만 변환
+      await fsp.mkdir(THUMB_DIR, { recursive: true });
+      const tmp = out + '.tmp' + process.pid + (ext === '.png' ? '.png' : '.jpg');
+      if (RESIZER === 'sips') await execP('sips', ['-s', 'format', png ? 'png' : 'jpeg', ...(png ? [] : ['-s', 'formatOptions', '85']), '-Z', String(w), abs, '--out', tmp]);
+      else if (RESIZER === 'vipsthumbnail') await execP('vipsthumbnail', [abs, '-s', String(w), '-o', tmp + (png ? '' : '[Q=85]')]);
+      else await execP(RESIZER, [abs + '[0]', '-auto-orient', '-resize', `${w}x${w}>`, '-quality', '85', tmp]);
+      await fsp.rename(tmp, out);
+    }).finally(() => thumbJobs.delete(out)));
+  }
+  try { await thumbJobs.get(out); return { file: out, type: png ? 'image/png' : 'image/jpeg' }; } catch { return null; }
+}
+async function pruneThumbs() { // 캐시가 800MB 를 넘으면 오래된 것부터 600MB 까지 정리
+  try {
+    const files = await Promise.all((await fsp.readdir(THUMB_DIR)).map(async (n) => { const p = path.join(THUMB_DIR, n), st = await fsp.stat(p); return { p, size: st.size, t: st.atimeMs }; }));
+    let total = files.reduce((a, f) => a + f.size, 0); if (total < 800 * 1048576) return;
+    for (const f of files.sort((a, b) => a.t - b.t)) { if (total < 600 * 1048576) break; await fsp.unlink(f.p).catch(() => {}); total -= f.size; }
+  } catch {}
+}
+function sendFile(req, res, abs, type, st, extra = {}) { // ETag 로 재검증(304) + 스트리밍 (큰 이미지를 통째로 메모리에 올리지 않는다)
+  const etag = `W/"${st.size}-${Math.round(st.mtimeMs)}"`;
+  const headers = { ETag: etag, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', ...extra };
+  if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
+  res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, ...headers });
+  fs.createReadStream(abs).on('error', () => res.destroy()).pipe(res);
 }
 
 // ───────── 파일 인덱스 ─────────
@@ -366,6 +455,11 @@ async function api(req, res, url, root) {
       }
       return send(res, 200, { ok: true });
     }
+    case 'GET /api/imginfo': { // 이미지 픽셀 크기/용량 (헤더만 읽음)
+      const abs = resolveSafe(root, p), st = await fsp.stat(abs);
+      if (!st.isFile() || !IMG_MIME[path.extname(abs).toLowerCase()]) throw httpError(415, 'not an image');
+      return send(res, 200, await imageInfo(abs, st));
+    }
     case 'GET /api/update':
       return send(res, 200, await checkUpdate(url.searchParams.get('force') === '1'));
     case 'GET /api/info':
@@ -490,12 +584,18 @@ const server = http.createServer(async (req, res) => {
     // DNS rebinding / 타 사이트에서의 요청 방지
     const host = (req.headers.host || '').replace(/:\d+$/, '');
     if (!['127.0.0.1', 'localhost', '[::1]', HOST].includes(host)) throw httpError(403, 'bad host');
-    if (url.pathname === '/raw') { // 마크다운 안의 상대경로 이미지 등
+    if (url.pathname === '/raw' || url.pathname === '/thumb') { // 이미지: 원본 / 화면용 축소본
       const abs = resolveSafe(rootOf(req, url), url.searchParams.get('path') || '');
-      const ext = path.extname(abs).toLowerCase();
-      const type = { ...MIME, '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }[ext];
-      if (!type || ext === '.html' || ext === '.js') throw httpError(415, 'unsupported');
-      return send(res, 200, await fsp.readFile(abs), type);
+      const ext = path.extname(abs).toLowerCase(), type = IMG_MIME[ext];
+      if (!type) throw httpError(415, 'unsupported');
+      const st = await fsp.stat(abs); if (!st.isFile()) throw httpError(404, 'not a file');
+      const csp = { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:" };   // SVG 를 직접 열어도 스크립트가 실행되지 않게
+      if (url.pathname === '/thumb') {
+        const w = Math.min(4096, Math.max(256, Number(url.searchParams.get('w')) || 2048));
+        const t = await thumbFor(abs, st, w);
+        if (t) return sendFile(req, res, t.file, t.type, await fsp.stat(t.file));
+      }
+      return sendFile(req, res, abs, type, st, csp);
     }
     if (url.pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && req.headers['x-ss'] !== '1') throw httpError(403, 'missing header');
@@ -575,7 +675,7 @@ function listenAuto(port, left = 20) { // 사용 중인 포트는 건너뛰고 �
   server.once('error', onError);
   server.listen(port, HOST, () => {
     server.removeListener('error', onError);
-    ACTIVE_PORT = port; writeState();
+    ACTIVE_PORT = port; writeState(); setTimeout(pruneThumbs, 8000).unref();
     if (port !== PORT) console.log(`포트 ${PORT} 은(는) 다른 프로그램이 사용 중이라 ${port} 를 사용합니다`);
     console.log(`shooting-star → ${appUrl()}`);
     if (!NO_OPEN) openWindow(appUrl());

@@ -125,7 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     // MARK: 창
     func open(_ url: URL) {
         let conf = WKWebViewConfiguration()
-        conf.userContentController.add(self, name: "theme")   // 웹 UI 의 테마 변경 알림
+        conf.userContentController.add(self, name: "theme")        // 웹 UI 의 테마 변경 알림
+        conf.userContentController.add(self, name: "fullscreen")   // 이미지 뷰어의 전체화면 요청
         let wv = WKWebView(frame: .zero, configuration: conf)
         wv.uiDelegate = self
         wv.navigationDelegate = self
@@ -141,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         win.appearance = NSAppearance(named: .darkAqua)
         win.isReleasedWhenClosed = false
         win.tabbingMode = .disallowed
+        win.collectionBehavior.insert(.fullScreenPrimary)   // 창 전체화면 허용
         win.delegate = self
         if let last = windows.last {     // 두 번째 창부터는 살짝 어긋나게
             win.setContentSize(last.contentLayoutRect.size)
@@ -160,6 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     // MARK: 테마 — 웹이 "dark|light,#rrggbb" 를 보내면 창의 밝기와 배경색을 맞춘다 (제목 표시줄/깜빡임 방지)
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
+        if m.name == "fullscreen" { (m.webView?.window)?.toggleFullScreen(nil); return }   // 이미지 뷰어: 창 전체화면 토글
         guard m.name == "theme", let s = m.body as? String else { return }
         let parts = s.split(separator: ",").map(String.init)
         guard parts.count == 2 else { return }
@@ -170,6 +173,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let color = NSColor(srgbRed: CGFloat((rgb >> 16) & 0xff) / 255, green: CGFloat((rgb >> 8) & 0xff) / 255, blue: CGFloat(rgb & 0xff) / 255, alpha: 1)
         for w in windows { w.appearance = appearance; w.backgroundColor = color }
     }
+
+    // 전체화면 상태를 웹 UI 에 알린다 (창 버튼/⌃⌘F 로 바뀌는 경우도 동기화)
+    func notifyFullscreen(_ n: Notification, _ on: Bool) {
+        ((n.object as? NSWindow)?.contentView as? WKWebView)?.evaluateJavaScript("window.onNativeFullscreen && window.onNativeFullscreen(\(on))", completionHandler: nil)
+    }
+    func windowDidEnterFullScreen(_ n: Notification) { notifyFullscreen(n, true) }
+    func windowDidExitFullScreen(_ n: Notification) { notifyFullscreen(n, false) }
 
     func windowWillClose(_ n: Notification) {
         if let w = n.object as? NSWindow { windows.removeAll { $0 === w } }
@@ -269,6 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             mi("새로고침", #selector(reloadPage), "r"),
         ])
         add("윈도우", [
+            mi("전체 화면", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
             mi("최소화", #selector(NSWindow.performMiniaturize(_:)), "m"),
             mi("확대/축소", #selector(NSWindow.performZoom(_:))),
             mi("윈도우 닫기", #selector(NSWindow.performClose(_:)), "w", [.command, .shift]),
