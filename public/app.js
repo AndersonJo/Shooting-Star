@@ -1259,7 +1259,7 @@ $('#memo-q').oninput = refreshMemos;
 
 
 // ───────── Git: 작업 폴더 안의 repo 별 변경 파일 → 커밋 / 푸시 ─────────
-const gitUi = { repos: [], collapsed: new Set(), off: new Map(), msg: new Map(), busy: new Set(), err: new Map(), loaded: false };   // off: repo → 체크 해제한 파일들
+const gitUi = { repos: [], expanded: new Set(), off: new Map(), msg: new Map(), busy: new Set(), err: new Map(), loaded: false };   // off: repo → 체크 해제한 파일들
 let gitTimer, gitSeq = 0;
 const refreshGit = () => { if (state.view !== 'git') return; clearTimeout(gitTimer); gitTimer = setTimeout(loadGit, 400); };
 async function loadGit() {
@@ -1286,15 +1286,15 @@ function drawGit() {
   if (focusId) box.querySelector(`textarea[data-repo="${CSS.escape(focusId)}"]`)?.focus();
 }
 function gitRepoView(r) {
-  const n = r.files.length, key = r.abs, open = !gitUi.collapsed.has(key) && (n > 0 || r.ahead > 0 || r.error);
+  const n = r.files.length, key = r.abs, open = gitUi.expanded.has(key) && (n > 0 || r.ahead > 0 || r.behind > 0 || r.error);   // 처음에는 모두 접힌 상태
   const head = el('div', { className: 'gr-head', title: r.abs },
-    el('span', { className: 'gr-arrow', textContent: n > 0 || r.ahead > 0 || r.error ? (open ? '▾' : '▸') : '' }),
+    el('span', { className: 'gr-arrow', textContent: n > 0 || r.ahead > 0 || r.behind > 0 || r.error ? (open ? '▾' : '▸') : '' }),
     el('span', { className: 'gr-name', textContent: r.rel === '' ? r.name + ' (작업 폴더)' : r.rel.startsWith('..') ? r.name : r.rel }),
     el('span', { className: 'gr-br', textContent: r.branch || '' }),
     el('span', { className: 'gr-sp' }),
     r.ahead || r.behind ? el('span', { className: 'gr-sync', title: `원격보다 ${r.ahead} 앞섬 / ${r.behind} 뒤처짐`, textContent: (r.ahead ? '↑' + r.ahead : '') + (r.behind ? ' ↓' + r.behind : '') }) : '',
     n ? el('span', { className: 'gr-badge', textContent: String(n) }) : '');
-  head.onclick = () => { if (gitUi.collapsed.has(key)) gitUi.collapsed.delete(key); else gitUi.collapsed.add(key); drawGit(); };
+  head.onclick = () => { if (gitUi.expanded.has(key)) gitUi.expanded.delete(key); else gitUi.expanded.add(key); drawGit(); };
   const wrap = el('div', { className: 'gr' + (n ? '' : ' clean') }, head);
   if (!open) return wrap;
   const body = el('div', { className: 'gr-body' }); wrap.append(body);
