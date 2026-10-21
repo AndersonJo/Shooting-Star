@@ -593,3 +593,8 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 .smart-doc:hover .sb-tail, .smart-doc .sb-tail:only-child { opacity: .75; }
 
 #st-save { color: var(--ok); }
+
+/* 탭: 클릭/더블클릭/드래그해도 글자가 선택되지 않게 */
+#tabs, .tab { -webkit-user-select: none; user-select: none; }
+#menu hr { border: 0; border-top: 1px solid var(--bd); margin: 4px 2px; }
+#menu div.disabled { opacity: .4; pointer-events: none; }

@@ -319,14 +319,17 @@ window.addEventListener('beforeunload', (e) => {
   if (unsafe) e.preventDefault();   // 자동으로 저장하지 못하는 변경이 남아 있을 때만 확인창
 });
 
-function closeTab(p, saved) {
-  const t = tabOf(p); if (!t) return;
-  if (dirty(t) && !saved && t.kind !== 'image' && !t.conflict && !t.missing && autoSaveSecs(t)) { clearTimeout(t._as); save(t, true, true).then(() => closeTab(p, true)); return; }   // 자동 저장이 켜져 있으면 저장하고 닫는다
-  if (dirty(t) && !confirm(`${p}\n저장하지 않은 변경이 있습니다. 닫을까요?`)) return;
+async function closeTab(p, saved) { // 닫았으면 true, 취소(저장 안 한 변경을 유지)하면 false
+  const t = tabOf(p); if (!t) return true;
+  if (dirty(t) && !saved && t.kind !== 'image' && !t.conflict && !t.missing && autoSaveSecs(t)) { clearTimeout(t._as); await save(t, true, true); return closeTab(p, true); }   // 자동 저장이 켜져 있으면 저장하고 닫는다
+  if (dirty(t) && !confirm(`${p}\n저장하지 않은 변경이 있습니다. 닫을까요?`)) return false;
   const i = state.tabs.indexOf(t); state.tabs.splice(i, 1);
   if (isMemo(p) && !t.content.replace(/#/g, '').trim()) api('DELETE', 'file', { path: p }).then(refreshMemos).catch(() => {}); // 비어 있는 메모는 닫을 때 삭제
   if (state.active === p) state.active = (state.tabs[i] || state.tabs[i - 1])?.path || null;
-  persistTabs(); renderAll();
+  persistTabs(); renderAll(); return true;
+}
+async function closeTabs(paths) { // 여러 탭을 순서대로 닫는다. 저장 안 한 탭에서 취소하면 거기서 멈춘다
+  for (const p of paths) if (!(await closeTab(p))) return;
 }
 async function reload(t = cur()) {
   if (!t) return;
@@ -406,6 +409,20 @@ function renderTabs() {
       el('span', { textContent: isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.path.split('/').pop() }), x);
     tab.onclick = () => { flushAll(); state.active = t.path; state.selected = t.path; persistTabs(); renderAll(); };
     tab.onauxclick = (e) => e.button === 1 && closeTab(t.path);
+    tab.oncontextmenu = (e) => { // 탭 우클릭: 닫기 / 다른 탭 모두 닫기 / 오른쪽 탭 모두 닫기 / 모두 닫기
+      e.preventDefault();
+      const idx = state.tabs.indexOf(t), others = state.tabs.filter((x) => x !== t).map((x) => x.path), right = state.tabs.slice(idx + 1).map((x) => x.path);
+      const FM = state.platform === 'darwin' ? 'Finder' : '파일 관리자';
+      showMenu(e.clientX, e.clientY, [
+        ['닫기', () => closeTab(t.path)],
+        ['다른 탭 모두 닫기', () => closeTabs(others), others.length ? '' : 'disabled'],
+        ['오른쪽 탭 모두 닫기', () => closeTabs(right), right.length ? '' : 'disabled'],
+        ['모두 닫기', () => closeTabs(state.tabs.map((x) => x.path))],
+        '-',
+        ['경로 복사', () => copy(isMemo(t.path) ? state.memoDir + '/' + t.path.slice(6) : state.root + '/' + t.path, '전체 경로 복사됨')],
+        ...(isMemo(t.path) ? [] : [[`${FM}에서 보기`, () => revealPath(t.path, 'reveal')]]),
+      ].map((it) => (it === '-' ? ['-'] : it)));
+    };
     return tab;
   }));
   box.querySelector('.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -672,6 +689,7 @@ function renderObjTree(t) {
 function showMenu(x, y, items) {
   const m = $('#menu');
   m.replaceChildren(...items.map(([label, fn, cls]) => {
+    if (label === '-') return el('hr');   // 구분선
     const d = el('div', { textContent: label, className: cls || '' });
     d.onclick = () => { m.hidden = true; fn(); }; return d;
   }));
