@@ -581,6 +581,7 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 /* 스마트 편집: 블록 단위 라이브 편집 */
 .smart-doc { padding-bottom: 40vh; }
 .smart-doc .sb { position: relative; margin: 0 -10px .55em; padding: 1px 10px; border-radius: 6px; cursor: text; }
+.smart-doc .sb-gap { cursor: text; }
 .smart-doc .sb:hover { background: var(--hover); }
 .smart-doc .sb.editing { background: var(--bg2); box-shadow: inset 2px 0 var(--accent); }
 .smart-doc .sb > :first-child { margin-top: 0; } .smart-doc .sb > :last-child { margin-bottom: 0; }

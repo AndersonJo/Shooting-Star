@@ -2089,7 +2089,14 @@ function smartEditor(t) {
   }
   function render() {
     const st = pane.scrollTop, els = [];
-    blocks.forEach((b, i) => { if (b.type !== 'space') els.push(blockEl(b, i)); });
+    blocks.forEach((b, i) => {
+      if (b.type === 'space') return;
+      els.push(blockEl(b, i));
+      const nl = (s) => (s.match(/\n/g) || []).length, extra = nl(tailOf(b.raw)) + (blocks[i + 1]?.type === 'space' ? nl(blocks[i + 1].raw) : 0) - 2;
+      if (extra > 0 && i < blocks.length - 1) { // 문단 사이의 추가 빈 줄은 줄 수만큼 간격으로 보여준다
+        const sp = el('div', { className: 'sb-gap' }); sp.style.height = extra * 1.65 + 'em'; sp.onmousedown = (e) => { e.preventDefault(); startEdit(i, 'end'); }; els.push(sp);
+      }
+    });
     const has = blocks.some((b) => b.type !== 'space');
     const tail = el('div', { className: 'sb-tail', textContent: has ? '＋ 여기를 눌러 문단 추가' : '클릭해서 입력을 시작하세요…  (## 제목 · - 목록 · 이미지는 붙여넣기)' });
     tail.onmousedown = (e) => { e.preventDefault(); startEdit(insertBlockAfter(blocks.length - 1, ''), 0); };
