@@ -2097,14 +2097,14 @@ function smartEditor(t) {
     const { parts } = await uploadImages(t, files); if (!parts.length) return;
     lastIdx = insertBlockAfter(lastIdx >= 0 && lastIdx < blocks.length ? lastIdx : blocks.length - 1, parts.join('\n\n')); changed(); render();
   }
-  // 입력: 블록 클릭=편집 (링크는 ⌘/Ctrl+클릭으로 이동), 체크박스 토글, 이미지 붙여넣기/끌어놓기, 문서 단위 되돌리기
+  // 입력: 블록 클릭=편집 (링크 클릭=이동, Alt+클릭=편집), 체크박스 토글, 이미지 붙여넣기/끌어놓기, 문서 단위 되돌리기
   doc.addEventListener('mousedown', (e) => {
     const sb = e.target.closest('.sb'); if (!sb || sb.classList.contains('editing')) return;
     if (e.target.closest('.cp, input[type=checkbox]')) return;
-    if (e.target.closest('a') && (e.metaKey || e.ctrlKey)) return;
+    if (e.target.closest('a') && !e.altKey) return;   // 링크 클릭 = 이동 (Alt+클릭 = 그 블록 편집)
     e.preventDefault(); startEdit(+sb.dataset.i, 'end');   // mousedown 을 막아 두면 편집 중이던 입력창이 먼저 blur 되며 화면이 바뀌는 일이 없다
   });
-  doc.addEventListener('click', (e) => { if (e.target.closest('a') && !(e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+  doc.addEventListener('click', (e) => { if (e.target.closest('a') && e.altKey) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
   pane.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
   pane.addEventListener('drop', (e) => { if (e.target.closest('textarea')) return; const im = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith('image/')); if (im.length) { e.preventDefault(); attach(im); } });
   const ctx = { attach };
