@@ -71,6 +71,7 @@ const MODES = {
   jsonl: [['edit', '편집']],
   text: [['edit', '편집']],
   image: [['view', '보기']],
+  diff: [['unified', '통합'], ['split', '나란히']],
 };
 const DEFAULT_MODE = { image: 'view', md: 'view', json: 'edit', yaml: 'edit', csv: 'table', jsonl: 'edit', text: 'edit' };
 
@@ -155,7 +156,7 @@ $('#filter-info').onclick = () => openSettings();
 const wsKey = (k) => `ws:${state.root}:${k}`; // 폴더(워크스페이스)별 탭/펼침 상태
 const persistTabs = () => {
   if (!state.root) return;
-  store.set(wsKey('tabs'), state.tabs.map((t) => ({ path: t.path, mode: t.mode })));
+  store.set(wsKey('tabs'), state.tabs.filter((t) => t.kind !== 'diff').map((t) => ({ path: t.path, mode: t.mode })));
   store.set(wsKey('active'), state.active);
   store.set(wsKey('expanded'), [...state.expanded]);
 };
@@ -351,7 +352,7 @@ async function reload(t = cur()) {
 //  · 트리: 바뀐 폴더만 다시 읽기   · 열린 탭: 저장 안 한 변경이 없으면 자동 반영, 있으면 ⚠ 충돌 표시(저장 시 덮어쓰기 확인)
 let pendingPvScroll = null;
 async function syncTab(t) {
-  if (!t || t.kind === 'image' || isMemo(t.path) && t.path !== state.active) return;
+  if (!t || t.kind === 'image' || t.kind === 'diff' || isMemo(t.path) && t.path !== state.active) return;
   if (Date.now() - (t._savedAt || 0) < 1500) return;   // 방금 우리가 저장한 파일의 변경 이벤트는 무시
   try {
     const f = await api('GET', 'file', { path: t.path });
@@ -387,6 +388,7 @@ function onFsEvent(d) { // d: { paths, all }
     renderTree();
     const set = d.all ? null : new Set(d.paths);
     for (const t of state.tabs) {
+      if (t.kind === 'diff') { t.stale = true; if (t.path === state.active) renderContent(); continue; }   // 열려 있는 diff 는 다시 계산
       if (t.kind === 'image') { if (!set || set.has(t.path)) { imgv.ver.set(t.path, Date.now()); if (t.path === state.active) renderContent(); } continue; }   // 이미지가 바뀌면 다시 불러온다
       if (!isMemo(t.path) && (!set || set.has(t.path))) syncTab(t);
     }
@@ -420,8 +422,8 @@ function renderTabs() {
   box.replaceChildren(...state.tabs.map((t) => {
     const x = el('span', { className: 'x', title: '닫기 (⌘W)' });
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.path); };
-    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : ''), title: t.path + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
-      el('span', { textContent: isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.path.split('/').pop() }), x);
+    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : ''), title: (t.kind === 'diff' ? `${t.repoName}: ${t.file} — 변경 내용` : t.path) + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
+      el('span', { textContent: isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.kind === 'diff' ? t.file.split('/').pop() + ' (diff)' : t.path.split('/').pop() }), x);
     tab.onclick = () => { flushAll(); state.active = t.path; state.selected = t.path; persistTabs(); renderAll(); };
     tab.onauxclick = (e) => e.button === 1 && closeTab(t.path);
     tab.oncontextmenu = (e) => { // 탭 우클릭: 닫기 / 다른 탭 모두 닫기 / 오른쪽 탭 모두 닫기 / 모두 닫기
@@ -451,6 +453,13 @@ function renderToolbar() {
   const bar = $('#toolbar'); const t = cur();
   drawPath(t);   // 전체 경로는 하단 상태바에 표시
   if (!t) { bar.replaceChildren(); return; }
+  if (t.kind === 'diff') {
+    const seg = el('span', { className: 'seg' }, ...MODES.diff.map(([m, label]) => btn(label, '', () => { t.mode = m; store.set('diffMode', m); renderToolbar(); renderContent(); }, t.mode === m ? 'on' : '')));
+    bar.replaceChildren(el('span', { className: 'path' }), seg, el('span', { className: 'sep' }),
+      ...(t.rel && !t.gone ? [btn('파일 열기', '이 파일을 편집기로 열기', () => openFile(t.rel))] : []),
+      btn('새로고침', '변경 내용 다시 계산', () => loadDiff(t)));
+    return;
+  }
   if (t.kind === 'image') {
     bar.replaceChildren(el('span', { className: 'path' }),
       btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(e.shiftKey ? state.root + '/' + t.path : t.path, '경로 복사됨')),
@@ -508,6 +517,7 @@ function minify() {
 
 function validate() {
   const t = cur(); const pos = $('#st-pos'); pos.textContent = '';
+  if (t && t.kind === 'diff') return setStatus(t.stat || '');
   if (!t || t.kind === 'image') return setStatus('');
   let msg = '', cls = 'ok';
   try {
@@ -528,6 +538,7 @@ function renderContent() {
   const box = $('#content'); const t = cur();
   if (!t) { box.replaceChildren(EMPTY); return; }
   if (t.kind === 'image') { box.replaceChildren(imageViewer(t)); validate(); return; }
+  if (t.kind === 'diff') { box.replaceChildren(diffView(t)); validate(); return; }
   const panes = [];
   const editor = () => {
     const lang = langOf(t.path);
@@ -1310,12 +1321,9 @@ function gitRepoView(r) {
       const k = gitKind(f), cb = el('input', { type: 'checkbox', checked: !off.has(f.path) });
       cb.onclick = (e) => e.stopPropagation();
       cb.onchange = () => { if (cb.checked) off.delete(f.path); else off.add(f.path); drawGit(); };
-      const rel = r.rel && !r.rel.startsWith('..') ? r.rel + '/' + f.path : r.rel.startsWith('..') ? null : f.path;   // 작업 폴더 기준 경로 (밖이면 null)
-      const dbtn = el('button', { className: 'gf-d', textContent: '변경 보기', title: '변경 내용 (diff)' });
-      dbtn.onclick = (e) => { e.stopPropagation(); showGitDiff(r, f); };
-      const row = el('div', { className: 'gf s-' + k, title: `${GIT_LABEL[k]} — ${f.path}${f.from ? ` (← ${f.from})` : ''}${rel && k !== 'D' ? '\n클릭: 파일 열기' : ''}` },
-        cb, el('span', { className: 'gf-s', textContent: k }), el('span', { className: 'gf-n' }, el('bdi', { textContent: f.path })), dbtn);
-      row.onclick = () => { if (rel && k !== 'D') openFile(rel); else showGitDiff(r, f); };
+      const row = el('div', { className: 'gf s-' + k, title: `${GIT_LABEL[k]} — ${f.path}${f.from ? ` (← ${f.from})` : ''}\n클릭: 변경 내용 보기` },
+        cb, el('span', { className: 'gf-s', textContent: k }), el('span', { className: 'gf-n' }, el('bdi', { textContent: f.path })));
+      row.onclick = () => showGitDiff(r, f);
       body.append(row);
     }
     const ta = el('textarea', { className: 'gr-msg', placeholder: '커밋 메시지  (⌘/Ctrl+Enter: 커밋 & 푸시)', value: gitUi.msg.get(key) || '', spellcheck: false });
@@ -1356,20 +1364,61 @@ async function gitCommit(r, push) {
   } catch (e) { gitUi.err.set(key, e.message); setStatus(`${r.name}: 커밋 실패`, 'err'); }
   gitUi.busy.delete(key); await loadGit();
 }
-async function showGitDiff(r, f) {
-  let box = $('#git-diff');
-  if (!box) {
-    box = el('div', { id: 'git-diff', hidden: true }); document.body.append(box);
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !box.hidden) { e.preventDefault(); box.hidden = true; } }, true);
+async function showGitDiff(r, f) {   // 본문 영역에 diff 탭으로 연다 (팝업 아님)
+  const p = `@diff/${r.abs}/${f.path}`; let t = tabOf(p);
+  if (!t) {
+    const rel = r.rel.startsWith('..') ? null : (r.rel ? r.rel + '/' : '') + f.path;   // 작업 폴더 기준 경로 (밖이면 null)
+    t = { path: p, kind: 'diff', content: '', orig: '', mtime: 0, mode: store.get('diffMode', 'unified'), repo: r.abs, repoName: r.name, file: f.path, rel, diff: null, gone: gitKind(f) === 'D' };
+    state.tabs.push(t);
   }
-  const close = Object.assign(el('button', { textContent: '닫기' }), { onclick: () => { box.hidden = true; } });
-  const pre = el('pre', {}, el('div', { className: 'd-meta', textContent: '불러오는 중…' }));
-  box.replaceChildren(el('div', { className: 'gd-head' }, el('span', { textContent: `${r.name} — ${f.path}` }), close), pre); box.hidden = false;
-  try {
-    const { diff } = await api('GET', 'git/diff', { repo: r.abs, file: f.path });
-    if (!diff.trim()) { pre.replaceChildren(el('div', { className: 'd-meta', textContent: '(표시할 텍스트 변경이 없습니다)' })); return; }
-    pre.replaceChildren(...diff.split('\n').map((l) => el('div', { className: l.startsWith('@@') ? 'd-hunk' : /^(\+\+\+|---|diff |index |new file|deleted file|similarity|rename|old mode|new mode)/.test(l) ? 'd-meta' : l[0] === '+' ? 'd-add' : l[0] === '-' ? 'd-del' : '', textContent: l || ' ' })));
-  } catch (e) { pre.replaceChildren(el('div', { className: 'd-meta', textContent: e.message })); }
+  state.active = p; renderAll();
+}
+async function loadDiff(t) {
+  if (t.loading) return; t.loading = true; t.stale = false;
+  try { t.diff = (await api('GET', 'git/diff', { repo: t.repo, file: t.file })).diff; t.err = ''; } catch (e) { t.err = e.message; t.diff = t.diff ?? ''; }
+  t.loading = false;
+  if (state.tabs.includes(t) && state.active === t.path) { renderToolbar(); renderContent(); }
+}
+function parseDiff(text) {
+  const hunks = []; let h = null, o = 0, n = 0, bin = false, add = 0, del = 0;
+  for (const l of text.split('\n')) {
+    const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@ ?(.*)$/.exec(l);
+    if (m) { h = { head: l, rows: [] }; hunks.push(h); o = +m[1]; n = +m[2]; continue; }
+    if (!h) { if (/^(Binary files|GIT binary patch)/.test(l)) bin = true; continue; }
+    if (l[0] === '+') { h.rows.push({ k: 'add', n: n++, s: l.slice(1) }); add++; }
+    else if (l[0] === '-') { h.rows.push({ k: 'del', o: o++, s: l.slice(1) }); del++; }
+    else if (l[0] === ' ') h.rows.push({ k: 'ctx', o: o++, n: n++, s: l.slice(1) });   // '\ No newline…' 줄은 무시
+  }
+  return { hunks, bin, add, del };
+}
+function diffView(t) {
+  const box = el('div', { className: 'dvbox' });
+  if (t.diff === null || t.stale) { loadDiff(t); if (t.diff === null) { box.append(el('div', { className: 'dv-msg', textContent: '불러오는 중…' })); return box; } }
+  if (t.err) { box.append(el('div', { className: 'dv-msg err', textContent: t.err })); return box; }
+  const d = parseDiff(t.diff); t.stat = d.add || d.del ? `+${d.add} −${d.del}` : '';
+  if (!d.hunks.length) { box.append(el('div', { className: 'dv-msg', textContent: d.bin ? '바이너리 파일이라 변경 내용을 표시할 수 없습니다.' : '변경 내용이 없습니다. (이미 커밋되었거나 되돌려졌을 수 있습니다)' })); return box; }
+  const split = t.mode === 'split', td = (cls, text) => el('td', { className: cls, textContent: text ?? '' });
+  const tbl = el('table', { className: 'dv ' + (split ? 'sp' : 'un') });
+  tbl.append(el('colgroup', {}, ...(split ? ['ln', 'cd', 'ln', 'cd'] : ['ln', 'ln', 'sg', 'cd']).map((c) => el('col', { className: c }))));
+  for (const h of d.hunks) {
+    tbl.append(el('tr', { className: 'hh' }, Object.assign(td('', h.head), { colSpan: 4 })));
+    if (!split) {
+      for (const r of h.rows) tbl.append(el('tr', { className: r.k }, td('ln', r.o), td('ln', r.n), td('sg', r.k === 'add' ? '+' : r.k === 'del' ? '−' : ''), td('cd', r.s || ' ')));
+      continue;
+    }
+    for (let i = 0; i < h.rows.length;) {   // 나란히: 연속된 삭제/추가 묶음을 같은 줄에 짝지어 놓는다
+      const r = h.rows[i];
+      if (r.k === 'ctx') { tbl.append(el('tr', { className: 'ctx' }, td('ln', r.o), td('cd', r.s || ' '), td('ln', r.n), td('cd', r.s || ' '))); i++; continue; }
+      const dels = [], adds = [];
+      while (h.rows[i]?.k === 'del') dels.push(h.rows[i++]);
+      while (h.rows[i]?.k === 'add') adds.push(h.rows[i++]);
+      for (let k = 0; k < Math.max(dels.length, adds.length); k++) {
+        const a = dels[k], b = adds[k];
+        tbl.append(el('tr', {}, td('ln' + (a ? ' del' : ' none'), a?.o), td('cd' + (a ? ' del' : ' none'), a ? a.s || ' ' : ''), td('ln' + (b ? ' add' : ' none'), b?.n), td('cd' + (b ? ' add' : ' none'), b ? b.s || ' ' : '')));
+      }
+    }
+  }
+  box.append(tbl); return box;
 }
 $('#btn-git-refresh').onclick = loadGit;
 
@@ -1422,7 +1471,7 @@ function buildFileFind() {
 }
 const placeFindBar = () => { $('#fbar').style.top = ($('#content').offsetTop + 8) + 'px'; };
 function openFileFind() {
-  if (!cur() || cur().kind === 'image') return;
+  if (!cur() || cur().kind === 'image' || cur().kind === 'diff') return;
   buildFileFind();
   const ta = $('textarea.editor'); let sel = '';
   if (ta && ta.selectionEnd > ta.selectionStart) sel = ta.value.slice(ta.selectionStart, ta.selectionEnd); else sel = String(getSelection());
@@ -1870,6 +1919,7 @@ async function revealInTree(rel, isDir) { // 해당 항목까지 폴더를 펼�
 function drawPath(t) {
   const box = $('#st-path'); box.replaceChildren(); if (!t) return;
   const inner = el('span', { className: 'pth' }); box.append(inner);
+  if (t.kind === 'diff') { inner.textContent = (t.repo + '/' + t.file).replace(state.home || '\u0000', '~'); inner.title = '변경 내용 (diff)'; return; }
   if (isMemo(t.path)) { inner.textContent = ((state.memoDir || '') + '/' + t.path.slice(6)).replace(state.home || '\u0000', '~'); inner.title = '메모 파일 위치'; return; }
   const full = state.root + (t.path ? '/' + t.path : ''), segs = []; let acc = '';
   for (const p of full.split('/').filter(Boolean)) { acc += '/' + p; segs.push({ label: p, abs: acc }); }

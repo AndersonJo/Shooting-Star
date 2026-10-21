@@ -836,9 +836,6 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 .gf .gf-s { flex: none; width: 14px; text-align: center; font: 600 11px var(--mono); }
 .gf .gf-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .gf .gf-n bdi { direction: ltr; unicode-bidi: plaintext; }
-.gf .gf-d { flex: none; color: var(--fg2); border: 0; padding: 0 4px; font: 11px var(--sans); visibility: hidden; }
-.gf:hover .gf-d { visibility: visible; }
-.gf .gf-d:hover { color: var(--accent); background: none; }
 .gf.s-M .gf-s { color: var(--num); } .gf.s-A .gf-s, .gf.s-U .gf-s { color: var(--ok); } .gf.s-D .gf-s { color: var(--err); text-decoration: none; } .gf.s-R .gf-s { color: var(--accent); }
 .gf.s-D .gf-n { text-decoration: line-through; color: var(--fg2); }
 .gr-sel { display: flex; gap: 10px; padding: 2px 14px 4px; font-size: 11.5px; color: var(--fg2); }
@@ -851,13 +848,17 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 .gr-btns button:disabled { opacity: .45; cursor: default; }
 .gr-err { margin: 6px 10px 0; padding: 6px 8px; border-radius: 6px; background: var(--hover); color: var(--err); font: 11.5px var(--mono); white-space: pre-wrap; word-break: break-word; }
 .gr-note { margin: 4px 14px 0; font-size: 12px; color: var(--fg2); }
-#git-diff { position: fixed; z-index: 36; top: 6vh; left: 50%; transform: translateX(-50%); width: min(900px, 96vw); max-height: 88vh; display: flex; flex-direction: column; background: var(--bg3); border: 1px solid var(--bd); border-radius: 8px; box-shadow: 0 16px 48px var(--shadow); }
-#git-diff[hidden] { display: none; }
-#git-diff .gd-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--bd); font: 13px var(--mono); }
-#git-diff .gd-head span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#git-diff pre { margin: 0; padding: 8px 0; overflow: auto; font: 12px/1.5 var(--mono); }
-#git-diff pre div { padding: 0 14px; white-space: pre; }
-#git-diff .d-add { background: color-mix(in srgb, var(--ok) 16%, transparent); }
-#git-diff .d-del { background: color-mix(in srgb, var(--err) 16%, transparent); }
-#git-diff .d-hunk { color: var(--accent); }
-#git-diff .d-meta { color: var(--fg2); }
+/* diff 탭 (본문 영역) */
+.dvbox { flex: 1; min-width: 0; overflow: auto; background: var(--bg); }
+.dv-msg { padding: 24px; color: var(--fg2); } .dv-msg.err { color: var(--err); font-family: var(--mono); white-space: pre-wrap; }
+table.dv { width: 100%; border-collapse: collapse; table-layout: fixed; font: 12.5px/1.55 var(--mono); font-size: calc(12.5px * var(--cz)); }
+table.dv col.ln { width: 52px; } table.dv col.sg { width: 20px; }
+table.dv td { vertical-align: top; padding: 0 6px; }
+table.dv td.cd { white-space: pre-wrap; overflow-wrap: anywhere; }
+table.dv td.ln { text-align: right; color: var(--fg2); opacity: .75; user-select: none; }
+table.dv td.sg { text-align: center; color: var(--fg2); user-select: none; }
+table.dv tr.hh td { background: var(--accent-bg); color: var(--accent); padding: 3px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+table.dv tr.add td, table.dv td.add { background: color-mix(in srgb, var(--ok) 15%, transparent); }
+table.dv tr.del td, table.dv td.del { background: color-mix(in srgb, var(--err) 15%, transparent); }
+table.dv td.none { background: var(--bg2, var(--hover)); }
+table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
