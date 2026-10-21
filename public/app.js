@@ -162,7 +162,9 @@ async function loadDir(p) {
   const list = await api('GET', 'tree', { path: p });
   childrenCache.set(p, list); return list;
 }
+let treeSeq = 0;
 async function renderTree() {
+  const seq = ++treeSeq;   // 연달아 호출되면 마지막 호출의 결과만 화면에 반영한다
   const root = $('#tree'); const scroll = root.scrollTop;
   const frag = document.createDocumentFragment();
   async function walk(dir, depth) {
@@ -188,6 +190,7 @@ async function renderTree() {
   }
   await walk('', 0);
   if (state.filter && state.filterDirs && !frag.childNodes.length) frag.append(el('div', { className: 'tree-empty', textContent: '설정된 파일 형식이 있는 폴더가 없습니다' }));
+  if (seq !== treeSeq) return;
   root.replaceChildren(frag); root.scrollTop = scroll;
 }
 async function refreshDir(p) { // 변경 후 해당 폴더 재로딩
@@ -196,18 +199,19 @@ async function refreshDir(p) { // 변경 후 해당 폴더 재로딩
   await renderTree();
 }
 function toggleDir(p) { state.expanded.has(p) ? state.expanded.delete(p) : state.expanded.add(p); persistTabs(); return renderTree(); }
-// 폴더: 클릭 = 선택만 (펼침 화살표 클릭 / 더블클릭 / Enter 로 접기·펼치기), 파일: 클릭 = 열기
-// 한 번 클릭할 때는 트리를 다시 그리지 않는다 (다시 그리면 두 번째 클릭이 더블클릭으로 이어지지 않는다)
+// 폴더: 닫혀 있으면 클릭 = 펼치고 선택 / 이미 열려 있으면 클릭 = 선택만 / 더블클릭 = 닫기 (화살표 클릭도 접기·펼치기), 파일: 클릭 = 열기
+// 더블클릭은 클릭 간격(0.4초)으로 직접 판정한다 (첫 클릭에 트리를 다시 그려도 두 번째 클릭을 놓치지 않는다)
+let lastDirClick = { p: '', t: 0 };
 $('#tree').addEventListener('click', async (ev) => {
   const row = ev.target.closest('.row'); if (!row) return;
   const p = row.dataset.path; state.selected = p;
-  if (row.dataset.dir) {
-    if (ev.target.closest('.arrow')) return toggleDir(p);
-    document.querySelectorAll('#tree .row.sel').forEach((r) => r.classList.remove('sel')); row.classList.add('sel');
-  } else { await openFile(p); }
-});
-$('#tree').addEventListener('dblclick', (ev) => {
-  const row = ev.target.closest('.row'); if (row?.dataset.dir && !ev.target.closest('.arrow')) toggleDir(row.dataset.path);
+  if (!row.dataset.dir) { await openFile(p); return; }
+  if (ev.target.closest('.arrow')) return toggleDir(p);
+  const now = Date.now(), dbl = lastDirClick.p === p && now - lastDirClick.t < 400;
+  lastDirClick = { p, t: dbl ? 0 : now };
+  if (dbl) return toggleDir(p);                       // 더블클릭: 닫기
+  if (!state.expanded.has(p)) return toggleDir(p);    // 닫혀 있으면 펼치고 선택
+  document.querySelectorAll('#tree .row.sel').forEach((r) => r.classList.remove('sel')); row.classList.add('sel');   // 이미 열려 있으면 선택만
 });
 $('#tree').addEventListener('keydown', (ev) => { // 키보드: ↑↓ 이동, → 펼치기, ← 접기, Enter 폴더 접기·펼치기/파일 열기
   if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) return;
