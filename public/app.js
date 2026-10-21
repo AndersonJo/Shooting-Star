@@ -22,6 +22,10 @@ async function api(method, route, params = {}, body, signal) {
     rootDir = state.memoDir; params = { ...params, path: params.path.slice(6) };
     if (body && typeof body.to === 'string') body = { ...body, to: body.to.replace(/^@memo\//, '') };
   }
+  if (typeof params.path === 'string' && isExt(params.path)) { // 워크스페이스 밖 파일(⌘O)은 / 를 루트로 접근
+    rootDir = '/'; params = { ...params, path: params.path.slice(5) };
+    if (body && typeof body.to === 'string') body = { ...body, to: body.to.replace(/^@ext\//, '') };
+  }
   const qs = new URLSearchParams(params).toString();
   const res = await fetch(`/api/${route}${qs ? '?' + qs : ''}`, {
     method,
@@ -33,6 +37,11 @@ async function api(method, route, params = {}, body, signal) {
   if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
   return data;
 }
+
+// 경로 종류: '@memo/x' = 메모 폴더, '@ext/Users/a/b.md' = 워크스페이스 밖의 파일(절대경로), 그 외 = 워크스페이스 기준 상대경로
+function isExt(p) { return typeof p === 'string' && p.startsWith('@ext/'); }
+function rootRel(p) { return isMemo(p) ? { root: state.memoDir, rel: p.slice(6) } : isExt(p) ? { root: '/', rel: p.slice(5) } : { root: state.root, rel: p }; }
+const absOf = (p) => (isExt(p) ? p.slice(4) : isMemo(p) ? state.memoDir + '/' + p.slice(6) : state.root + '/' + p);
 
 let toastTimer;
 function toast(msg) {
@@ -239,7 +248,7 @@ $('#btn-collapse').onclick = () => { state.expanded.clear(); persistTabs(); rend
 // 트리에서 글자를 치면, 선택한 위치(폴더면 그 폴더, 파일이면 그 파일이 있는 폴더) 안의 하위 전체에서 이름이 일치하는 곳을
 // 트리 위에 하이라이트한다. ↓/↑(Ctrl+N/P) 로 다음/이전 일치로 이동(접힌 폴더는 자동으로 펼침), Enter 열기, Esc 취소.
 const ts = { on: false, scope: '', anchor: '', files: [], hits: [], map: new Map(), idx: -1 };
-const dirOfSel = () => { const s = state.selected || ''; if (!s || isMemo(s)) return ''; const row = [...document.querySelectorAll('#tree .row')].find((r) => r.dataset.path === s); return row?.dataset.dir ? s : dirOf(s); };
+const dirOfSel = () => { const s = state.selected || ''; if (!s || isMemo(s) || isExt(s)) return ''; const row = [...document.querySelectorAll('#tree .row')].find((r) => r.dataset.path === s); return row?.dataset.dir ? s : dirOf(s); };
 const treeCmp = (a, b) => {   // 트리에 보이는 순서 (같은 폴더 안에서는 폴더가 먼저)
   const x = a.split('/'), y = b.split('/');
   for (let i = 0; i < Math.min(x.length, y.length); i++) {
@@ -411,7 +420,7 @@ function showSaved() {
   clearTimeout(savedFlash); savedFlash = setTimeout(() => { z.hidden = true; }, 3500);
 }
 function beaconSave(t) { // 페이지를 닫는 중에도 전달되도록 keepalive 로 저장 (용량이 작은 파일만)
-  let root = state.root, p = t.path; if (isMemo(p)) { root = state.memoDir; p = p.slice(6); }
+  const { root, rel: p } = rootRel(t.path);
   fetch('/api/file?path=' + encodeURIComponent(p), { method: 'PUT', keepalive: true, headers: { 'X-SS': '1', 'X-SS-Root': encodeURIComponent(root), 'Content-Type': 'application/json' }, body: JSON.stringify({ content: t.content, mtime: t.mtime }) }).catch(() => {});
 }
 window.addEventListener('blur', flushAll);
@@ -449,7 +458,7 @@ async function reload(t = cur()) {
 //  · 트리: 바뀐 폴더만 다시 읽기   · 열린 탭: 저장 안 한 변경이 없으면 자동 반영, 있으면 ⚠ 충돌 표시(저장 시 덮어쓰기 확인)
 let pendingPvScroll = null;
 async function syncTab(t) {
-  if (!t || t.kind === 'image' || t.kind === 'diff' || isMemo(t.path) && t.path !== state.active) return;
+  if (!t || t.kind === 'image' || t.kind === 'diff' || (isMemo(t.path) || isExt(t.path)) && t.path !== state.active) return;
   if (Date.now() - (t._savedAt || 0) < 1500) return;   // 방금 우리가 저장한 파일의 변경 이벤트는 무시
   try {
     const f = await api('GET', 'file', { path: t.path });
@@ -487,9 +496,9 @@ function onFsEvent(d) { // d: { paths, all }
     for (const t of state.tabs) {
       if (t.kind === 'diff') { t.stale = true; if (t.path === state.active) renderContent(); continue; }   // 열려 있는 diff 는 다시 계산
       if (t.kind === 'image') { if (!set || set.has(t.path)) { imgv.ver.set(t.path, Date.now()); if (t.path === state.active) renderContent(); } continue; }   // 이미지가 바뀌면 다시 불러온다
-      if (!isMemo(t.path) && (!set || set.has(t.path))) syncTab(t);
+      if (!isMemo(t.path) && !isExt(t.path) && (!set || set.has(t.path))) syncTab(t);
     }
-    if (isMemo(state.active)) syncTab(cur());
+    if (isMemo(state.active) || isExt(state.active)) syncTab(cur());
     refreshMemos(); refreshGit();
   }, 150);
 }
@@ -533,8 +542,8 @@ function renderTabs() {
         ['오른쪽 탭 모두 닫기', () => closeTabs(right), right.length ? '' : 'disabled'],
         ['모두 닫기', () => closeTabs(state.tabs.map((x) => x.path))],
         '-',
-        ['경로 복사', () => copy(isMemo(t.path) ? state.memoDir + '/' + t.path.slice(6) : state.root + '/' + t.path, '전체 경로 복사됨')],
-        ...(isMemo(t.path) ? [] : [[`${FM}에서 보기`, () => revealPath(t.path, 'reveal')]]),
+        ['경로 복사', () => copy(absOf(t.path), '전체 경로 복사됨')],
+        ...(isMemo(t.path) || isExt(t.path) ? [] : [[`${FM}에서 보기`, () => revealPath(t.path, 'reveal')]]),
       ].map((it) => (it === '-' ? ['-'] : it)));
     };
     return tab;
@@ -572,7 +581,7 @@ function renderToolbar() {
   }
   items.push(
     btn('복사', '전체 내용 복사', () => copy(t.content, '전체 복사됨')),
-    btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) ? state.memoDir + '/' + t.path.slice(6) : e.shiftKey ? state.root + '/' + t.path : t.path, '경로 복사됨')),
+    btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) || isExt(t.path) || e.shiftKey ? absOf(t.path) : t.path, '경로 복사됨')),
     ...(t.kind === 'md' && (t.mode === 'edit' || t.mode === 'split' || t.mode === 'smart') ? [btn('🖼 이미지', '이미지 첨부 — 붙여넣기·끌어놓기도 됩니다 (문서 폴더의 images/ 에 저장)', pickImages)] : []),
     btn('✨ Prettify', '정리/포맷 (⌘⌥L)', prettify),
   );
@@ -789,7 +798,7 @@ function renderMarkdown(t, htmlOverride) { // htmlOverride: 이미 변환/정화
     const s = img.getAttribute('src');
     if (s && !/^([a-z]+:|\/\/|data:)/i.test(s)) {
       const rp = resolveRel(base, decodeURI(s));
-      img.src = isMemo(t.path) ? '/raw?root=' + encodeURIComponent(state.memoDir) + '&path=' + encodeURIComponent(rp.replace(/^@memo\//, '')) : '/raw?root=' + encodeURIComponent(state.root) + '&path=' + encodeURIComponent(rp);   // 메모는 ~/.shooting-star/memos 기준
+      const rr = rootRel(rp.startsWith('@') ? rp : (isMemo(t.path) ? '@memo/' : '') + rp); img.src = '/raw?root=' + encodeURIComponent(rr.root) + '&path=' + encodeURIComponent(rr.rel);   // 메모는 ~/.shooting-star/memos 기준
     }
   });
   doc.querySelectorAll('a').forEach((a) => {
@@ -1062,7 +1071,7 @@ document.addEventListener('keydown', (e) => {
 // ───────── 트리에서 ⌘/Ctrl+C → 선택한 파일/폴더의 전체 경로 복사 (Shift 를 같이 누르면 프로젝트 기준 상대 경로) ─────────
 function selectedPath(relative) {
   const sel = state.selected || '';
-  if (isMemo(sel)) return state.memoDir + '/' + sel.slice(6);
+  if (isMemo(sel) || isExt(sel)) return absOf(sel);
   return relative ? (sel || '.') : (sel ? state.root + '/' + sel : state.root);
 }
 const inTree = () => !!document.activeElement?.closest('#tree');
@@ -1081,7 +1090,7 @@ document.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (k === 's') { e.preventDefault(); save(); }
   else if (k === 'p' && !e.shiftKey) { e.preventDefault(); openPalette(); }
-  else if (k === 'o') { e.preventDefault(); openPicker(); }
+  else if (k === 'o' && !e.altKey) { e.preventDefault(); openPicker(e.shiftKey ? 'dir' : 'file'); }   // ⌘/Ctrl+O: 파일 열기, +Shift: 폴더(워크스페이스) 전환
   else if (k === 'b') { e.preventDefault(); document.body.classList.toggle('no-side'); store.set('noSide', document.body.classList.contains('no-side')); }
   else if (k === 'w' && cur()) { e.preventDefault(); closeTab(state.active); }
   else if (e.code === 'KeyN' && e.altKey) { e.preventDefault(); newMemo(); }
@@ -1945,8 +1954,7 @@ function imageViewer(t) {
 // ───────── 마크다운 이미지 첨부 ─────────
 // 편집기에 이미지를 붙여넣거나 끌어놓으면 <문서 폴더>/images/ 에 저장하고, 커서 위치에 ![이름](images/파일) 을 넣는다.
 async function uploadImage(destRel, file) {
-  let root = state.root, p = destRel;
-  if (isMemo(p)) { root = state.memoDir; p = p.slice(6); }   // 메모는 ~/.shooting-star/memos/images/
+  const { root, rel: p } = rootRel(destRel);   // 메모는 ~/.shooting-star/memos/images/
   const r = await fetch('/api/upload?path=' + encodeURIComponent(p), { method: 'POST', headers: { 'X-SS': '1', 'X-SS-Root': encodeURIComponent(root), 'Content-Type': file.type || 'application/octet-stream' }, body: file });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.statusText);
@@ -2197,6 +2205,7 @@ function drawPath(t) {
   const inner = el('span', { className: 'pth' }); box.append(inner);
   if (t.kind === 'diff') { inner.textContent = (t.repo + '/' + t.file).replace(state.home || '\u0000', '~'); inner.title = '변경 내용 (diff)'; return; }
   if (isMemo(t.path)) { inner.textContent = ((state.memoDir || '') + '/' + t.path.slice(6)).replace(state.home || '\u0000', '~'); inner.title = '메모 파일 위치'; return; }
+  if (isExt(t.path)) { inner.textContent = absOf(t.path).replace(state.home || '\u0000', '~'); inner.title = '워크스페이스 밖의 파일'; return; }
   const full = state.root + (t.path ? '/' + t.path : ''), segs = []; let acc = '';
   for (const p of full.split('/').filter(Boolean)) { acc += '/' + p; segs.push({ label: p, abs: acc }); }
   const hi = state.home ? segs.findIndex((s) => s.abs === state.home) : -1;   // 홈 아래면 홈까지를 ~ 하나로
@@ -2214,10 +2223,10 @@ function drawPath(t) {
   });
 }
 
-// ───────── 폴더 열기 (⌘O) ─────────
+// ───────── 폴더 열기 (⌘⇧O) / 파일 열기 (⌘O) ─────────
 const recents = () => store.get('recent', []);
 function addRecent(p) { store.set('recent', [p, ...recents().filter((x) => x !== p)].slice(0, 12)); }
-const pk = { items: [], sel: 0, dir: '' };
+const pk = { items: [], sel: 0, dir: '', mode: 'dir' };
 // 즐겨찾기 폴더 (서버의 ~/.config/shooting-star/favorites.json 에 저장)
 let favs = [];
 const loadFavs = async () => { try { favs = await api('GET', 'favorites'); } catch { favs = []; } drawFavBtn(); };
@@ -2263,24 +2272,35 @@ async function pruneRecents() { // 삭제되었거나 이동된 폴더는 최근
   await Promise.all(recents().map(async (r) => { try { await api('GET', 'browse', { path: r }); alive.add(r); } catch {} }));
   store.set('recent', recents().filter((r) => alive.has(r)));
 }
-async function openPicker() {
-  $('#picker').hidden = false; const inp = $('#pk-input');
-  inp.value = state.root + '/'; inp.focus(); await pruneRecents(); await pkLoad();
+async function openPicker(mode = 'dir') {
+  pk.mode = mode; $('#picker').hidden = false; const inp = $('#pk-input');
+  inp.placeholder = mode === 'file' ? '열 파일의 경로 (/path/to/file.md)' : '/path/to/folder';
+  inp.value = (mode === 'file' && state.active && isExt(state.active) ? dirOf(absOf(state.active)) : state.root) + '/'; inp.focus(); await pruneRecents(); await pkLoad();
 }
 const closePicker = () => { $('#picker').hidden = true; };
+// 워크스페이스 밖의 파일을 탭으로 연다 (워크스페이스는 그대로). 워크스페이스 안의 파일이면 일반 탭으로 연다.
+function openExternal(abs) {
+  const inside = abs.startsWith(state.root + '/');
+  openFile(inside ? abs.slice(state.root.length + 1) : '@ext' + abs);
+}
 async function pkLoad() {
   const v = $('#pk-input').value;
   const slash = v.lastIndexOf('/'); const dir = v.slice(0, slash + 1) || '/'; const part = v.slice(slash + 1).toLowerCase();
   let items = [];
   try {
-    const r = await api('GET', 'browse', { path: dir });
+    const file = pk.mode === 'file';
+    const r = await api('GET', 'browse', file ? { path: dir, files: '1' } : { path: dir });
     pk.dir = r.path;
-    items.push({ label: '▶ 이 폴더 열기: ' + r.path, openPath: r.path, act: () => go(r.path) });
+    const base = r.path.replace(/\/$/, '');
+    if (file) {
+      const hit = (r.files || []).filter((f) => f.toLowerCase().startsWith(part)).sort((a, b) => (b.toLowerCase() === part) - (a.toLowerCase() === part));   // 경로를 통째로 붙여넣으면 그 파일이 맨 앞
+      for (const f of hit) items.push({ label: '📄 ' + f, act: () => { closePicker(); openExternal(base + '/' + f); } });
+    } else items.push({ label: '▶ 이 폴더 열기: ' + r.path, openPath: r.path, act: () => go(r.path) });
     if (r.parent) items.push({ label: '..', act: () => { $('#pk-input').value = r.parent.replace(/\/?$/, '/'); pkLoad(); } });
     for (const d of r.dirs) if (d.toLowerCase().startsWith(part))
-      items.push({ label: '📁 ' + d, act: () => { $('#pk-input').value = r.path.replace(/\/$/, '') + '/' + d + '/'; pkLoad(); } });
+      items.push({ label: '📁 ' + d, act: () => { $('#pk-input').value = base + '/' + d + '/'; pkLoad(); } });
   } catch { items.push({ label: '(존재하지 않는 경로)', act: () => {} }); }
-  if (!part) {
+  if (!part && pk.mode === 'dir') {
     const favItems = favs.map((f) => ({ label: '★ ' + f, act: () => go(f), remove: f }));
     items = [items[0], ...favItems, ...items.slice(1)];
     for (const r of recents()) if (r !== state.root && !favs.includes(r)) items.push({ label: '🕘 ' + r, act: () => go(r) });
@@ -2316,10 +2336,10 @@ $('#pk-input').onkeydown = (e) => {
   if (e.key === 'Escape') closePicker();
   else if (e.key === 'ArrowDown') { e.preventDefault(); pk.sel = Math.min(pk.sel + 1, pk.items.length - 1); drawPicker(); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); pk.sel = Math.max(pk.sel - 1, 0); drawPicker(); }
-  else if (e.key === 'Enter') { e.preventDefault(); (e.metaKey || e.ctrlKey ? () => go(pk.dir) : pk.items[pk.sel]?.act)?.(); }
+  else if (e.key === 'Enter') { e.preventDefault(); (e.metaKey || e.ctrlKey ? () => (pk.mode === 'dir' ? go(pk.dir) : null) : pk.items[pk.sel]?.act)?.(); }
 };
 document.addEventListener('mousedown', (e) => { if (!$('#picker').hidden && !e.target.closest('#picker')) closePicker(); });
-$('#root-name').onclick = openPicker; $('#root-name').style.cursor = 'pointer';
+$('#root-name').onclick = () => openPicker('dir'); $('#root-name').style.cursor = 'pointer';
 
 // Shift 두 번 → 파일 찾기 (IntelliJ 의 Search Everywhere 처럼)
 (() => {
@@ -2389,7 +2409,7 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
   state.root = info.root; state.version = info.version; state.platform = info.platform; state.memoDir = info.memoDir; state.home = info.home;
   api('PUT', 'last', {}, { root: info.root }).catch(() => {}); state.home = info.home;
   history.replaceState(null, '', '/?root=' + encodeURIComponent(info.root));
-  $('#root-name').textContent = info.name; $('#root-name').title = info.root + '  (클릭 / ⌘O: 폴더 열기)';
+  $('#root-name').textContent = info.name; $('#root-name').title = info.root + '  (클릭 / ⌘⇧O: 폴더 열기)';
   addRecent(info.root); await loadFavs(); await loadSettings(); refreshGit(); if (state.filter) await fetchFilterDirs(); drawFilterBtn(); watchIndex();
   state.expanded = new Set(store.get(wsKey('expanded'), []));
   for (const s of store.get(wsKey('tabs'), [])) {

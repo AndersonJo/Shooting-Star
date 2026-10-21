@@ -96,7 +96,7 @@ function isDirSafe(p) { try { return fs.statSync(p).isDirectory(); } catch { ret
 // 요청 경로(상대)를 root 안의 절대경로로 변환. 밖으로 나가면 예외.
 function resolveSafe(root, rel) {
   const abs = path.resolve(root, '.' + path.sep + (rel || ''));
-  if (abs !== root && !abs.startsWith(root + path.sep)) throw httpError(403, 'outside root');
+  if (abs !== root && !abs.startsWith(root.endsWith(path.sep) ? root : root + path.sep)) throw httpError(403, 'outside root');
   return abs;
 }
 // 요청별 워크스페이스 루트 (브라우저 탭마다 다른 폴더를 열 수 있음)
@@ -699,10 +699,12 @@ async function api(req, res, url, root) {
       return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir(), version: VERSION, build: BUILD, dir: __dirname, pid: process.pid, platform: process.platform });
     case 'GET /api/browse': { // 폴더 선택기: 절대경로의 하위 폴더 목록
       const dir = fs.realpathSync(path.resolve((p || defaultWorkspace()).replace(/^~(?=$|\/)/, HOME)));
-      const list = (await fsp.readdir(dir, { withFileTypes: true }))
-        .filter((e) => (e.isDirectory() || (e.isSymbolicLink() && isDirSafe(path.join(dir, e.name)))) && !e.name.startsWith('.'))
-        .map((e) => e.name).sort((a, b) => a.localeCompare(b));
-      return send(res, 200, { path: dir, parent: path.dirname(dir) !== dir ? path.dirname(dir) : null, dirs: list });
+      const ents = (await fsp.readdir(dir, { withFileTypes: true })).filter((e) => !e.name.startsWith('.'));
+      const isD = (e) => e.isDirectory() || (e.isSymbolicLink() && isDirSafe(path.join(dir, e.name)));
+      const byName = (a, b) => a.localeCompare(b);
+      const list = ents.filter(isD).map((e) => e.name).sort(byName);
+      const files = url.searchParams.get('files') === '1' ? ents.filter((e) => !isD(e)).map((e) => e.name).sort(byName) : undefined;   // 파일 열기(⌘O)용
+      return send(res, 200, { path: dir, parent: path.dirname(dir) !== dir ? path.dirname(dir) : null, dirs: list, files });
     }
     case 'GET /api/tree':
       return send(res, 200, await listDir(root, p));
