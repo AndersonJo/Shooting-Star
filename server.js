@@ -252,7 +252,7 @@ function sendFile(req, res, abs, type, st, extra = {}) { // ETag 로 재검증(3
 
 // ───────── 업데이트 적용 ─────────
 let updateJob = null; // { state: running|done|error|manual, kind, log: [], error, manual }
-const findBrew = () => ['/opt/homebrew/bin/brew', '/usr/local/bin/brew', '/home/linuxbrew/.linuxbrew/bin/brew'].find((p) => fs.existsSync(p)) || null;
+const findBrew = () => process.env.SS_BREW || ['/opt/homebrew/bin/brew', '/usr/local/bin/brew', '/home/linuxbrew/.linuxbrew/bin/brew'].find((p) => fs.existsSync(p)) || null;
 function relaunchApp(app) { // 앱을 종료하고 새 버전으로 다시 연다. (서버는 새 앱이 시작될 때 코드가 다르면 스스로 교체된다)
   if (process.env.SS_NO_RELAUNCH) return;
   setTimeout(() => {

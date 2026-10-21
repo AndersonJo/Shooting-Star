@@ -13,6 +13,7 @@
 
 - Node.js 18+ 필요 (Homebrew / apt 가 자동 설치). 설치 후 Spotlight/Raycast 에서 `shooting-star`, 터미널에서 `ss .`
 - 수동 설치한 mac 앱을 처음 열 때 "확인되지 않은 개발자" 경고가 뜨면 우클릭 → 열기 (또는 `xattr -dr com.apple.quarantine /Applications/shooting-star.app`)
+- 업데이트 버튼: 설정(⚙) → 버전/업데이트 → `지금 업데이트` (상태바 `⬆` 칩을 눌러도 됩니다). 설치 방식에 맞게 자동으로 처리합니다 — 소스 설치: `git pull --ff-only` (+ 앱 재빌드) 후 서버 재시작 / Homebrew: `brew upgrade --cask` / zip 설치: 릴리스 zip 을 받아 sha256 검증 후 앱 교체 / `.deb`: 설치 명령 안내. 저장하지 않은 탭이 있으면 막습니다
 - 새 버전이 나오면 앱 상태바에 `⬆ vX.Y.Z` 로 알려 줍니다 (설정에서 끌 수 있음)
 
 ## 문제 해결

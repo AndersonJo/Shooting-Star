@@ -842,7 +842,7 @@ async function applyUpdate(msg) { // 서버가 설치 방식에 맞게 업데이
     msg.textContent = j.log?.at(-1) || '진행 중…';
     if (j.state === 'error') { msg.textContent = '실패: ' + j.error; return; }
     if (j.state === 'manual') { msg.textContent = '이 설치 방식은 자동 업데이트를 지원하지 않습니다: ' + j.manual; return; }
-    if (j.state === 'done') { msg.textContent = '완료 — 다시 시작하는 중…'; break; }
+    if (j.state === 'done' || j.state === 'idle') { msg.textContent = '완료 — 다시 시작하는 중…'; break; }   // idle = 서버가 이미 새 코드로 교체되어 작업 기록이 사라짐
   }
   for (let i = 0; i < 90; i++) { // 새 서버가 뜰 때까지 기다렸다가 새로고침 (앱 교체/brew 는 앱 자체가 다시 열린다)
     await sleep(1000);
