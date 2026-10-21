@@ -233,7 +233,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func webView(_ wv: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
                  initiatedByFrame f: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
         let a = NSAlert(); a.messageText = prompt
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        // 경로가 잘려 보이지 않도록 기본 텍스트 길이에 맞춰 입력창을 넓힘 (420 ~ 900pt)
+        let w = min(900, max(420, CGFloat((defaultText ?? "").count) * 8 + 40))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: w, height: 24))
         field.stringValue = defaultText ?? ""
         a.accessoryView = field
         a.addButton(withTitle: "확인"); a.addButton(withTitle: "취소")
