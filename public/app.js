@@ -831,6 +831,7 @@ $('#tree').addEventListener('contextmenu', (ev) => {
   const items = [
     ['새 파일…', () => createEntry(baseDir, false)],
     ['새 폴더…', () => createEntry(baseDir, true)],
+    ...(row && isDir ? [[favs.includes(state.root + '/' + p) ? '즐겨찾기에서 제거' : '★ 즐겨찾기에 추가', () => toggleFavDir(state.root + '/' + p)]] : []),
     [isDir ? `${FM}에서 열기` : `${FM}에서 보기`, () => revealPath(p, 'reveal')],
   ];
   if (!isDir) items.push(['기본 앱으로 열기', () => revealPath(p, 'open')]);
@@ -2077,17 +2078,24 @@ function drawFavList() {
   const rows = favs.map((f) => {
     const x = el('span', { className: 'fx', textContent: '✕', title: '즐겨찾기에서 제거' });
     x.onclick = async (e) => { e.stopPropagation(); favs = favs.filter((y) => y !== f); await saveFavs(); };
-    const row = el('div', { className: 'fav' + (f === state.root ? ' cur' : ''), title: f },
-      el('span', { className: 'fn', textContent: f.split('/').filter(Boolean).pop() || '/' }), x);
-    row.onclick = () => f !== state.root && go(f);
+    const segs = f.split('/').filter(Boolean), inside = f.startsWith(state.root + '/');
+    const row = el('div', { className: 'fav' + (f === state.root ? ' cur' : ''), title: f + (f === state.root ? '' : inside ? '\n클릭: 트리에서 이 폴더로 이동' : '\n클릭: 이 폴더를 워크스페이스로 열기') },
+      el('span', { className: 'fn', textContent: segs.at(-1) || '/' }), segs.length > 1 ? el('span', { className: 'fp', textContent: segs.at(-2) }) : '', x);   // 같은 이름이 여러 개여도 구분되도록 상위 폴더 이름을 흐리게 덧붙인다
+    row.onclick = () => {
+      if (f === state.root) revealInTree('', true);   // 현재 폴더면 트리 맨 위로
+      else if (f.startsWith(state.root + '/')) revealInTree(f.slice(state.root.length + 1), true);   // 현재 폴더 안이면 트리에서 바로 그 폴더로 이동 (펼치고 선택)
+      else go(f);   // 밖이면 그 폴더를 워크스페이스로 연다
+    };
     return row;
   });
   box.replaceChildren(head, ...rows);
 }
-$('#btn-fav').onclick = async () => {
-  favs = favs.includes(state.root) ? favs.filter((f) => f !== state.root) : [state.root, ...favs];
-  await saveFavs(); toast(favs.includes(state.root) ? '즐겨찾기에 추가됨' : '즐겨찾기에서 제거됨');
-};
+async function toggleFavDir(abs) {
+  const had = favs.includes(abs);
+  favs = had ? favs.filter((f) => f !== abs) : [abs, ...favs];
+  await saveFavs(); toast(had ? '즐겨찾기에서 제거됨' : '즐겨찾기에 추가됨');
+}
+$('#btn-fav').onclick = () => toggleFavDir(state.root);
 const go = (p) => { addRecent(p); location.href = '/?root=' + encodeURIComponent(p); };
 async function pruneRecents() { // 삭제되었거나 이동된 폴더는 최근 목록에서 제거
   const alive = new Set();

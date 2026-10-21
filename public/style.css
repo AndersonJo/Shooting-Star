@@ -882,3 +882,4 @@ table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
 .row.g-U .nm, .row.g-U::after { color: var(--err); }
 .row.g-dir .nm { color: inherit; }
 .row.g-dir.g-M::after { color: var(--num); } .row.g-dir.g-U::after { color: var(--err); }
+.fav .fp { margin-left: 6px; color: var(--fg2); font-size: 11px; opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
