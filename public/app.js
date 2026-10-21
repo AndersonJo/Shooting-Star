@@ -398,7 +398,16 @@ function connectEvents() {
   es.onmessage = (e) => { try { onFsEvent(JSON.parse(e.data)); } catch {} };
   es.onopen = () => { if (!first) onFsEvent({ all: true, paths: [] }); first = false; };   // 서버가 재시작되어 다시 연결되면 전체 동기화
 }
-window.addEventListener('focus', () => onFsEvent({ all: true, paths: [] }));   // 감시가 안 되는 환경을 위한 보조 수단
+// 다른 앱을 쓰다 돌아오면 파일을 다시 읽는다 (감시가 놓친 변경 대비). 여러 신호가 한꺼번에 와도 한 번만 실행.
+let lastActivate = 0;
+function onActivate() {
+  if (document.hidden || Date.now() - lastActivate < 400) return;
+  lastActivate = Date.now(); onFsEvent({ all: true, paths: [] });
+}
+window.addEventListener('focus', onActivate);
+document.addEventListener('visibilitychange', onActivate);
+window.addEventListener('pageshow', onActivate);
+window.onNativeActivate = onActivate;   // macOS 앱 껍데기에서 호출
 
 // ───────── 렌더링 ─────────
 function renderAll() { renderTabs(); renderToolbar(); renderContent(); renderTree(); validate(); }

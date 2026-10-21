@@ -178,6 +178,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func notifyFullscreen(_ n: Notification, _ on: Bool) {
         ((n.object as? NSWindow)?.contentView as? WKWebView)?.evaluateJavaScript("window.onNativeFullscreen && window.onNativeFullscreen(\(on))", completionHandler: nil)
     }
+    // 다른 앱을 쓰다 돌아오면(앱 활성화 / 창이 key 가 될 때) 웹 UI 가 파일을 다시 읽도록 알린다.
+    // WKWebView 는 앱 전환 시 window 'focus' 이벤트를 안정적으로 주지 않는다.
+    func notifyActivated(_ w: NSWindow?) {
+        (w?.contentView as? WKWebView)?.evaluateJavaScript("window.onNativeActivate && window.onNativeActivate()", completionHandler: nil)
+    }
+    func applicationDidBecomeActive(_ n: Notification) { notifyActivated(NSApp.keyWindow) }
+    func windowDidBecomeKey(_ n: Notification) { notifyActivated(n.object as? NSWindow) }
     func windowDidEnterFullScreen(_ n: Notification) { notifyFullscreen(n, true) }
     func windowDidExitFullScreen(_ n: Notification) { notifyFullscreen(n, false) }
 
