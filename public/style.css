@@ -392,10 +392,11 @@ table.csv tr:hover td { background: var(--accent-bg); }
 
 /* 편집기: 색칠 레이어(pre) 위에 투명 글자의 textarea 를 겹친다. 두 요소의 폰트/패딩/줄바꿈이 동일해야 한다. */
 .ed { position: relative; height: 100%; }
-.ed pre.hl, .ed textarea.editor { position: absolute; inset: 0; margin: 0; width: 100%; height: 100%; padding: 12px 16px; border: 0; font: 13px/1.55 var(--mono); tab-size: 2; letter-spacing: 0; white-space: pre; word-break: normal; overflow: scroll; }
-.ed pre.hl.wrap, .ed textarea.editor.wrap { white-space: pre-wrap; word-break: break-word; }
-.ed pre.hl { pointer-events: none; color: var(--fg); background: var(--bg); }
-.ed pre.hl::-webkit-scrollbar-thumb { background: transparent; border-color: transparent; }
+.ed pre.hl, .ed pre.fm, .ed textarea.editor { position: absolute; inset: 0; margin: 0; width: 100%; height: 100%; padding: 12px 16px; border: 0; font: 13px/1.55 var(--mono); tab-size: 2; letter-spacing: 0; white-space: pre; word-break: normal; overflow: scroll; }
+.ed pre.hl.wrap, .ed pre.fm.wrap, .ed textarea.editor.wrap { white-space: pre-wrap; word-break: break-word; }
+.ed { background: var(--bg); }
+.ed pre.hl { pointer-events: none; color: var(--fg); background: transparent; }
+.ed pre.fm::-webkit-scrollbar-thumb, .ed pre.hl::-webkit-scrollbar-thumb { background: transparent; border-color: transparent; }
 .ed textarea.editor { background: transparent; z-index: 1; }
 .ed textarea.editor.hlon { color: transparent; caret-color: var(--fg); }
 .ed textarea.editor.hlon::selection { background: var(--sel-a); color: transparent; }
@@ -493,7 +494,7 @@ table.csv tr:hover td { background: var(--accent-bg); }
 .mv-foot { padding: 4px 10px; border-top: 1px solid var(--bd); font: 11px var(--mono); color: var(--fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 편집기 글자 배율 (색칠 레이어와 입력창은 반드시 같은 크기) */
-.ed pre.hl, .ed textarea.editor { font-size: calc(13px * var(--cz)); }
+.ed pre.hl, .ed pre.fm, .ed textarea.editor { font-size: calc(13px * var(--cz)); }
 
 /* 폴더 선택기: 경로 조각 클릭 */
 .pseg { cursor: pointer; border-radius: 3px; padding: 0 1px; }
@@ -524,3 +525,20 @@ table.csv tr:hover td { background: var(--accent-bg); }
 .st-ver { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 2px 6px 6px; font-size: 12.5px; }
 .st-ver button { border-color: var(--bd); padding: 1px 8px; }
 .st-vmsg { flex-basis: 100%; color: var(--fg2); font-size: 12px; }
+
+/* 문서 안 찾기 */
+main { position: relative; }
+.ed pre.fm { pointer-events: none; color: transparent; background: transparent; }
+mark.fm { background: var(--mark-bg); color: transparent; border-radius: 2px; }
+mark.fm.cur { background: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+mark.fmd { background: var(--mark-bg); color: var(--mark-fg); border-radius: 2px; }
+mark.fmd.cur { background: var(--accent); color: var(--bg); }
+#fbar { position: absolute; right: 22px; top: 76px; z-index: 6; display: flex; align-items: center; gap: 4px; padding: 5px 6px; background: var(--bg3); border: 1px solid var(--bd); border-radius: 8px; box-shadow: 0 4px 16px var(--shadow); }
+#fbar[hidden] { display: none; }
+#fb-q { width: 230px; background: var(--bg); color: var(--fg); border: 1px solid var(--bd); border-radius: 6px; padding: 4px 8px; font: 13px var(--sans); outline: 0; }
+#fb-q:focus { border-color: var(--accent); }
+#fb-count { min-width: 58px; text-align: center; font-size: 12px; color: var(--fg2); }
+#fb-count.none { color: var(--err); }
+#fbar button { padding: 1px 7px; }
+#fbar .tg { font: 600 12px var(--mono); color: var(--fg2); border: 1px solid var(--bd); }
+#fbar .tg.on { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }

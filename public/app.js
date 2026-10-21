@@ -223,6 +223,9 @@ function revealAt({ line, col = 0, len = 0 }) { // 해당 줄/열을 선택하�
   const lines = ta.value.split('\n'); let off = 0;
   for (let i = 0; i < line - 1 && i < lines.length; i++) off += lines[i].length + 1;
   ta.focus(); ta.setSelectionRange(off + col, off + col + len);
+  taScrollTo(ta, lines, line, col);
+}
+function taScrollTo(ta, lines, line, col) { // 해당 줄/열이 화면 가운데쯤 오도록 스크롤 (선택/포커스는 건드리지 않는다)
   ta.scrollTop = Math.max(0, (line - 1) * parseFloat(getComputedStyle(ta).lineHeight) - ta.clientHeight / 3);
   if (!ta.classList.contains('wrap')) { // 줄바꿈이 없으면 일치 위치가 보이도록 가로 스크롤도 맞춘다 (글자 폭은 실제로 측정)
     const m = el('span', { textContent: (lines[line - 1] || '').slice(0, col) });
@@ -370,6 +373,7 @@ function renderContent() {
     const wrapCls = state.wrap ? ' wrap' : '';
     const ta = el('textarea', { className: 'editor' + wrapCls, value: t.content, spellcheck: false });
     const pre = el('pre', { className: 'hl' + wrapCls, ariaHidden: 'true' });
+    const fm = el('pre', { className: 'fm' + wrapCls, ariaHidden: 'true' });   // 문서 안 찾기 표시 레이어
     let raf = 0;
     const paint = () => { // 색칠은 프레임당 한 번, 너무 큰 파일은 생략
       cancelAnimationFrame(raf);
@@ -380,24 +384,25 @@ function renderContent() {
         pre.scrollTop = ta.scrollTop; pre.scrollLeft = ta.scrollLeft;
       });
     };
-    ta.onscroll = () => { pre.scrollTop = ta.scrollTop; pre.scrollLeft = ta.scrollLeft; };
+    ta.onscroll = () => { pre.scrollTop = fm.scrollTop = ta.scrollTop; pre.scrollLeft = fm.scrollLeft = ta.scrollLeft; };
     ta.oninput = () => {
       t.content = ta.value;
       renderTabs(); renderToolbarDirtyOnly(); validate(); updatePreview(); paint();
+      if (fb.open) { clearTimeout(fb.timer); fb.timer = setTimeout(() => runFileFind(false), 120); }
       if (isMemo(t.path)) { clearTimeout(t._as); t._as = setTimeout(() => save(t, true).then(refreshMemos), 800); } // 메모는 입력을 멈추면 자동 저장
     };
     paint();
     ta.onkeydown = (e) => {
       if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey) {
         e.preventDefault(); document.execCommand('insertText', false, '  ');
-      }
+      } else if (e.key === 'Escape' && fb.open) { e.preventDefault(); closeFileFind(); }
     };
     const upd = () => {
       const before = ta.value.slice(0, ta.selectionStart).split('\n');
       $('#st-pos').textContent = `Ln ${before.length}, Col ${before.at(-1).length + 1}`;
     };
     ta.onkeyup = ta.onclick = upd;
-    return el('div', { className: 'pane' }, el('div', { className: 'ed' }, pre, ta));
+    return el('div', { className: 'pane' }, el('div', { className: 'ed' }, fm, pre, ta));
   };
   if (t.mode === 'edit') panes.push(editor());
   else if (t.mode === 'split') panes.push(editor(), el('div', { className: 'pane', id: 'preview' }));
@@ -406,6 +411,7 @@ function renderContent() {
   const ed = $('textarea.editor'); if (ed) { ed.parentElement.style.overflow = 'hidden'; }
   updatePreview();
   validate();
+  if (fb.open) { placeFindBar(); runFileFind(true); }   // 탭/모드가 바뀌어도 검색 유지
 }
 const renderToolbarDirtyOnly = () => renderToolbar();
 
@@ -419,6 +425,7 @@ function updatePreview() {
       else if (t.kind === 'md') pv.replaceChildren(renderMarkdown(t));
       else if (t.mode === 'tree') pv.replaceChildren(renderObjTree(t));
     } catch (e) { pv.replaceChildren(el('pre', { className: 'tree', textContent: e.message, style: 'color:var(--err)' })); }
+    if (fb.open) runFileFind(false);   // 미리보기가 다시 그려지면 표시도 다시
   }, t.mode === 'split' ? 120 : 0);
 }
 
@@ -674,6 +681,8 @@ document.addEventListener('keydown', (e) => {
   else if (e.code === 'KeyN' && e.altKey) { e.preventDefault(); newMemo(); }
   else if (k === ',') { e.preventDefault(); $('#settings') && !$('#settings').hidden ? ($('#settings').hidden = true) : openSettings(); }
   else if (k === 'f' && e.shiftKey) { e.preventDefault(); openFind(); }
+  else if (k === 'f' && !e.shiftKey && !e.altKey) { e.preventDefault(); openFileFind(); }
+  else if (k === 'g' && fb.open) { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
   else if (e.code === 'KeyL' && e.altKey) { e.preventDefault(); prettify(); }
   else if (k === 'e' && cur()) { // 보기 ↔ 편집
     e.preventDefault(); const t = cur(); const ms = MODES[t.kind].map((m) => m[0]);
@@ -1020,6 +1029,122 @@ document.querySelectorAll('#activity .act').forEach((b) => {
     else { setView(b.dataset.view, true); store.set('noSide', false); }
   };
 });
+
+// ───────── 문서 안에서 찾기 (⌘/Ctrl+F) ─────────
+// 편집기: 원문에서 찾아 입력창 뒤의 표시 레이어(pre.fm)에 모든 일치를 칠한다. 보기 모드(마크다운/CSV/트리): 화면 텍스트에서 직접 찾아 <mark> 로 감싼다.
+const fb = { open: false, q: '', matches: [], idx: -1, dom: false, built: false, timer: 0, opts: store.get('fbopts', { case: false, word: false, regex: false }) };
+const escHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function fbRegex() {
+  if (!fb.q) return null;
+  let src = fb.opts.regex ? fb.q : fb.q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (fb.opts.word) src = `\\b(?:${src})\\b`;
+  try { return new RegExp(src, fb.opts.case ? 'g' : 'gi'); } catch { return 'bad'; }
+}
+function buildFileFind() {
+  if (fb.built) return; fb.built = true;
+  const bar = $('#fbar');
+  const q = el('input', { id: 'fb-q', placeholder: '파일에서 찾기…', autocomplete: 'off', spellcheck: false });
+  const btn = (txt, title, fn) => { const b = el('button', { textContent: txt, title }); b.onclick = fn; return b; };
+  const tg = (key, label, title) => {
+    const b = el('button', { textContent: label, title, className: 'tg' + (fb.opts[key] ? ' on' : '') });
+    b.onclick = () => { fb.opts[key] = !fb.opts[key]; b.classList.toggle('on', fb.opts[key]); store.set('fbopts', fb.opts); runFileFind(true); q.focus(); };
+    return b;
+  };
+  bar.append(q, el('span', { id: 'fb-count' }), btn('↑', '이전 (Shift+Enter)', () => stepFind(-1)), btn('↓', '다음 (Enter)', () => stepFind(1)),
+    tg('case', 'Cc', '대소문자 구분'), tg('word', 'W', '단어 단위'), tg('regex', '.*', '정규식'), btn('✕', '닫기 (Esc)', closeFileFind));
+  q.oninput = () => { fb.q = q.value; clearTimeout(fb.timer); fb.timer = setTimeout(() => runFileFind(true), 100); };
+  q.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeFileFind(); }
+  };
+}
+const placeFindBar = () => { $('#fbar').style.top = ($('#content').offsetTop + 8) + 'px'; };
+function openFileFind() {
+  if (!cur()) return;
+  buildFileFind();
+  const ta = $('textarea.editor'); let sel = '';
+  if (ta && ta.selectionEnd > ta.selectionStart) sel = ta.value.slice(ta.selectionStart, ta.selectionEnd); else sel = String(getSelection());
+  const q = $('#fb-q');
+  if (sel && !sel.includes('\n') && sel.length < 200) q.value = sel; else if (!q.value) q.value = store.get('fbq', '');
+  fb.q = q.value; fb.open = true; $('#fbar').hidden = false; placeFindBar(); q.focus(); q.select();
+  runFileFind(true);
+}
+function closeFileFind() {
+  if (!fb.open) return;
+  const m = fb.matches[fb.idx], ta = $('textarea.editor'), wasDom = fb.dom;
+  fb.open = false; $('#fbar').hidden = true; clearFindMarks(); fb.matches = []; fb.idx = -1;
+  if (ta) { ta.focus(); if (m && !wasDom) ta.setSelectionRange(m.s, m.e); }   // 닫으면 현재 일치를 선택한 채 편집기로 돌아간다
+}
+function clearFindMarks() {
+  const fm = $('pre.fm'); if (fm) fm.textContent = '';
+  document.querySelectorAll('#preview mark.fmd').forEach((m) => m.replaceWith(m.textContent));
+  $('#preview')?.normalize();
+}
+// 화면(DOM) 텍스트에서 찾아 <mark> 로 감싼다. 반환: mark 요소 배열
+function markDom(root, re0, limit = 5000) {
+  const re = new RegExp(re0.source, re0.flags), marks = [], nodes = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement.closest('button, script, style') || !n.data.trim() ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  while (walker.nextNode()) nodes.push(walker.currentNode);   // 순회 중에 DOM 을 바꾸지 않도록 먼저 수집
+  for (const n of nodes) {
+    if (marks.length >= limit) break;
+    re.lastIndex = 0; const text = n.data; let m, p = 0, frag = null;
+    while ((m = re.exec(text))) {
+      if (!m[0]) { re.lastIndex++; continue; }
+      frag ||= document.createDocumentFragment();
+      const mk = el('mark', { className: 'fmd', textContent: m[0] });
+      frag.append(text.slice(p, m.index), mk); marks.push(mk); p = m.index + m[0].length;
+    }
+    if (frag) { frag.append(text.slice(p)); n.replaceWith(frag); }
+  }
+  return marks;
+}
+function runFileFind(fresh) {
+  if (!fb.open) return;
+  store.set('fbq', fb.q);
+  const ta = $('textarea.editor'), pv = $('#preview'), re = fbRegex();
+  clearFindMarks(); fb.matches = [];
+  if (!re || re === 'bad') { fb.idx = -1; return drawFindCount(re); }
+  if (ta) { // 편집기(편집/분할): 원문 기준
+    fb.dom = false; const r = new RegExp(re.source, re.flags), text = ta.value; let m;
+    while ((m = r.exec(text)) && fb.matches.length < 10000) { if (!m[0]) { r.lastIndex++; continue; } fb.matches.push({ s: m.index, e: m.index + m[0].length }); }
+    const at = fresh ? ta.selectionStart : 0, first = fb.matches.findIndex((x) => x.e > at);
+    fb.idx = fresh ? (first < 0 ? 0 : first) : Math.min(fb.idx, fb.matches.length - 1);
+    if (pv) markDom(pv, re);   // 분할 모드: 미리보기에도 같이 표시 (이동은 편집기 기준)
+  } else if (pv) { // 보기 모드: 화면 텍스트 기준
+    fb.dom = true; fb.matches = markDom(pv, re);
+    fb.idx = fresh || fb.idx < 0 ? 0 : Math.min(fb.idx, fb.matches.length - 1);
+  }
+  if (!fb.matches.length) fb.idx = -1; else if (fb.idx < 0) fb.idx = 0;
+  gotoFind(fb.idx);
+}
+function drawFindCount(re) {
+  const c = $('#fb-count'); const n = fb.matches.length;
+  c.classList.toggle('none', (!!fb.q && !n) || re === 'bad');
+  c.textContent = re === 'bad' ? '정규식 오류' : !fb.q ? '' : n ? `${fb.idx + 1}/${n}${n >= 10000 ? '+' : ''}` : '결과 없음';
+}
+function gotoFind(i) {
+  const n = fb.matches.length; fb.idx = n ? ((i % n) + n) % n : -1; drawFindCount();
+  const m = fb.matches[fb.idx]; if (!m) { renderFM(); return; }
+  if (fb.dom) {
+    document.querySelectorAll('#preview mark.fmd.cur').forEach((x) => x.classList.remove('cur'));
+    m.classList.add('cur'); m.scrollIntoView({ block: 'center', inline: 'nearest' });
+  } else {
+    renderFM();
+    const ta = $('textarea.editor'), lines = ta.value.slice(0, m.s).split('\n');
+    taScrollTo(ta, ta.value.split('\n'), lines.length, lines.at(-1).length);
+  }
+}
+const stepFind = (d) => { if (fb.matches.length) gotoFind(fb.idx + d); };
+function renderFM() { // 입력창 뒤 레이어: 모든 일치(+현재 일치)를 칠한다
+  const fm = $('pre.fm'), ta = $('textarea.editor'); if (!fm || !ta) return;
+  if (!fb.open || fb.dom || !fb.matches.length) { fm.textContent = ''; return; }
+  const text = ta.value; let out = '', p = 0;
+  fb.matches.forEach((m, i) => { out += escHtml(text.slice(p, m.s)) + `<mark class="fm${i === fb.idx ? ' cur' : ''}">` + escHtml(text.slice(m.s, m.e)) + '</mark>'; p = m.e; });
+  fm.innerHTML = out + escHtml(text.slice(p)) + '\n';
+  fm.scrollTop = ta.scrollTop; fm.scrollLeft = ta.scrollLeft;
+}
 
 // ───────── 폴더 열기 (⌘O) ─────────
 const recents = () => store.get('recent', []);
