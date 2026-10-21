@@ -542,3 +542,7 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 #fbar button { padding: 1px 7px; }
 #fbar .tg { font: 600 12px var(--mono); color: var(--fg2); border: 1px solid var(--bd); }
 #fbar .tg.on { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+
+/* 외부 변경 충돌 / 삭제 표시 */
+.tab.conflict::before { content: "⚠"; color: var(--err); font-size: 11px; }
+.tab.missing { text-decoration: line-through; opacity: .7; }

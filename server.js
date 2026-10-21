@@ -141,6 +141,12 @@ const INDEX_MAX_ROOTS = 4;
 const indexes = new Map(); // root → { set, arr, ready, truncated, building, watcher, pending, timer, ts }
 const isIgnoredRel = (rel) => rel.split('/').some((s) => IGNORE.has(s) || SEARCH_IGNORE.has(s));
 const indexFiles = (ix) => (ix.arr ||= [...ix.set]);
+const sseClients = new Map(); // root → Set(res) : 화면(EventSource) 연결
+function broadcast(root, paths) { // paths 가 비어 있으면 '전체 새로고침'
+  const set = sseClients.get(root); if (!set || !set.size) return;
+  const data = `data: ${JSON.stringify({ paths: paths.slice(0, 500), all: !paths.length || paths.length > 500 })}\n\n`;
+  for (const r of set) { try { r.write(data); } catch {} }
+}
 function getIndex(root) {
   let ix = indexes.get(root);
   if (ix) { indexes.delete(root); indexes.set(root, ix); return ix; } // LRU
@@ -173,7 +179,7 @@ function rebuild(root, ix) { // 전체 스캔 (최초 / 변경이 너무 많을 
 async function flush(root, ix) { // 변경된 경로만 반영
   if (ix.building) { ix.timer = setTimeout(() => flush(root, ix), 300); return; }
   const rels = [...ix.pending]; ix.pending.clear();
-  if (rels.length > 2000) return rebuild(root, ix);
+  if (rels.length > 2000) return rebuild(root, ix).then(() => broadcast(root, []));
   for (const rel of rels) {
     try {
       const st = await fsp.lstat(path.join(root, rel));
@@ -185,6 +191,7 @@ async function flush(root, ix) { // 변경된 경로만 반영
     }
   }
   ix.arr = null; ix.ts = Date.now();
+  broadcast(root, rels);   // 인덱스를 먼저 갱신한 뒤 알린다 (화면이 필터 폴더 목록을 다시 받을 때 최신이 되도록)
 }
 function markDirty(root) { // 우리 API 로 만든 변경은 감시 이벤트가 오기 전에도 반영
   const ix = indexes.get(root); if (!ix || ix.watcher) return;
@@ -332,11 +339,38 @@ async function api(req, res, url, root) {
       fs.writeFileSync(FAV_FILE, JSON.stringify([...new Set(list)], null, 2) + '\n');
       return send(res, 200, { ok: true });
     }
+    case 'GET /api/events': { // Server-Sent Events: 파일이 바뀌면 화면이 트리/열린 탭을 갱신한다
+      getIndex(root);   // 파일 감시 시작
+      res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
+      res.write('retry: 2000\n\n');
+      let set = sseClients.get(root); if (!set) sseClients.set(root, (set = new Set()));
+      set.add(res);
+      const hb = setInterval(() => { try { res.write(': hb\n\n'); } catch {} }, 25000);
+      res.on('close', () => { clearInterval(hb); set.delete(res); });
+      return;
+    }
+    case 'POST /api/reveal': { // Finder / 파일 관리자 / 터미널 / 기본 앱으로 열기
+      const { action = 'reveal' } = JSON.parse((await readBody(req)) || '{}');
+      const abs = resolveSafe(root, p), st = await fsp.stat(abs), isDir = st.isDirectory();
+      const run = (cmd, args) => { const c = spawn(cmd, args, { detached: true, stdio: 'ignore' }); c.on('error', () => {}); c.unref(); };
+      if (action === 'open' && !isDir && (st.mode & 0o111)) throw httpError(403, 'executable files are not opened'); // 실행 파일은 열지 않는다
+      if (process.platform === 'darwin') {
+        if (action === 'reveal') run('open', isDir ? [abs] : ['-R', abs]);            // 폴더는 열고, 파일은 Finder 에서 선택
+        else if (action === 'open') run('open', [abs]);                                // 기본 앱
+        else if (action === 'terminal') run('open', ['-a', 'Terminal', isDir ? abs : path.dirname(abs)]);
+        else throw httpError(400, 'bad action');
+      } else {
+        if (action === 'reveal') run('xdg-open', [isDir ? abs : path.dirname(abs)]);
+        else if (action === 'open') run('xdg-open', [abs]);
+        else throw httpError(400, 'bad action');
+      }
+      return send(res, 200, { ok: true });
+    }
     case 'GET /api/update':
       return send(res, 200, await checkUpdate(url.searchParams.get('force') === '1'));
     case 'GET /api/info':
       getIndex(root); // 워크스페이스를 열면 인덱싱 시작
-      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir(), version: VERSION, dir: __dirname, pid: process.pid });
+      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir(), version: VERSION, dir: __dirname, pid: process.pid, platform: process.platform });
     case 'GET /api/browse': { // 폴더 선택기: 절대경로의 하위 폴더 목록
       const dir = fs.realpathSync(path.resolve((p || defaultWorkspace()).replace(/^~(?=$|\/)/, HOME)));
       const list = (await fsp.readdir(dir, { withFileTypes: true }))

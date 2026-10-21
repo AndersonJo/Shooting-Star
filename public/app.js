@@ -237,13 +237,14 @@ function taScrollTo(ta, lines, line, col) { // 해당 줄/열이 화면 가운�
 async function save(t = cur(), silent = false) {
   if (!t || !dirty(t)) return;
   try {
-    const sent = t.content;
+    const sent = t.content; t._savedAt = Date.now();
     const r = await api('PUT', 'file', { path: t.path }, { content: sent, mtime: t.mtime });
-    t.orig = sent; t.mtime = r.mtime; if (!silent) toast('저장됨'); renderChrome();
+    t.orig = sent; t.mtime = r.mtime; t.conflict = false; t.missing = false; t._savedAt = Date.now(); if (!silent) toast('저장됨'); renderChrome();
   } catch (e) {
     if (e.status === 409 && confirm('디스크에서 파일이 변경되었습니다. 덮어쓸까요?')) {
+      t._savedAt = Date.now();
       const r = await api('PUT', 'file', { path: t.path }, { content: t.content });
-      t.orig = t.content; t.mtime = r.mtime; toast('덮어씀'); renderChrome();
+      t.orig = t.content; t.mtime = r.mtime; t.conflict = false; t.missing = false; t._savedAt = Date.now(); toast('덮어씀'); renderChrome();
     } else if (e.status !== 409) toast('저장 실패: ' + e.message);
   }
 }
@@ -262,16 +263,60 @@ async function reload(t = cur()) {
   Object.assign(t, { content: f.content, orig: f.content, mtime: f.mtime }); renderAll();
 }
 // 창 포커스 시 외부 변경 감지
-window.addEventListener('focus', async () => {
-  const t = cur(); if (!t) return;
+window.addEventListener('beforeunload', (e) => { if (state.tabs.some(dirty)) e.preventDefault(); });
+
+// ───────── 외부 변경 동기화 ─────────
+// 다른 에디터/터미널/git 이 파일을 바꾸면 서버가 감시(fs.watch)해서 SSE 로 알려 준다.
+//  · 트리: 바뀐 폴더만 다시 읽기   · 열린 탭: 저장 안 한 변경이 없으면 자동 반영, 있으면 ⚠ 충돌 표시(저장 시 덮어쓰기 확인)
+let pendingPvScroll = null;
+async function syncTab(t) {
+  if (!t || isMemo(t.path) && t.path !== state.active) return;
+  if (Date.now() - (t._savedAt || 0) < 1500) return;   // 방금 우리가 저장한 파일의 변경 이벤트는 무시
   try {
     const f = await api('GET', 'file', { path: t.path });
-    if (f.mtime === t.mtime) return;
-    if (!dirty(t)) { Object.assign(t, { content: f.content, orig: f.content, mtime: f.mtime }); renderAll(); toast('외부 변경 반영됨'); }
-    else setStatus('⚠ 디스크의 파일이 변경됨 (저장 시 덮어쓰기 확인)', 'err');
-  } catch {}
-});
-window.addEventListener('beforeunload', (e) => { if (state.tabs.some(dirty)) e.preventDefault(); });
+    t.missing = false;
+    if (f.mtime === t.mtime) { if (t.conflict && !dirty(t)) t.conflict = false; return renderTabs(); }
+    if (f.content === t.content) { Object.assign(t, { orig: f.content, mtime: f.mtime, conflict: false }); return renderChrome(); }   // 내용은 같고 시간만 바뀜
+    if (!dirty(t)) {
+      const active = t.path === state.active, ta = active ? $('textarea.editor') : null, pv = active ? $('#preview') : null;
+      const keep = ta && { top: ta.scrollTop, left: ta.scrollLeft, a: ta.selectionStart, b: ta.selectionEnd };
+      if (pv) pendingPvScroll = pv.scrollTop;
+      Object.assign(t, { content: f.content, orig: f.content, mtime: f.mtime, conflict: false });
+      if (active) {
+        renderAll();
+        const n = $('textarea.editor');
+        if (n && keep) { n.scrollTop = keep.top; n.scrollLeft = keep.left; try { n.setSelectionRange(keep.a, keep.b); } catch {} }
+      } else renderChrome();
+      toast(`외부 변경 반영됨: ${isMemo(t.path) ? '메모' : t.path.split('/').pop()}`);
+    } else {
+      t.conflict = true; renderTabs();
+      toast('⚠ 외부에서도 수정되었습니다 — 저장하면 덮어쓰기 확인');
+      if (t.path === state.active) setStatus('⚠ 디스크의 파일이 변경됨 (저장 시 덮어쓰기 확인)', 'err');
+    }
+  } catch (e) {
+    if (e.status === 404) { t.missing = true; renderTabs(); if (t.path === state.active) setStatus('⚠ 파일이 삭제되었거나 이동되었습니다', 'err'); }
+  }
+}
+let fsTimer;
+function onFsEvent(d) { // d: { paths, all }
+  clearTimeout(fsTimer);
+  fsTimer = setTimeout(async () => {
+    if (d.all) childrenCache.clear(); else for (const p of d.paths) { childrenCache.delete(dirOf(p)); childrenCache.delete(p); }
+    if (state.filter) await fetchFilterDirs();
+    renderTree();
+    const set = d.all ? null : new Set(d.paths);
+    for (const t of state.tabs) if (!isMemo(t.path) && (!set || set.has(t.path))) syncTab(t);
+    if (isMemo(state.active)) syncTab(cur());
+    refreshMemos();
+  }, 150);
+}
+function connectEvents() {
+  if (typeof EventSource === 'undefined') return;
+  const es = new EventSource('/api/events?root=' + encodeURIComponent(state.root)); let first = true;
+  es.onmessage = (e) => { try { onFsEvent(JSON.parse(e.data)); } catch {} };
+  es.onopen = () => { if (!first) onFsEvent({ all: true, paths: [] }); first = false; };   // 서버가 재시작되어 다시 연결되면 전체 동기화
+}
+window.addEventListener('focus', () => onFsEvent({ all: true, paths: [] }));   // 감시가 안 되는 환경을 위한 보조 수단
 
 // ───────── 렌더링 ─────────
 function renderAll() { renderTabs(); renderToolbar(); renderContent(); renderTree(); validate(); }
@@ -282,7 +327,7 @@ function renderTabs() {
   box.replaceChildren(...state.tabs.map((t) => {
     const x = el('span', { className: 'x', title: '닫기 (⌘W)' });
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.path); };
-    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : ''), title: t.path },
+    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : ''), title: t.path + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
       el('span', { textContent: isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.path.split('/').pop() }), x);
     tab.onclick = () => { state.active = t.path; state.selected = t.path; persistTabs(); renderAll(); };
     tab.onauxclick = (e) => e.button === 1 && closeTab(t.path);
@@ -425,6 +470,7 @@ function updatePreview() {
       else if (t.kind === 'md') pv.replaceChildren(renderMarkdown(t));
       else if (t.mode === 'tree') pv.replaceChildren(renderObjTree(t));
     } catch (e) { pv.replaceChildren(el('pre', { className: 'tree', textContent: e.message, style: 'color:var(--err)' })); }
+    if (pendingPvScroll != null) { pv.scrollTop = pendingPvScroll; pendingPvScroll = null; }   // 외부 변경으로 다시 그려도 보던 위치 유지
     if (fb.open) runFileFind(false);   // 미리보기가 다시 그려지면 표시도 다시
   }, t.mode === 'split' ? 120 : 0);
 }
@@ -539,10 +585,14 @@ $('#tree').addEventListener('contextmenu', (ev) => {
   const row = ev.target.closest('.row');
   const p = row?.dataset.path ?? ''; const isDir = row ? !!row.dataset.dir : true;
   const baseDir = isDir ? p : dirOf(p);
+  const FM = state.platform === 'darwin' ? 'Finder' : '파일 관리자';
   const items = [
     ['새 파일…', () => createEntry(baseDir, false)],
     ['새 폴더…', () => createEntry(baseDir, true)],
+    [isDir ? `${FM}에서 열기` : `${FM}에서 보기`, () => revealPath(p, 'reveal')],
   ];
+  if (!isDir) items.push(['기본 앱으로 열기', () => revealPath(p, 'open')]);
+  if (state.platform === 'darwin') items.push(['터미널에서 열기', () => revealPath(p, 'terminal')]);
   if (row) items.push(
     ['이름 변경…', () => renameEntry(p)],
     ['경로 복사', () => copy(p, '경로 복사됨')],
@@ -550,6 +600,9 @@ $('#tree').addEventListener('contextmenu', (ev) => {
     ['삭제', () => deleteEntry(p, isDir), 'danger']);
   showMenu(ev.clientX, ev.clientY, items);
 });
+async function revealPath(rel, action) { // Finder / 파일 관리자 / 터미널 / 기본 앱
+  try { await api('POST', 'reveal', { path: rel }, { action }); } catch (e) { toast('열 수 없음: ' + e.message); }
+}
 async function createEntry(dir, isDir) {
   const name = prompt(isDir ? '새 폴더 이름' : '새 파일 이름 (예: notes/todo.md)', '');
   if (!name) return;
@@ -1306,7 +1359,7 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
     const last = info.last || recents()[0];
     if (last && last !== info.root) return location.replace('/?root=' + encodeURIComponent(last));
   }
-  state.root = info.root; state.version = info.version; state.memoDir = info.memoDir; state.home = info.home;
+  state.root = info.root; state.version = info.version; state.platform = info.platform; state.memoDir = info.memoDir; state.home = info.home;
   api('PUT', 'last', {}, { root: info.root }).catch(() => {}); state.home = info.home;
   history.replaceState(null, '', '/?root=' + encodeURIComponent(info.root));
   $('#root-name').textContent = info.name; $('#root-name').title = info.root + '  (클릭 / ⌘O: 폴더 열기)';
@@ -1321,4 +1374,5 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
   const a = store.get(wsKey('active'), null);
   state.active = tabOf(a) ? a : state.tabs[0]?.path || null; state.selected = state.active || '';
   renderAll(); setView(state.view);
+  connectEvents();   // 파일 변경 실시간 동기화
 })();
