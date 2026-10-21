@@ -1,11 +1,15 @@
 'use strict';
 const $ = (s, r = document) => r.querySelector(s);
 const EMPTY = document.getElementById('empty');
+// 검색/경로 입력창에서 macOS 의 자동 수정 말풍선(예: 'Odi ×')이 방향키를 가로채지 않도록 자동 수정·맞춤법·자동 대문자를 끈다
+const plainInput = (e) => { e.setAttribute('autocorrect', 'off'); e.setAttribute('autocapitalize', 'off'); e.setAttribute('autocomplete', 'off'); e.spellcheck = false; return e; };
 const el = (tag, props = {}, ...kids) => {
   const e = Object.assign(document.createElement(tag), props);
+  if (tag === 'input' && (!e.type || e.type === 'text' || e.type === 'search')) plainInput(e);
   for (const k of kids) e.append(k);
   return e;
 };
+document.querySelectorAll('input:not([type]), input[type=text]').forEach(plainInput);   // index.html 의 정적 입력창
 const store = {
   get(k, d) { try { return JSON.parse(localStorage.getItem('ss.' + k)) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('ss.' + k, JSON.stringify(v)); } catch {} },
@@ -819,8 +823,10 @@ const closePalette = () => { $('#palette').hidden = true; };
 $('#pal-input').oninput = (e) => filterPalette(e.target.value);
 $('#pal-input').onkeydown = (e) => {
   if (e.key === 'Escape') closePalette();
-  else if (e.key === 'ArrowDown') { e.preventDefault(); pal.sel = Math.min(pal.sel + 1, pal.items.length - 1); drawPalette(); }
-  else if (e.key === 'ArrowUp') { e.preventDefault(); pal.sel = Math.max(pal.sel - 1, 0); drawPalette(); }
+  else if (e.key === 'ArrowDown' || (e.ctrlKey && e.key.toLowerCase() === 'n')) { e.preventDefault(); pal.sel = Math.min(pal.sel + 1, pal.items.length - 1); drawPalette(); }
+  else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key.toLowerCase() === 'p')) { e.preventDefault(); pal.sel = Math.max(pal.sel - 1, 0); drawPalette(); }
+  else if (e.key === 'PageDown') { e.preventDefault(); pal.sel = Math.min(pal.sel + 8, pal.items.length - 1); drawPalette(); }
+  else if (e.key === 'PageUp') { e.preventDefault(); pal.sel = Math.max(pal.sel - 8, 0); drawPalette(); }
   else if (e.key === 'Enter' && pal.items[pal.sel]) { const f = pal.items[pal.sel].f; closePalette(); openFile(f); }
 };
 document.addEventListener('mousedown', (e) => { if (!$('#palette').hidden && !e.target.closest('#palette')) closePalette(); });
