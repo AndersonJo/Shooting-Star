@@ -1,1 +1,1 @@
-{ "name": "shooting-star", "version": "0.2.0", "private": true, "bin": { "ss": "server.js" }, "scripts": { "start": "node server.js" }, "engines": { "node": ">=18" } }
+{ "name": "shooting-star", "version": "0.2.1", "private": true, "bin": { "ss": "server.js" }, "scripts": { "start": "node server.js" }, "engines": { "node": ">=18" } }
