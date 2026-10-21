@@ -6,7 +6,7 @@
 set -euo pipefail
 V="${1:?usage: scripts/release.sh X.Y.Z}"
 [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "버전 형식이 올바르지 않습니다: $V (예: 0.2.0)"; exit 1; }
-REPO="AndersonJo/Shooting-Star-"; TAP="AndersonJo/homebrew-tap"
+REPO="AndersonJo/Shooting-Star"; TAP="AndersonJo/homebrew-tap"
 cd "$(dirname "$0")/.."
 
 [ -z "$(git status --porcelain)" ] || { echo "커밋되지 않은 변경이 있습니다. 먼저 커밋하세요."; exit 1; }

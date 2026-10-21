@@ -28,7 +28,7 @@ Priority: optional
 Architecture: all
 Depends: nodejs (>= 18)
 Maintainer: AndersonJo <noreply@github.com>
-Homepage: https://github.com/AndersonJo/Shooting-Star-
+Homepage: https://github.com/AndersonJo/Shooting-Star
 Description: Lightweight local document manager
  Markdown / YAML / CSV / JSON files in a foldable tree with editor, viewer,
  quick open, full-text search and memos. Runs a local server on 127.0.0.1.

@@ -7,7 +7,7 @@
 | | 설치 | 업데이트 |
 |---|---|---|
 | **macOS (Homebrew)** | `brew install --cask AndersonJo/tap/shooting-star` | `brew upgrade --cask shooting-star` |
-| **macOS (수동)** | [Releases](https://github.com/AndersonJo/Shooting-Star-/releases) 의 `shooting-star-*-macos.zip` → 압축 해제 후 `/Applications` 로 이동 | 새 zip 으로 교체 |
+| **macOS (수동)** | [Releases](https://github.com/AndersonJo/Shooting-Star/releases) 의 `shooting-star-*-macos.zip` → 압축 해제 후 `/Applications` 로 이동 | 새 zip 으로 교체 |
 | **Ubuntu / Debian** | Releases 의 `.deb` 더블클릭, 또는 `sudo apt install ./shooting-star_*_all.deb` | 새 `.deb` 설치 |
 | **개발 (소스)** | `git clone … && ./install.sh` | `git pull && ./install.sh` |
 

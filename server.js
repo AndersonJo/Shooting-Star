@@ -36,7 +36,7 @@ const ensureMemoDir = () => { fs.mkdirSync(MEMO_DIR, { recursive: true }); retur
 const LAST_FILE = path.join(path.dirname(FAV_FILE), 'last.json'); // 마지막으로 연 워크스페이스
 const readLast = () => { try { const r = JSON.parse(fs.readFileSync(LAST_FILE, 'utf8')).root; return isDirSafe(r) ? r : null; } catch { return null; } };
 // 버전 / 업데이트 확인 (GitHub Releases 의 최신 태그와 비교. 설정에서 끌 수 있음)
-const REPO = 'AndersonJo/Shooting-Star-';
+const REPO = 'AndersonJo/Shooting-Star';
 const VERSION = (() => { try { return require('./package.json').version; } catch { return '0.0.0'; } })();
 const cmpVer = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); return 0; };
 let updateCache = { t: 0, data: null };

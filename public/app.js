@@ -797,7 +797,7 @@ function openSettings() {
     };
     if (updateInfo) show(updateInfo);
     const chk = el('button', { textContent: '업데이트 확인' }); chk.onclick = async () => { msg.textContent = '확인 중…'; show(await checkUpdates(true)); };
-    const rel = el('button', { textContent: '릴리스 페이지' }); rel.onclick = () => window.open(updateInfo?.url || 'https://github.com/AndersonJo/Shooting-Star-/releases', '_blank');
+    const rel = el('button', { textContent: '릴리스 페이지' }); rel.onclick = () => window.open(updateInfo?.url || 'https://github.com/AndersonJo/Shooting-Star/releases', '_blank');
     return el('div', { className: 'st-ver' }, el('span', { textContent: `shooting-star v${state.version || '?'}` }), chk, rel, msg);
   };
   const apply = () => { saveSettings(); updateScope(); refreshFilter(); if (ff.built && !$('#find').hidden) runFind(); };
