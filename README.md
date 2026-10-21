@@ -15,6 +15,10 @@
 - 수동 설치한 mac 앱을 처음 열 때 "확인되지 않은 개발자" 경고가 뜨면 우클릭 → 열기 (또는 `xattr -dr com.apple.quarantine /Applications/shooting-star.app`)
 - 새 버전이 나오면 앱 상태바에 `⬆ vX.Y.Z` 로 알려 줍니다 (설정에서 끌 수 있음)
 
+## 문제 해결
+- 앱을 열었는데 `not found` 등 이상한 화면이 보이면: 터미널에서 `ss --status` (서버 상태/최근 로그). 기본 포트 4000 을 다른 프로그램이 쓰고 있으면 자동으로 4001, 4002 … 를 사용하고 `~/.shooting-star/server.json` 에 기록합니다.
+- 서버 로그: `~/.shooting-star/server.log`, 서버 종료: `ss --stop`
+
 ## 사용
 
 ```bash

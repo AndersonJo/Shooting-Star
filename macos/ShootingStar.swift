@@ -22,10 +22,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     var titleObservers: [NSKeyValueObservation] = []
     let dirtyJS = "typeof state !== 'undefined' && state.tabs.some(dirty)"
 
-    var base: String { "http://127.0.0.1:\(cfg.port)" }
+    var activePort: Int?   // 서버가 실제로 쓰는 포트 (선호 포트가 다른 프로그램에 쓰이면 서버가 다른 포트를 고른다)
+    var base: String { "http://127.0.0.1:\(activePort ?? cfg.port)" }
 
+    // 로컬 서버 주소만 허용 (선호 포트부터 20개 범위)
     func isLocal(_ u: URL) -> Bool {
-        (u.host == "127.0.0.1" || u.host == "localhost") && u.port == cfg.port
+        guard u.host == "127.0.0.1" || u.host == "localhost", let p = u.port else { return false }
+        return (cfg.port...(cfg.port + 20)).contains(p)
+    }
+
+    var stateDir: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".shooting-star") }
+    func readServerPort() -> Int? {
+        guard let d = try? Data(contentsOf: stateDir.appendingPathComponent("server.json")),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+        return j["port"] as? Int
     }
 
     // MARK: 시작 / URL 스킴 (shooting-star://open?url=<http url>)
@@ -89,10 +99,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         p.executableURL = URL(fileURLWithPath: node)
         p.arguments = [serverPath, "--no-open", "--port", String(cfg.port)]
         p.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        let err = Pipe()
         p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
+        p.standardError = err
         try? p.run()
         p.waitUntilExit()
+        activePort = readServerPort() ?? (p.terminationStatus == 0 ? cfg.port : nil)   // 상태 파일이 없는 이전 버전 서버는 선호 포트
+        if p.terminationStatus != 0 || activePort == nil {   // 서버가 안 떴으면 이유를 알려 준다 (다른 프로그램의 화면이 열리는 것을 막는다)
+            let msg = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                let a = NSAlert()
+                a.messageText = "서버를 시작하지 못했습니다"
+                a.informativeText = (msg.isEmpty ? "" : msg + "\n") + "로그: ~/.shooting-star/server.log\n터미널에서 `ss --status` 로 상태를 확인할 수 있습니다."
+                a.runModal(); NSApp.terminate(nil)
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

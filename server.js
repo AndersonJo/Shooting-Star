@@ -16,7 +16,7 @@ const opt = (name, def) => {
 const flag = (n) => args.includes('--' + n) && args.splice(args.indexOf('--' + n), 1).length > 0;
 const PORT = Number(opt('port', 4000));
 const HOST = opt('host', '127.0.0.1');
-const FG = flag('fg'), STOP = flag('stop'), LAST = flag('last'), NO_OPEN = flag('no-open');
+const FG = flag('fg'), STOP = flag('stop'), STATUS = flag('status'), LAST = flag('last'), NO_OPEN = flag('no-open');
 const HOME = os.homedir();
 const DEFAULT_ROOT = fs.realpathSync(path.resolve((args[0] || process.cwd()).replace(/^~(?=$|\/)/, HOME)));
 const PUBLIC = path.join(__dirname, 'public');
@@ -473,14 +473,25 @@ const server = http.createServer(async (req, res) => {
 });
 
 // ───────── 실행 / 창 열기 ─────────
-const BASE = `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`;
+// 실제 포트는 실행 시점에 정해진다: 선호 포트(기본 4000)가 다른 프로그램에 쓰이면 다음 빈 포트를 쓰고, ~/.shooting-star/server.json 에 기록한다.
+const STATE_FILE = path.join(HOME, '.shooting-star', 'server.json');
+const LOG_FILE = path.join(HOME, '.shooting-star', 'server.log');
+const readState = () => { try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return null; } };
+const writeState = () => { fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true }); fs.writeFileSync(STATE_FILE, JSON.stringify({ port: ACTIVE_PORT, pid: process.pid, root: DEFAULT_ROOT, version: VERSION }) + '\n'); };
+let ACTIVE_PORT = PORT;
+const baseOf = (port) => `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${port}`;
 const appUrl = () => {
   const last = LAST && (readLast() || defaultWorkspace()); // --last: 마지막으로 연 폴더, 없으면 기본 프로젝트 위치
-  return `${BASE}/?root=${encodeURIComponent(last || DEFAULT_ROOT)}`;
+  return `${baseOf(ACTIVE_PORT)}/?root=${encodeURIComponent(last || DEFAULT_ROOT)}`;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function running() {
-  try { return (await (await fetch(`${BASE}/api/info`)).json()).app === 'shooting-star'; } catch { return false; }
+async function runningAt(port) { // 그 포트에 '우리' 서버가 떠 있는지 (다른 프로그램이면 false)
+  try { return (await (await fetch(`${baseOf(port)}/api/info`, { signal: AbortSignal.timeout(1500) })).json()).app === 'shooting-star'; } catch { return false; }
+}
+async function findServer() {
+  const st = readState();
+  if (st && (await runningAt(st.port))) return st.port;
+  return (await runningAt(PORT)) ? PORT : null;
 }
 // Chromium 계열이 있으면 주소창 없는 독립 창(--app)으로, 없으면 기본 브라우저로 연다
 function nativeApp() { // install.sh 가 만든 네이티브 macOS 앱 (shooting-star.app)
@@ -511,27 +522,57 @@ function openWindow(url) {
   sh(`${process.platform === 'darwin' ? 'open' : 'xdg-open'} "${url}"`);
 }
 
+function listenAuto(port, left = 20) { // 사용 중인 포트는 건너뛰고 다음 포트를 시도
+  const onError = async (e) => {
+    server.removeListener('error', onError);
+    if (e.code === 'EADDRINUSE' && left > 0) {
+      if (await runningAt(port)) { console.log('이미 실행 중'); process.exit(0); }   // 이미 우리 서버가 떠 있음
+      return listenAuto(port + 1, left - 1);
+    }
+    console.error(e.message); process.exit(1);
+  };
+  server.once('error', onError);
+  server.listen(port, HOST, () => {
+    server.removeListener('error', onError);
+    ACTIVE_PORT = port; writeState();
+    if (port !== PORT) console.log(`포트 ${PORT} 은(는) 다른 프로그램이 사용 중이라 ${port} 를 사용합니다`);
+    console.log(`shooting-star → ${appUrl()}`);
+    if (!NO_OPEN) openWindow(appUrl());
+  });
+}
+process.on('exit', () => { const st = readState(); if (st && st.pid === process.pid) try { fs.unlinkSync(STATE_FILE); } catch {} });
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => process.exit(0));
+
 async function main() {
-  if (STOP) {
-    try { await fetch(`${BASE}/api/quit`, { method: 'POST', headers: { 'X-SS': '1' } }); console.log('stopped'); }
-    catch { console.log('실행 중이 아닙니다'); }
+  if (STOP || STATUS) {
+    const port = await findServer();
+    if (STATUS) {
+      if (!port) { console.log('실행 중이 아닙니다'); const l = (() => { try { return fs.readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(-5).join('\n'); } catch { return ''; } })(); if (l) console.log('--- 최근 로그 (' + LOG_FILE + ')\n' + l); return; }
+      const st = readState() || {};
+      console.log(`실행 중: ${baseOf(port)}  (pid ${st.pid ?? '?'}, v${st.version ?? '?'})`); return;
+    }
+    if (!port) return console.log('실행 중이 아닙니다');
+    try { await fetch(`${baseOf(port)}/api/quit`, { method: 'POST', headers: { 'X-SS': '1' } }); console.log('stopped'); } catch { console.log('stopped'); }
     return;
   }
-  if (FG) { // 포그라운드 서버
-    server.on('error', (e) => { console.error(e.message); process.exit(1); });
-    return server.listen(PORT, HOST, () => {
-      console.log(`shooting-star → ${appUrl()}`);
-      if (!NO_OPEN) openWindow(appUrl());
-    });
-  }
+  if (FG) return listenAuto(PORT);   // 포그라운드 서버
   // 기본: 백그라운드로 띄우고(이미 있으면 재사용) 이 폴더를 창으로 연다 — `code .` 처럼
-  if (!(await running())) {
+  let port = await findServer();
+  if (!port) {
+    const before = readState()?.pid;
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    const log = fs.openSync(LOG_FILE, 'a');   // 서버의 오류 출력은 로그 파일로 (시작 실패 원인 확인용)
     spawn(process.execPath, [__filename, '--fg', '--no-open', '--port', String(PORT), '--host', HOST, DEFAULT_ROOT],
-      { detached: true, stdio: 'ignore', cwd: DEFAULT_ROOT }).unref();
-    for (let i = 0; i < 50 && !(await running()); i++) await sleep(100);
-    if (!(await running())) { console.error(`서버를 시작하지 못했습니다 (포트 ${PORT} 사용 중?)`); process.exit(1); }
+      { detached: true, stdio: ['ignore', log, log], cwd: DEFAULT_ROOT }).unref();
+    for (let i = 0; i < 80 && !port; i++) {
+      await sleep(100);
+      const st = readState();
+      if (st && st.pid !== before && (await runningAt(st.port))) port = st.port;
+    }
+    if (!port) { console.error(`서버를 시작하지 못했습니다. 로그: ${LOG_FILE}`); process.exit(1); }
   }
+  ACTIVE_PORT = port;
   if (!NO_OPEN) openWindow(appUrl());
-  console.log(`shooting-star → ${DEFAULT_ROOT}`);
+  console.log(`shooting-star → ${DEFAULT_ROOT}  (${baseOf(port)})`);
 }
 main();
