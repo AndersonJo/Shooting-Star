@@ -434,14 +434,15 @@ function btn(label, title, onclick, cls = '') {
 }
 function renderToolbar() {
   const bar = $('#toolbar'); const t = cur();
+  drawPath(t);   // 전체 경로는 하단 상태바에 표시
   if (!t) { bar.replaceChildren(); return; }
   if (t.kind === 'image') {
-    bar.replaceChildren(el('span', { className: 'path', textContent: t.path, title: t.path }),
+    bar.replaceChildren(el('span', { className: 'path' }),
       btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(e.shiftKey ? state.root + '/' + t.path : t.path, '경로 복사됨')),
       btn('맞춤', '화면에 맞춤 (0)', () => imgCmd('fit')), btn('100%', '원본 크기 (1)', () => imgCmd('actual')), btn('전체화면', '전체화면 (F)', () => imgCmd('fs')));
     return;
   }
-  const items = [el('span', { className: 'path', textContent: isMemo(t.path) ? '메모 · ' + (memoTitle(t.content) || '새 메모') : t.path, title: isMemo(t.path) ? state.memoDir + '/' + t.path.slice(6) : t.path })];
+  const items = [el('span', { className: 'path' })];
   const modes = MODES[t.kind];
   if (modes.length > 1) {
     const seg = el('span', { className: 'seg' }, ...modes.map(([m, label]) =>
@@ -502,7 +503,7 @@ function validate() {
       msg = '✓ valid JSONL';
     } else if (t.kind === 'csv') {
       const rows = parseCSV(t.content, detectDelim(t.content, t.path)); msg = `${rows.length.toLocaleString()} rows × ${rows[0]?.length || 0} cols`; cls = '';
-    } else { msg = `${t.content.split('\n').length.toLocaleString()} lines`; cls = ''; }
+    } else { msg = ''; cls = ''; }   // 일반 텍스트/마크다운은 줄 수 표시 안 함 (경로를 하단에 표시)
   } catch (e) { msg = '✗ ' + e.message.split('\n')[0]; cls = 'err'; }
   setStatus(msg, cls);
   pos.textContent = `${(new Blob([t.content]).size / 1024).toFixed(1)} KB`;
@@ -1719,6 +1720,36 @@ function smartEditor(t) {
   document.addEventListener('paste', onPaste, true); document.addEventListener('keydown', onDocKey, true);
   smartCtx = ctx; render();
   return pane;
+}
+
+// ───────── 하단 상태바의 전체 경로 (조각을 클릭하면 왼쪽 트리에서 그 위치로 이동) ─────────
+async function revealInTree(rel, isDir) { // 해당 항목까지 폴더를 펼치고 선택한 뒤 화면 가운데로 스크롤
+  if (document.body.classList.contains('no-side') || state.view === 'memo') setView('files', true);
+  const parts = rel ? rel.split('/') : []; let acc = '';
+  for (let i = 0; i < parts.length - (isDir ? 0 : 1); i++) { acc = acc ? acc + '/' + parts[i] : parts[i]; state.expanded.add(acc); }
+  state.selected = rel; persistTabs(); await renderTree();
+  const row = [...document.querySelectorAll('#tree .row')].find((r) => r.dataset.path === rel);
+  if (row) row.scrollIntoView({ block: 'center' }); else $('#tree').scrollTop = 0;
+}
+function drawPath(t) {
+  const box = $('#st-path'); box.replaceChildren(); if (!t) return;
+  const inner = el('span', { className: 'pth' }); box.append(inner);
+  if (isMemo(t.path)) { inner.textContent = ((state.memoDir || '') + '/' + t.path.slice(6)).replace(state.home || '\u0000', '~'); inner.title = '메모 파일 위치'; return; }
+  const full = state.root + (t.path ? '/' + t.path : ''), segs = []; let acc = '';
+  for (const p of full.split('/').filter(Boolean)) { acc += '/' + p; segs.push({ label: p, abs: acc }); }
+  const hi = state.home ? segs.findIndex((s) => s.abs === state.home) : -1;   // 홈 아래면 홈까지를 ~ 하나로
+  const view = hi >= 0 ? [{ label: '~', abs: state.home }, ...segs.slice(hi + 1)] : segs;
+  if (hi < 0) inner.append(el('span', { className: 'sep', textContent: '/' }));
+  view.forEach((s, i) => {
+    const inside = s.abs.length > state.root.length, isRoot = s.abs === state.root, last = s.abs === full;
+    const seg = el('span', { className: 'seg', textContent: s.label, title: inside ? (last ? '트리에서 파일 위치 보기' : '트리에서 이 폴더 보기') : isRoot ? '프로젝트 루트 (트리 맨 위로)' : '이 폴더를 워크스페이스로 열기' });
+    seg.onclick = () => {
+      if (inside) revealInTree(s.abs.slice(state.root.length + 1), !last);   // 프로젝트 안: 트리에서 펼치고 선택
+      else if (isRoot) { if (document.body.classList.contains('no-side') || state.view === 'memo') setView('files', true); state.selected = ''; renderTree().then(() => { $('#tree').scrollTop = 0; }); }
+      else go(s.abs);   // 프로젝트 루트보다 위: 그 폴더를 워크스페이스로 연다
+    };
+    inner.append(seg); if (i < view.length - 1) inner.append(el('span', { className: 'sep', textContent: '/' }));
+  });
 }
 
 // ───────── 폴더 열기 (⌘O) ─────────
