@@ -953,6 +953,44 @@ $('#pal-input').onkeydown = (e) => {
 };
 document.addEventListener('mousedown', (e) => { if (!$('#palette').hidden && !e.target.closest('#palette')) closePalette(); });
 
+// 마크다운 서식 단축키 (편집기에서): ⌘/Ctrl+B 굵게, +I 기울임, +Shift+X 취소선, +Shift+C 인라인 코드, +K 링크. 같은 단축키를 다시 누르면 해제
+function wrapSel(ta, mk) {
+  const v = ta.value; let a = ta.selectionStart, b = ta.selectionEnd; const n = mk.length;
+  let out, na, nb;
+  if (mk[0] === '*') {   // 별표는 굵게(**)+기울임(*)이 겹칠 수 있어 바깥의 별표 개수로 판단: 홀수면 기울임, 2 이상이면 굵게
+    while (b - a >= 2 && v[a] === '*' && v[b - 1] === '*') { a++; b--; }   // 마커까지 선택된 경우 안쪽만 대상으로
+    let L = 0, R = 0; while (v[a - 1 - L] === '*') L++; while (v[b + R] === '*') R++;
+    const m = Math.min(L, R), has = n === 1 ? m % 2 === 1 : m >= 2;
+    if (has) { a -= n; b += n; out = v.slice(a + n, b - n); na = a; nb = a + out.length; }
+    else { out = mk + v.slice(a, b) + mk; na = a + n; nb = na + (b - a); }
+  } else {
+    const sel = v.slice(a, b);
+    if (sel.length >= 2 * n && sel.startsWith(mk) && sel.endsWith(mk)) { out = sel.slice(n, -n); na = a; nb = a + out.length; }   // 마커까지 선택됨
+    else if (a >= n && v.slice(a - n, a) === mk && v.slice(b, b + n) === mk) { a -= n; b += n; out = sel; na = a; nb = a + sel.length; }   // 마커 바로 안쪽 선택
+    else { out = mk + sel + mk; na = a + n; nb = na + sel.length; }
+  }
+  ta.setSelectionRange(a, b); document.execCommand('insertText', false, out); ta.setSelectionRange(na, nb);
+}
+function linkSel(ta) {
+  const a = ta.selectionStart, b = ta.selectionEnd, sel = ta.value.slice(a, b);
+  const isUrl = /^(https?:\/\/|mailto:)\S+$/i.test(sel.trim());
+  const text = isUrl ? '' : sel, url = isUrl ? sel.trim() : 'url';
+  document.execCommand('insertText', false, `[${text}](${url})`);
+  if (isUrl || !sel) ta.setSelectionRange(a + 1, a + 1 + text.length);                       // 글자를 쓰게 [] 안에 커서
+  else ta.setSelectionRange(a + text.length + 3, a + text.length + 3 + url.length);          // 'url' 을 바로 덮어쓰게 선택
+}
+document.addEventListener('keydown', (e) => {
+  const ta = e.target; if (ta?.tagName !== 'TEXTAREA' || !(e.metaKey || e.ctrlKey) || e.altKey || e.isComposing) return;
+  if (!(ta.classList.contains('sb-ta') || (ta.classList.contains('editor') && cur()?.kind === 'md'))) return;
+  const k = e.key.toLowerCase(); let fn = null;
+  if (!e.shiftKey && k === 'b') fn = () => wrapSel(ta, '**');
+  else if (!e.shiftKey && k === 'i') fn = () => wrapSel(ta, '*');
+  else if (e.shiftKey && k === 'x') fn = () => wrapSel(ta, '~~');
+  else if (e.shiftKey && k === 'c') fn = () => wrapSel(ta, '`');
+  else if (!e.shiftKey && k === 'k') fn = () => linkSel(ta);
+  if (!fn) return;
+  e.preventDefault(); e.stopImmediatePropagation(); fn();   // ⌘B(사이드바 토글) 등 전역 단축키보다 우선
+}, true);
 // Home / End: 페이지 처음·끝이 아니라 현재 줄의 처음·끝으로 (macOS 의 textarea 기본 동작 대체. ⌘/Ctrl 조합은 기본 동작 유지)
 document.addEventListener('keydown', (e) => {
   const ta = e.target;
