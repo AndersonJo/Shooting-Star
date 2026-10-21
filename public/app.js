@@ -694,12 +694,66 @@ function renderContent() {
   else panes.push(el('div', { className: 'pane', id: 'preview' }));
   box.replaceChildren(...panes);
   const ed = $('textarea.editor'); if (ed) { ed.parentElement.style.overflow = 'hidden'; }
+  if (t.mode === 'split' && t.kind === 'md' && ed) splitSync(ed, $('#preview'));
   updatePreview();
   validate();
   if (fb.open) { placeFindBar(); runFileFind(true); }   // 탭/모드가 바뀌어도 검색 유지
 }
 const renderToolbarDirtyOnly = () => renderToolbar();
 
+// ───────── 마크다운 분할 보기: 스크롤 동기화 + 편집 중인 곳 따라가기 ─────────
+// 미리보기의 최상위 요소 ↔ 원문 줄 번호. 토큰 수와 요소 수가 맞지 않으면(원시 HTML 등) null → 비율로 동기화
+function mdAnchors(pv, text) {
+  const root = pv.firstElementChild; if (!root) return null;
+  let line = 0; const starts = [];
+  for (const tk of marked.lexer(text)) { if (tk.type !== 'space') starts.push(line); line += tk.raw.split('\n').length - 1; }
+  const kids = [...root.children]; if (kids.length !== starts.length) return null;
+  return kids.map((e, i) => ({ e, line: starts[i] }));
+}
+function splitSync(ta, pv) {
+  if (!pv) return;
+  const nLines = () => ta.value.split('\n').length + 1;
+  const lh = () => { const v = parseFloat(getComputedStyle(ta).lineHeight); return !state.wrap && v > 0 ? v : 0; };
+  const padTop = () => parseFloat(getComputedStyle(ta).paddingTop) || 0;
+  const maxScroll = (n) => Math.max(1, n.scrollHeight - n.clientHeight);
+  const yOf = (a) => a.e.getBoundingClientRect().top - pv.getBoundingClientRect().top + pv.scrollTop;
+  const lineToY = (L) => {   // 원문 줄(소수 가능) → 미리보기 y
+    const an = pv._anchors; if (!an?.length) return null;
+    const ys = an.map(yOf); ys[0] = 0; let i = an.length - 1; while (i > 0 && an[i].line > L) i--;   // 첫 요소 = 스크롤 0 (위쪽 여백 포함)
+    const l0 = an[i].line, l1 = i + 1 < an.length ? an[i + 1].line : nLines(), y0 = ys[i], y1 = i + 1 < an.length ? ys[i + 1] : pv.scrollHeight;
+    return y0 + Math.min(1, Math.max(0, (L - l0) / Math.max(1, l1 - l0))) * (y1 - y0);
+  };
+  const yToLine = (y) => {
+    const an = pv._anchors; if (!an?.length) return null;
+    const ys = an.map(yOf); ys[0] = 0; let i = an.length - 1; while (i > 0 && ys[i] > y) i--;
+    const l0 = an[i].line, l1 = i + 1 < an.length ? an[i + 1].line : nLines(), y0 = ys[i], y1 = i + 1 < an.length ? ys[i + 1] : pv.scrollHeight;
+    return l0 + Math.min(1, Math.max(0, (y - y0) / Math.max(1, y1 - y0))) * (l1 - l0);
+  };
+  const taLine = () => { const h = lh(); return h ? Math.max(0, (ta.scrollTop - padTop()) / h) : (ta.scrollTop / maxScroll(ta)) * nLines(); };
+  const mute = new Map();   // 프로그램이 스크롤을 바꾼 직후, 그쪽에서 생기는 scroll 이벤트는 무시 (되먹임 방지)
+  const put = (node, v) => { v = Math.max(0, v); if (Math.abs(node.scrollTop - v) < 1) return; mute.set(node, performance.now() + 90); node.scrollTop = v; };
+  const muted = (node) => performance.now() < (mute.get(node) || 0);
+  ta.addEventListener('scroll', () => {
+    if (muted(ta)) return;
+    const y = lineToY(taLine());
+    put(pv, ta.scrollTop >= maxScroll(ta) - 1 ? maxScroll(pv) : y != null ? y : (ta.scrollTop / maxScroll(ta)) * maxScroll(pv));
+  });
+  pv.addEventListener('scroll', () => {
+    if (muted(pv)) return;
+    const L = pv.scrollTop >= maxScroll(pv) - 1 ? null : yToLine(pv.scrollTop), h = lh();
+    if (L == null) return put(ta, (pv.scrollTop / maxScroll(pv)) * maxScroll(ta));
+    put(ta, h ? L * h + padTop() : (L / nLines()) * maxScroll(ta));
+  });
+  // 커서가 있는 줄이 미리보기에서 안 보이면 그 위치로 스크롤
+  const follow = () => {
+    if (document.activeElement !== ta) return;
+    const L = ta.value.slice(0, ta.selectionStart).split('\n').length - 1, y = lineToY(L); if (y == null) return;
+    const m = 40; if (y < pv.scrollTop + m || y > pv.scrollTop + pv.clientHeight - m) put(pv, y - pv.clientHeight / 3);
+  };
+  pv._sync = { follow };
+  ta.addEventListener('keyup', (e) => { if (e.key.startsWith('Arrow') || e.key === 'PageUp' || e.key === 'PageDown' || e.key === 'Home' || e.key === 'End') follow(); });
+  ta.addEventListener('click', follow);
+}
 let previewTimer;
 function updatePreview() {
   const t = cur(); const pv = $('#preview'); if (!t || !pv) return;
@@ -710,7 +764,9 @@ function updatePreview() {
       else if (t.kind === 'md') pv.replaceChildren(renderMarkdown(t));
       else if (t.mode === 'tree') pv.replaceChildren(renderObjTree(t));
     } catch (e) { pv.replaceChildren(el('pre', { className: 'tree', textContent: e.message, style: 'color:var(--err)' })); }
+    if (t.mode === 'split' && t.kind === 'md') { pv._anchors = mdAnchors(pv, t.content); }
     if (pendingPvScroll != null) { pv.scrollTop = pendingPvScroll; pendingPvScroll = null; }   // 외부 변경으로 다시 그려도 보던 위치 유지
+    else if (t.mode === 'split' && t.kind === 'md' && pv._sync) pv._sync.follow();           // 편집 중인 곳이 미리보기에서 보이게
     if (fb.open) runFileFind(false);   // 미리보기가 다시 그려지면 표시도 다시
   }, t.mode === 'split' ? 120 : 0);
 }
