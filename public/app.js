@@ -1288,7 +1288,12 @@ function imageViewer(t) {
     if (!e.done) timer = setTimeout(() => { if (tok === v.tok) spin.hidden = false; }, 150);   // 바로 안 뜨면 그때만 로딩 표시 (이전 그림은 그대로 유지)
     await e.promise; clearTimeout(timer);
     if (tok !== v.tok) return; spin.hidden = true;
-    if (!e.ok) { stage.replaceChildren(el('div', { className: 'iv-err', textContent: '이미지를 열 수 없습니다: ' + p })); v.el = null; hud(e); return; }
+    if (!e.ok) { // 실패 원인을 같이 보여 준다 (오래된 서버면 404)
+      const box = el('div', { className: 'iv-err' }, el('div', { textContent: '이미지를 열 수 없습니다: ' + p }));
+      stage.replaceChildren(box); v.el = null; hud(e);
+      fetch(imgUrl(p, false)).then((r) => { if (!r.ok) box.append(el('div', { className: 'iv-err-sub', textContent: `서버 응답 ${r.status}` + (r.status === 404 ? ' — 서버가 이전 버전으로 실행 중일 수 있습니다. 터미널에서 `ss --stop` 후 앱을 다시 여세요.' : '') })); }).catch(() => box.append(el('div', { className: 'iv-err-sub', textContent: '서버에 연결할 수 없습니다.' })));
+      return;
+    }
     const info = e.info || {}, L = Math.max(info.w || 0, info.h || 0), tl = Math.max(e.img.naturalWidth, e.img.naturalHeight);
     const k = L && tl ? L / tl : 1;   // 축소본 → 원본 픽셀 배율 (긴 변 기준이라 EXIF 회전과 무관)
     v.iw = Math.max(1, Math.round(e.img.naturalWidth * k)); v.ih = Math.max(1, Math.round(e.img.naturalHeight * k));

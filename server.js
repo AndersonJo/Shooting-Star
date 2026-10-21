@@ -40,6 +40,8 @@ const readLast = () => { try { const r = JSON.parse(fs.readFileSync(LAST_FILE, '
 const REPO = 'AndersonJo/Shooting-Star';
 const VERSION = (() => { try { return require('./package.json').version; } catch { return '0.0.0'; } })();
 const cmpVer = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); return 0; };
+// 서버 코드의 지문: 버전은 그대로여도 코드가 바뀌면(git pull 등) 이전 코드로 떠 있는 서버를 알아볼 수 있다
+const BUILD = crypto.createHash('sha1').update(fs.readFileSync(__filename)).digest('hex').slice(0, 12);
 let updateCache = { t: 0, data: null };
 async function checkUpdate(force) {
   if (!force && updateCache.data && Date.now() - updateCache.t < 6 * 3600e3) return updateCache.data;
@@ -464,7 +466,7 @@ async function api(req, res, url, root) {
       return send(res, 200, await checkUpdate(url.searchParams.get('force') === '1'));
     case 'GET /api/info':
       getIndex(root); // 워크스페이스를 열면 인덱싱 시작
-      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir(), version: VERSION, dir: __dirname, pid: process.pid, platform: process.platform });
+      return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir(), version: VERSION, build: BUILD, dir: __dirname, pid: process.pid, platform: process.platform });
     case 'GET /api/browse': { // 폴더 선택기: 절대경로의 하위 폴더 목록
       const dir = fs.realpathSync(path.resolve((p || defaultWorkspace()).replace(/^~(?=$|\/)/, HOME)));
       const list = (await fsp.readdir(dir, { withFileTypes: true }))
@@ -717,9 +719,9 @@ async function main() {
   if (FG) return listenAuto(PORT);   // 포그라운드 서버
   // 기본: 백그라운드로 띄우고(이미 있으면 재사용) 이 폴더를 창으로 연다 — `code .` 처럼
   let found = await findServer();
-  if (found && (found.info.dir !== __dirname || found.info.version !== VERSION)) {
+  if (found && (found.info.dir !== __dirname || found.info.version !== VERSION || found.info.build !== BUILD)) {
     // 다른 설치 위치/버전의 서버가 떠 있으면(업데이트 후 남은 프로세스, 지워진 폴더 등) 재사용하지 않고 재시작한다
-    console.log(`다른 ${found.info.dir !== __dirname ? '위치' : '버전'}의 서버(v${found.info.version ?? '?'}, ${found.info.dir ?? '위치 불명'})가 실행 중이라 재시작합니다`);
+    console.log(`다른 ${found.info.dir !== __dirname ? '위치' : found.info.version !== VERSION ? '버전' : '코드'}의 서버(v${found.info.version ?? '?'}, ${found.info.dir ?? '위치 불명'})가 실행 중이라 재시작합니다`);
     await quitAt(found.port); found = null;
   }
   let port = found?.port ?? null;
