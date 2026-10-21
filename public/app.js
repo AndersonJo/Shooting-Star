@@ -195,13 +195,30 @@ async function refreshDir(p) { // 변경 후 해당 폴더 재로딩
   try { await loadDir(parent); } catch { childrenCache.delete(parent); }
   await renderTree();
 }
+function toggleDir(p) { state.expanded.has(p) ? state.expanded.delete(p) : state.expanded.add(p); persistTabs(); return renderTree(); }
+// 폴더: 클릭 = 선택만 (펼침 화살표 클릭 / 더블클릭 / Enter 로 접기·펼치기), 파일: 클릭 = 열기
+// 한 번 클릭할 때는 트리를 다시 그리지 않는다 (다시 그리면 두 번째 클릭이 더블클릭으로 이어지지 않는다)
 $('#tree').addEventListener('click', async (ev) => {
   const row = ev.target.closest('.row'); if (!row) return;
   const p = row.dataset.path; state.selected = p;
   if (row.dataset.dir) {
-    state.expanded.has(p) ? state.expanded.delete(p) : state.expanded.add(p);
-    persistTabs(); await renderTree();
+    if (ev.target.closest('.arrow')) return toggleDir(p);
+    document.querySelectorAll('#tree .row.sel').forEach((r) => r.classList.remove('sel')); row.classList.add('sel');
   } else { await openFile(p); }
+});
+$('#tree').addEventListener('dblclick', (ev) => {
+  const row = ev.target.closest('.row'); if (row?.dataset.dir && !ev.target.closest('.arrow')) toggleDir(row.dataset.path);
+});
+$('#tree').addEventListener('keydown', (ev) => { // 키보드: ↑↓ 이동, → 펼치기, ← 접기, Enter 폴더 접기·펼치기/파일 열기
+  if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) return;
+  const rows = [...document.querySelectorAll('#tree .row')]; if (!rows.length) return;
+  let i = rows.findIndex((r) => r.dataset.path === state.selected); const row = rows[i], isDir = !!row?.dataset.dir, p = row?.dataset.path;
+  const select = (k) => { const r = rows[Math.max(0, Math.min(rows.length - 1, k))]; state.selected = r.dataset.path; rows.forEach((x) => x.classList.toggle('sel', x === r)); r.scrollIntoView({ block: 'nearest' }); };
+  if (ev.key === 'ArrowDown') { ev.preventDefault(); select(i + 1); }
+  else if (ev.key === 'ArrowUp') { ev.preventDefault(); select(i < 0 ? 0 : i - 1); }
+  else if (ev.key === 'ArrowRight' && isDir && !state.expanded.has(p)) { ev.preventDefault(); toggleDir(p); }
+  else if (ev.key === 'ArrowLeft' && isDir && state.expanded.has(p)) { ev.preventDefault(); toggleDir(p); }
+  else if (ev.key === 'Enter' && row) { ev.preventDefault(); isDir ? toggleDir(p) : openFile(p); }
 });
 $('#btn-collapse').onclick = () => { state.expanded.clear(); persistTabs(); renderTree(); };
 
