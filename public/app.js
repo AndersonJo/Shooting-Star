@@ -662,6 +662,7 @@ function renderContent() {
     };
     paint();
     ta.onkeydown = (e) => {
+      if (indentKey(e, ta, t.kind === 'md')) return;
       if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey) {
         e.preventDefault(); document.execCommand('insertText', false, '  ');
       } else if (e.key === 'Escape' && fb.open) { e.preventDefault(); closeFileFind(); }
@@ -1874,6 +1875,26 @@ function pasteLink(e, ta) {
   }
   return true;
 }
+// Tab / Shift+Tab: 선택한 줄 전체(선택이 없으면 현재 줄)의 들여쓰기를 2칸씩 조절. 처리했으면 true
+function indentKey(e, ta, md) {
+  if (e.key !== 'Tab' || e.metaKey || e.ctrlKey || e.altKey) return false;
+  const v = ta.value, a = ta.selectionStart, ranged = a !== ta.selectionEnd; let b = ta.selectionEnd;
+  const ls0 = v.lastIndexOf('\n', a - 1) + 1, lineEnd = v.indexOf('\n', a) < 0 ? v.length : v.indexOf('\n', a);
+  if (!e.shiftKey && !ranged && !(md && /^\s*([-*+]|\d+[.)])\s/.test(v.slice(ls0, lineEnd)))) return false;   // 평소 Tab: 커서 위치에 공백 2칸
+  e.preventDefault();
+  if (ranged && v[b - 1] === '\n') b--;                  // 다음 줄 맨 앞까지 선택된 경우 그 줄은 제외
+  const le = v.indexOf('\n', b), end = le < 0 ? v.length : le;
+  let firstDelta = 0;
+  const out = v.slice(ls0, end).split('\n').map((l, i) => {
+    const cut = e.shiftKey ? (l.match(/^( {1,2}|\t)/)?.[0].length || 0) : 0;
+    if (i === 0) firstDelta = e.shiftKey ? -cut : 2;
+    return e.shiftKey ? l.slice(cut) : '  ' + l;
+  }).join('\n');
+  ta.setSelectionRange(ls0, end);
+  document.execCommand('insertText', false, out);
+  if (ranged) ta.setSelectionRange(ls0, ls0 + out.length); else { const c = Math.max(ls0, a + firstDelta); ta.setSelectionRange(c, c); }
+  return true;
+}
 async function attachImages(files, taOverride) {
   const t = cur(); if (!t || t.kind !== 'md') return;
   if (t.mode === 'smart' && !taOverride) return smartCtx?.attach(files);   // 스마트 편집: 편집 중이 아니면 이미지 블록으로 추가
@@ -2018,6 +2039,7 @@ function smartEditor(t) {
     if (e.key === 'Backspace' && !sel && s === 0 && !e.metaKey && !e.ctrlKey && !e.altKey) { if (mergePrev(ta)) e.preventDefault(); return; }
     if (e.key === 'ArrowUp' && !sel && !e.shiftKey && (s === 0 || (ls === 0 && oneLine))) { e.preventDefault(); neighbor(-1); return; }
     if (e.key === 'ArrowDown' && !sel && !e.shiftKey && (s === v.length || (nl < 0 && oneLine))) { e.preventDefault(); neighbor(1); return; }
+    if (indentKey(e, ta, true)) return;
     if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); if (/^\s*([-*+]|\d+[.)])\s/.test(line)) { ta.setSelectionRange(ls, ls); document.execCommand('insertText', false, e.shiftKey ? '' : '  '); ta.setSelectionRange(s + 2, s + 2); } else document.execCommand('insertText', false, '  '); }
   }
   async function attach(files) { // 편집 중이면 커서 위치에, 아니면 마지막으로 만진 블록 뒤(없으면 문서 끝)에 이미지 블록으로 추가
