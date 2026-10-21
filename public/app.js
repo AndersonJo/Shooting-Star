@@ -60,7 +60,7 @@ function kindOf(p) {
 }
 const ICON = { md: 'M↓', json: '{}', jsonl: '{}', yaml: 'Y', csv: '▦', text: '≡', image: '▣' };
 const MODES = {
-  md: [['view', '보기'], ['split', '분할'], ['edit', '편집']],
+  md: [['view', '보기'], ['split', '분할'], ['edit', '편집'], ['smart', '스마트 편집']],
   json: [['edit', '편집'], ['tree', '트리']],
   yaml: [['edit', '편집'], ['tree', '트리']],
   csv: [['table', '테이블'], ['edit', '편집']],
@@ -367,7 +367,7 @@ function renderToolbar() {
   items.push(
     btn('복사', '전체 내용 복사', () => copy(t.content, '전체 복사됨')),
     btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) ? state.memoDir + '/' + t.path.slice(6) : e.shiftKey ? state.root + '/' + t.path : t.path, '경로 복사됨')),
-    ...(t.kind === 'md' && (t.mode === 'edit' || t.mode === 'split') ? [btn('🖼 이미지', '이미지 첨부 — 붙여넣기·끌어놓기도 됩니다 (문서 폴더의 images/ 에 저장)', pickImages)] : []),
+    ...(t.kind === 'md' && (t.mode === 'edit' || t.mode === 'split' || t.mode === 'smart') ? [btn('🖼 이미지', '이미지 첨부 — 붙여넣기·끌어놓기도 됩니다 (문서 폴더의 images/ 에 저장)', pickImages)] : []),
     btn('✨ Prettify', '정리/포맷 (⌘⌥L)', prettify),
   );
   if (t.kind === 'json') items.push(btn('Minify', 'JSON 압축', minify));
@@ -479,6 +479,7 @@ function renderContent() {
     return el('div', { className: 'pane' }, el('div', { className: 'ed' }, fm, pre, ta));
   };
   if (t.mode === 'edit') panes.push(editor());
+  else if (t.mode === 'smart' && t.kind === 'md') panes.push(smartEditor(t));
   else if (t.mode === 'split') panes.push(editor(), el('div', { className: 'pane', id: 'preview' }));
   else panes.push(el('div', { className: 'pane', id: 'preview' }));
   box.replaceChildren(...panes);
@@ -513,9 +514,9 @@ function resolveRel(base, href) {
   }
   return parts.join('/');
 }
-function renderMarkdown(t) {
+function renderMarkdown(t, htmlOverride) { // htmlOverride: 이미 변환/정화된 HTML 조각(스마트 편집의 블록)
   marked.setOptions({ gfm: true, breaks: false });
-  const html = DOMPurify.sanitize(marked.parse(t.content), { USE_PROFILES: { html: true } });
+  const html = htmlOverride ?? DOMPurify.sanitize(marked.parse(t.content), { USE_PROFILES: { html: true } });
   const doc = el('div', { className: 'md' }); doc.innerHTML = html;
   const base = dirOf(t.path);
   doc.querySelectorAll('img').forEach((img) => {
@@ -1201,8 +1202,8 @@ function closeFileFind() {
 }
 function clearFindMarks() {
   const fm = $('pre.fm'); if (fm) fm.textContent = '';
-  document.querySelectorAll('#preview mark.fmd').forEach((m) => m.replaceWith(m.textContent));
-  $('#preview')?.normalize();
+  document.querySelectorAll('#preview mark.fmd, .smart-doc mark.fmd').forEach((m) => m.replaceWith(m.textContent));
+  ($('#preview') || $('.smart-doc'))?.normalize();
 }
 // 화면(DOM) 텍스트에서 찾아 <mark> 로 감싼다. 반환: mark 요소 배열
 function markDom(root, re0, limit = 5000) {
@@ -1227,7 +1228,7 @@ function markDom(root, re0, limit = 5000) {
 function runFileFind(fresh) {
   if (!fb.open) return;
   store.set('fbq', fb.q);
-  const ta = $('textarea.editor'), pv = $('#preview'), re = fbRegex();
+  const ta = $('textarea.editor'), pv = $('#preview') || $('.smart-doc'), re = fbRegex();
   clearFindMarks(); fb.matches = [];
   if (!re || re === 'bad') { fb.idx = -1; return drawFindCount(re); }
   if (ta) { // 편집기(편집/분할): 원문 기준
@@ -1252,7 +1253,7 @@ function gotoFind(i) {
   const n = fb.matches.length; fb.idx = n ? ((i % n) + n) % n : -1; drawFindCount();
   const m = fb.matches[fb.idx]; if (!m) { renderFM(); return; }
   if (fb.dom) {
-    document.querySelectorAll('#preview mark.fmd.cur').forEach((x) => x.classList.remove('cur'));
+    document.querySelectorAll('#preview mark.fmd.cur, .smart-doc mark.fmd.cur').forEach((x) => x.classList.remove('cur'));
     m.classList.add('cur'); m.scrollIntoView({ block: 'center', inline: 'nearest' });
   } else {
     renderFM();
@@ -1431,8 +1432,7 @@ async function uploadImage(destRel, file) {
   return j;
 }
 const imgStamp = () => { const d = new Date(); return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`; };
-async function attachImages(files) {
-  const t = cur(), ta = $('textarea.editor'); if (!t || t.kind !== 'md' || !ta) return;
+async function uploadImages(t, files) { // 이미지들을 <문서 폴더>/images/ 에 올리고 마크다운 링크 목록을 돌려준다
   const dir = dirOf(t.path), parts = []; let reused = 0;
   toast(`이미지 업로드 중… (${files.length}개)`);
   for (const f of files) {
@@ -1444,14 +1444,181 @@ async function attachImages(files) {
       parts.push(`![${j.name.replace(/\.[^.]+$/, '')}](images/${j.name})`);
     } catch (e) { toast('이미지 첨부 실패: ' + e.message); }
   }
-  if (!parts.length) return;
+  if (parts.length) toast(`이미지 ${parts.length}개 첨부됨 → ${dir ? dir + '/' : ''}images/` + (reused ? ` (같은 이미지 ${reused}개는 재사용)` : ''));
+  return { parts, reused };
+}
+async function attachImages(files, taOverride) {
+  const t = cur(); if (!t || t.kind !== 'md') return;
+  if (t.mode === 'smart' && !taOverride) return smartCtx?.attach(files);   // 스마트 편집: 편집 중이 아니면 이미지 블록으로 추가
+  const ta = taOverride || $('textarea.editor'); if (!ta) return;
+  const { parts } = await uploadImages(t, files); if (!parts.length) return;
   ta.focus(); document.execCommand('insertText', false, parts.join('\n'));   // 커서 위치에 삽입 (⌘Z 로 되돌릴 수 있다)
-  toast(`이미지 ${parts.length}개 첨부됨 → ${dir ? dir + '/' : ''}images/` + (reused ? ` (같은 이미지 ${reused}개는 재사용)` : ''));
 }
 function pickImages() {
   const inp = el('input', { type: 'file', accept: 'image/*', multiple: true });
   inp.onchange = () => attachImages([...inp.files]);
   inp.click();
+}
+
+// ───────── 스마트 편집 (블록 단위 라이브 편집) ─────────
+// 문서를 마크다운 블록(문단/제목/목록/코드/표…)으로 나눠 보기처럼 렌더링하고, 블록을 클릭하면 그 자리에서 원문을 편집한다.
+// 수정한 블록의 원문만 바뀌므로 나머지 마크다운은 한 글자도 변하지 않는다. (marked.lexer 토큰의 raw 를 이어 붙이면 원문과 같다)
+let smartCtx = null;
+function smartEditor(t) {
+  const pane = el('div', { className: 'pane smart' }), doc = el('div', { className: 'md smart-doc' });
+  pane.append(doc);
+  const eol = t.content.includes('\r\n') ? '\r\n' : '\n';
+  const lexFrag = (raw) => marked.lexer(raw).map((tok) => ({ type: tok.type, raw: tok.raw, tok }));
+  let blocks = lexFrag(t.content.replace(/\r\n/g, '\n')), editIdx = -1, lastIdx = -1;
+  const src = () => blocks.map((b) => b.raw).join('');
+  const toContent = (s) => (eol === '\r\n' ? s.replace(/\n/g, '\r\n') : s);
+  const hist = [src()]; let hpos = 0;
+  const tailOf = (raw) => raw.slice(raw.trimEnd().length);
+  const rawFor = (i, value) => { // 편집한 텍스트 → 블록의 새 raw (끝 공백 정리, 원래의 줄바꿈 꼬리 유지)
+    const body = value.replace(/\s+$/, ''); if (!body.trim()) return '';
+    const tail = tailOf(blocks[i].raw), next = blocks[i + 1];
+    return body + tail + (!tail && next && next.type !== 'space' ? '\n\n' : '');
+  };
+  const afterChange = () => { renderTabs(); renderToolbarDirtyOnly(); validate(); if (isMemo(t.path)) { clearTimeout(t._as); t._as = setTimeout(() => save(t, true).then(refreshMemos), 800); } };
+  function changed(push = true) {
+    t.content = toContent(src());
+    if (push) { const s = src(); if (hist[hpos] !== s) { hist.length = hpos + 1; hist.push(s); hpos++; if (hist.length > 200) { hist.shift(); hpos--; } } }
+    afterChange();
+  }
+  function live() { // 입력하는 동안에도 내용/저장 상태를 맞춘다 (⌘S, 메모 자동 저장이 바로 반영)
+    const ta = doc.querySelector('.sb-ta'); if (!ta || editIdx < 0) return;
+    t.content = toContent(blocks.map((b, i) => (i === editIdx ? rawFor(i, ta.value) : b.raw)).join('')); afterChange();
+  }
+  function commitEdit() { // 편집 중인 블록을 확정. 반환: { shift: 뒤쪽 블록 인덱스 이동량, last: 확정된 영역의 마지막 블록 인덱스 }
+    if (editIdx < 0) return { shift: 0, last: -1 };
+    const i = editIdx, ta = doc.querySelector('.sb-ta'); editIdx = -1; if (!ta) return { shift: 0, last: i };
+    const raw = rawFor(i, ta.value), old = blocks[i];
+    if (raw === old.raw) return { shift: 0, last: i };
+    if (!raw && old.fresh) { // 비어 있는 채로 만든 새 블록을 버리면 같이 추가했던 빈 줄도 정리
+      const lo = blocks[i - 1]?.added ? 1 : 0, hi = blocks[i + 1]?.added ? 1 : 0;
+      blocks.splice(i - lo, 1 + lo + hi); changed(); return { shift: -(1 + lo + hi), last: i - lo - 1 };
+    }
+    const repl = raw ? lexFrag(raw) : [];
+    blocks.splice(i, 1, ...repl); changed(); return { shift: repl.length - 1, last: i + repl.length - 1 };
+  }
+  function insertBlockAfter(i, body) { // 블록 i 뒤에 새 블록(들)을 넣고 첫 새 블록의 인덱스를 반환
+    const ins = [], newBlocks = body ? lexFrag(body) : [{ type: 'paragraph', raw: '', tok: null, fresh: true }];
+    let at = i < 0 ? 0 : i + 1;
+    if (i >= 0) { if (blocks[at]?.type === 'space') at++; else ins.push({ type: 'space', raw: '\n\n', tok: null, added: !body }); }
+    ins.push(...newBlocks);
+    if (blocks[at] && blocks[at].type !== 'space') ins.push({ type: 'space', raw: '\n\n', tok: null, added: !body });
+    blocks.splice(at, 0, ...ins);
+    return at + (ins[0].type === 'space' ? 1 : 0);
+  }
+  const lvl = (v) => /^(#{1,6})\s/.exec(v)?.[1].length || 0;
+  function fit(ta) { // 높이 자동 + 입력 중 즉시 서식 (## → 제목 크기)
+    ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px';
+    ta.className = 'sb-ta' + (lvl(ta.value) ? ' h' + lvl(ta.value) : '') + (/^\s*(```|~~~)/.test(ta.value) ? ' code' : '') + (/^>/.test(ta.value) ? ' quote' : '');
+  }
+  const imgFiles = (e) => { const cd = e.clipboardData; const f = [...(cd?.files || [])].filter((x) => x.type.startsWith('image/')); return !f.length || cd.getData('text/plain') ? [] : f; };
+  function makeEditor(b) {
+    const ta = el('textarea', { className: 'sb-ta', value: b.raw.replace(/\s+$/, ''), spellcheck: false, rows: 1 });
+    ta.oninput = () => { fit(ta); live(); };
+    ta.onkeydown = (e) => onKey(e, ta);
+    ta.onblur = () => setTimeout(() => { if (editIdx >= 0 && !doc.contains(document.activeElement)) { commitEdit(); render(); } }, 0);
+    ta.addEventListener('paste', (e) => { const f = imgFiles(e); if (f.length) { e.preventDefault(); attachImages(f, ta); } });
+    ta.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
+    ta.addEventListener('drop', (e) => { const all = [...(e.dataTransfer?.files || [])]; if (!all.length) return; e.preventDefault(); const im = all.filter((f) => f.type.startsWith('image/')); im.length ? attachImages(im, ta) : toast('이미지 파일만 첨부할 수 있습니다'); });
+    return ta;
+  }
+  function blockEl(b, i) {
+    const d = el('div', { className: 'sb' + (i === editIdx ? ' editing' : '') }); d.dataset.i = i;
+    if (i === editIdx) { d.append(makeEditor(b)); return d; }
+    try { d.append(...renderMarkdown(t, DOMPurify.sanitize(marked.parser([b.tok]), { USE_PROFILES: { html: true } })).childNodes); } catch { d.textContent = b.raw; }
+    d.querySelectorAll('input[type=checkbox]').forEach((c, k) => { c.disabled = false; c.onchange = () => toggleTask(i, k); });
+    return d;
+  }
+  function render() {
+    const st = pane.scrollTop, els = [];
+    blocks.forEach((b, i) => { if (b.type !== 'space') els.push(blockEl(b, i)); });
+    const has = blocks.some((b) => b.type !== 'space');
+    const tail = el('div', { className: 'sb-tail', textContent: has ? '＋ 여기를 눌러 문단 추가' : '클릭해서 입력을 시작하세요…  (## 제목 · - 목록 · 이미지는 붙여넣기)' });
+    tail.onmousedown = (e) => { e.preventDefault(); startEdit(insertBlockAfter(blocks.length - 1, ''), 0); };
+    doc.replaceChildren(...els, tail); pane.scrollTop = st;
+    const ta = doc.querySelector('.sb-ta'); if (ta) fit(ta);
+  }
+  function startEdit(i, where = 'end') {
+    const prev = editIdx, r = commitEdit(); if (prev >= 0 && i > prev) i += r.shift;
+    while (i < blocks.length && blocks[i].type === 'space') i++;
+    if (i >= blocks.length) i = insertBlockAfter(blocks.length - 1, '');
+    editIdx = i; lastIdx = i; render();
+    const ta = doc.querySelector('.sb-ta'); ta.focus();
+    const p = where === 'end' ? ta.value.length : where === 'start' ? 0 : where; ta.setSelectionRange(p, p);
+    ta.scrollIntoView({ block: 'nearest' });
+  }
+  const finish = () => { commitEdit(); render(); };
+  function newBlockAfterCurrent(body) { // 현재 블록을 확정하고 그 아래에 새 문단을 만들어 편집 (현재 블록이 비면 삭제됨)
+    const r = commitEdit(); startEdit(insertBlockAfter(r.last, body), 0);
+  }
+  function mergePrev(ta) { // 블록 맨 앞에서 Backspace: 앞 블록과 합치기 (빈 블록이면 삭제)
+    const i = editIdx; let j = i - 1; while (j >= 0 && blocks[j].type === 'space') j--; if (j < 0) return false;
+    const prevBody = blocks[j].raw.replace(/\s+$/, ''), tail = tailOf(blocks[j].raw), cur = ta.value;
+    editIdx = -1; blocks.splice(i, 1);
+    blocks.splice(j, 1, ...lexFrag(prevBody + cur + tail)); changed(); startEdit(j, prevBody.length); return true;
+  }
+  function neighbor(dir) {
+    let j = editIdx + dir; while (j >= 0 && j < blocks.length && blocks[j].type === 'space') j += dir;
+    if (j >= 0 && j < blocks.length) startEdit(j, dir < 0 ? 'end' : 'start');
+  }
+  function toggleTask(i, k) {
+    let n = -1; const raw = blocks[i].raw.replace(/^(\s*(?:[-*+]|\d+[.)])\s+)\[( |x|X)\]/gm, (m, pre, c) => (++n === k ? `${pre}[${c === ' ' ? 'x' : ' '}]` : m));
+    blocks.splice(i, 1, ...lexFrag(raw)); changed(); render();
+  }
+  function onKey(e, ta) {
+    if (e.isComposing || e.keyCode === 229) return;   // 한글 조합 중에는 건드리지 않는다
+    const v = ta.value, s = ta.selectionStart, sel = ta.selectionEnd !== s;
+    const ls = v.lastIndexOf('\n', s - 1) + 1, nl = v.indexOf('\n', s), le = nl < 0 ? v.length : nl, line = v.slice(ls, le), first = v.split('\n', 1)[0];
+    const isCode = /^\s*(```|~~~)/.test(v), isTable = /^\s*\|/.test(first);
+    const oneLine = ta.scrollHeight < 2 * (parseFloat(getComputedStyle(ta).lineHeight) || 24);
+    if (e.key === 'Escape') { e.preventDefault(); finish(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); newBlockAfterCurrent(''); return; }
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !isCode && !isTable) {
+      e.preventDefault();
+      const lm = /^(\s*)([-*+]|\d+[.)])(\s+)(\[[ xX]\]\s+)?(.*)$/.exec(line), qm = /^(\s*>+\s?)(.*)$/.exec(line);
+      if (lm) { // 목록: 다음 항목 자동 생성, 빈 항목에서 Enter 면 목록 종료
+        if (!lm[5].trim() && s >= le) { ta.value = v.slice(0, ls).replace(/\n$/, ''); newBlockAfterCurrent(''); return; }
+        const marker = /^\d+/.test(lm[2]) ? `${parseInt(lm[2], 10) + 1}${lm[2].slice(-1)}` : lm[2];
+        document.execCommand('insertText', false, '\n' + lm[1] + marker + lm[3] + (lm[4] ? '[ ] ' : '')); return;
+      }
+      if (qm) { if (!qm[2].trim() && s >= le) { ta.value = v.slice(0, ls).replace(/\n$/, ''); newBlockAfterCurrent(''); return; } document.execCommand('insertText', false, '\n' + qm[1]); return; }
+      const a = v.slice(0, s), b = v.slice(ta.selectionEnd).replace(/^\s+/, ''); ta.value = a; newBlockAfterCurrent(b); return;   // 문단/제목: 커서에서 둘로 나눈다
+    }
+    if (e.key === 'Backspace' && !sel && s === 0 && !e.metaKey && !e.ctrlKey && !e.altKey) { if (mergePrev(ta)) e.preventDefault(); return; }
+    if (e.key === 'ArrowUp' && !sel && !e.shiftKey && (s === 0 || (ls === 0 && oneLine))) { e.preventDefault(); neighbor(-1); return; }
+    if (e.key === 'ArrowDown' && !sel && !e.shiftKey && (s === v.length || (nl < 0 && oneLine))) { e.preventDefault(); neighbor(1); return; }
+    if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); if (/^\s*([-*+]|\d+[.)])\s/.test(line)) { ta.setSelectionRange(ls, ls); document.execCommand('insertText', false, e.shiftKey ? '' : '  '); ta.setSelectionRange(s + 2, s + 2); } else document.execCommand('insertText', false, '  '); }
+  }
+  async function attach(files) { // 편집 중이면 커서 위치에, 아니면 마지막으로 만진 블록 뒤(없으면 문서 끝)에 이미지 블록으로 추가
+    const ta = doc.querySelector('.sb-ta'); if (ta) return attachImages(files, ta);
+    const { parts } = await uploadImages(t, files); if (!parts.length) return;
+    lastIdx = insertBlockAfter(lastIdx >= 0 && lastIdx < blocks.length ? lastIdx : blocks.length - 1, parts.join('\n\n')); changed(); render();
+  }
+  // 입력: 블록 클릭=편집 (링크는 ⌘/Ctrl+클릭으로 이동), 체크박스 토글, 이미지 붙여넣기/끌어놓기, 문서 단위 되돌리기
+  doc.addEventListener('mousedown', (e) => {
+    const sb = e.target.closest('.sb'); if (!sb || sb.classList.contains('editing')) return;
+    if (e.target.closest('.cp, input[type=checkbox]')) return;
+    if (e.target.closest('a') && (e.metaKey || e.ctrlKey)) return;
+    e.preventDefault(); startEdit(+sb.dataset.i, 'end');   // mousedown 을 막아 두면 편집 중이던 입력창이 먼저 blur 되며 화면이 바뀌는 일이 없다
+  });
+  doc.addEventListener('click', (e) => { if (e.target.closest('a') && !(e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+  pane.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
+  pane.addEventListener('drop', (e) => { if (e.target.closest('textarea')) return; const im = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith('image/')); if (im.length) { e.preventDefault(); attach(im); } });
+  const ctx = { attach };
+  const onPaste = (e) => { if (!doc.isConnected) { document.removeEventListener('paste', onPaste, true); return; } if (e.target.closest?.('textarea, input')) return; const f = imgFiles(e); if (f.length) { e.preventDefault(); attach(f); } };
+  const onDocKey = (e) => {
+    if (!doc.isConnected) { document.removeEventListener('keydown', onDocKey, true); if (smartCtx === ctx) smartCtx = null; return; }
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key.toLowerCase() !== 'z' || e.target.closest?.('textarea, input')) return;
+    const to = hpos + (e.shiftKey ? 1 : -1); if (to < 0 || to >= hist.length) return;
+    e.preventDefault(); hpos = to; blocks = lexFrag(hist[hpos]); editIdx = -1; changed(false); render();
+  };
+  document.addEventListener('paste', onPaste, true); document.addEventListener('keydown', onDocKey, true);
+  smartCtx = ctx; render();
+  return pane;
 }
 
 // ───────── 폴더 열기 (⌘O) ─────────

@@ -577,3 +577,17 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 
 .st-ver .st-upd { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); font-weight: 600; }
 .st-ver .st-upd[hidden] { display: none; }
+
+/* 스마트 편집: 블록 단위 라이브 편집 */
+.smart-doc { padding-bottom: 40vh; }
+.smart-doc .sb { position: relative; margin: 0 -10px .55em; padding: 1px 10px; border-radius: 6px; cursor: text; }
+.smart-doc .sb:hover { background: var(--hover); }
+.smart-doc .sb.editing { background: var(--bg2); box-shadow: inset 2px 0 var(--accent); }
+.smart-doc .sb > :first-child { margin-top: 0; } .smart-doc .sb > :last-child { margin-bottom: 0; }
+.sb-ta { display: block; width: 100%; border: 0; outline: 0; resize: none; background: transparent; color: inherit; font: inherit; line-height: 1.65; padding: 2px 0; overflow: hidden; white-space: pre-wrap; word-break: break-word; }
+.sb-ta.h1 { font-size: 2em; font-weight: 700; line-height: 1.25; } .sb-ta.h2 { font-size: 1.5em; font-weight: 700; line-height: 1.3; }
+.sb-ta.h3 { font-size: 1.25em; font-weight: 700; } .sb-ta.h4, .sb-ta.h5, .sb-ta.h6 { font-weight: 700; }
+.sb-ta.code { font-family: var(--mono); font-size: .9em; background: var(--code); padding: 8px 10px; border-radius: 6px; }
+.sb-ta.quote { color: var(--fg2); }
+.sb-tail { color: var(--fg2); font-size: 12.5px; padding: 10px 0; cursor: text; opacity: 0; transition: opacity .15s; }
+.smart-doc:hover .sb-tail, .smart-doc .sb-tail:only-child { opacity: .75; }
