@@ -671,6 +671,7 @@ function renderContent() {
     };
     paint();
     ta.onkeydown = (e) => {
+      if (t.kind === 'md' && listEnter(e, ta)) return;
       if (indentKey(e, ta, t.kind === 'md')) return;
       if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey) {
         e.preventDefault(); document.execCommand('insertText', false, '  ');
@@ -1987,6 +1988,19 @@ function pasteLink(e, ta) {
   if (!document.execCommand('insertText', false, out)) { // 실행취소를 유지하려 execCommand 우선
     ta.setRangeText(out, a, b, 'end'); ta.dispatchEvent(new Event('input', { bubbles: true }));
   }
+  return true;
+}
+// Enter: 목록 줄이면 같은 들여쓰기·기호(번호는 +1, 체크박스는 빈 칸)로 다음 항목을 만든다. 빈 항목에서 Enter 면 기호를 지운다. 처리했으면 true
+function listEnter(e, ta) {
+  if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.metaKey || e.ctrlKey || e.isComposing || e.keyCode === 229) return false;
+  const v = ta.value, s = ta.selectionStart;
+  const ls = v.lastIndexOf('\n', s - 1) + 1, nl = v.indexOf('\n', s), le = nl < 0 ? v.length : nl;
+  const m = /^(\s*)([-*+]|\d+[.)])(\s+)(\[[ xX]\]\s+)?(.*)$/.exec(v.slice(ls, le));
+  if (!m || s < ls + m[1].length + m[2].length + m[3].length) return false;   // 기호 앞/안에서는 평소 Enter
+  e.preventDefault();
+  if (!m[5].trim() && s >= le) { ta.setSelectionRange(ls, le); document.execCommand('insertText', false, ''); return true; }
+  const marker = /^\d+/.test(m[2]) ? `${parseInt(m[2], 10) + 1}${m[2].slice(-1)}` : m[2];
+  document.execCommand('insertText', false, '\n' + m[1] + marker + m[3] + (m[4] ? '[ ] ' : ''));
   return true;
 }
 // Tab / Shift+Tab: 선택한 줄 전체(선택이 없으면 현재 줄)의 들여쓰기를 2칸씩 조절. 처리했으면 true
