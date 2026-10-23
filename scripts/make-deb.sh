@@ -7,7 +7,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$DIR/package.json" | head -1)"
 ROOT="$(mktemp -d)/pkg"
 mkdir -p "$ROOT/DEBIAN" "$ROOT/opt/shooting-star" "$ROOT/usr/bin" "$ROOT/usr/share/applications" "$ROOT/usr/share/icons/hicolor/512x512/apps" "$OUT"
-cp -R "$DIR/server.js" "$DIR/package.json" "$DIR/public" "$ROOT/opt/shooting-star/"
+cp -R "$DIR"/*.js "$DIR/package.json" "$DIR/public" "$ROOT/opt/shooting-star/"
 cp "$DIR/assets/icon.png" "$ROOT/usr/share/icons/hicolor/512x512/apps/shooting-star.png"
 printf '#!/bin/sh\nexec node /opt/shooting-star/server.js "$@"\n' > "$ROOT/usr/bin/ss"; chmod 755 "$ROOT/usr/bin/ss"
 cat > "$ROOT/usr/share/applications/shooting-star.desktop" <<DESK

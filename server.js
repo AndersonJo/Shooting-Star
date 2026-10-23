@@ -8,6 +8,11 @@ const path = require('path');
 const os = require('os');
 const { exec, execFile, spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
+// `ss run …`: 서버를 띄우지 않고 스크립트 레지스트리 CLI 로 동작 (run.js)
+if (process.argv[2] === 'run') { require('./run').cli(process.argv.slice(3)).then((c) => process.exit(c)); return; }
+if (process.argv[2] === 'db') { require('./db').cli(process.argv.slice(3)).then((c) => process.exit(c)); return; }
+const RUN = require('./run');
+const DB = require('./db');
 
 const args = process.argv.slice(2);
 const opt = (name, def) => {
@@ -41,7 +46,7 @@ const REPO = 'AndersonJo/Shooting-Star';
 const VERSION = (() => { try { return require('./package.json').version; } catch { return '0.0.0'; } })();
 const cmpVer = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); return 0; };
 // 서버 코드의 지문: 버전은 그대로여도 코드가 바뀌면(git pull 등) 이전 코드로 떠 있는 서버를 알아볼 수 있다
-const BUILD = crypto.createHash('sha1').update(fs.readFileSync(__filename)).digest('hex').slice(0, 12);
+const BUILD = crypto.createHash('sha1').update(fs.readFileSync(__filename)).update(fs.readFileSync(path.join(__dirname, 'run.js'))).update(fs.readFileSync(path.join(__dirname, 'db.js'))).digest('hex').slice(0, 12);
 let updateCache = { t: 0, data: null };
 const API_BASE = process.env.SS_GITHUB_API || 'https://api.github.com';
 // 설치 방식: git(소스) / brew(cask) / app(zip 으로 설치한 앱) / deb / unknown — 업데이트 방법이 다르다
@@ -597,10 +602,90 @@ async function api(req, res, url, root) {
       return send(res, 200, readFavs());
     case 'PUT /api/favorites': {
       const { list } = JSON.parse(await readBody(req));
-      if (!Array.isArray(list) || !list.every((x) => typeof x === 'string' && path.isAbsolute(x))) throw httpError(400, 'bad list');
+      if (!Array.isArray(list) || !list.every((x) => typeof x === 'string' && path.isAbsolute(x.replace(/^f:/, '')))) throw httpError(400, 'bad list');
       fs.mkdirSync(path.dirname(FAV_FILE), { recursive: true });
       fs.writeFileSync(FAV_FILE, JSON.stringify([...new Set(list)], null, 2) + '\n');
       return send(res, 200, { ok: true });
+    }
+    case 'GET /api/run/list':
+      return send(res, 200, { scripts: RUN.list().map(({ scriptPath, ...m }) => ({ ...m, scriptPath })), dir: RUN.DIR, running: [...RUN.jobs.values()].filter((j) => !j.endedAt).map((j) => ({ id: j.id, name: j.name })), history: RUN.history(30) });
+    case 'POST /api/run/exec': { // 등록된 이름만 실행한다 (임의 명령 실행 아님)
+      const { name, params } = JSON.parse(await readBody(req));
+      const job = RUN.start(RUN.get(name), params && typeof params === 'object' ? params : {}, { cwd: root, source: 'ui' });
+      return send(res, 200, { id: job.id, cmdline: job.cmdline, cwd: job.cwd, startedAt: job.startedAt });
+    }
+    case 'GET /api/run/stream': { // 실행 출력 (SSE): 지금까지의 출력 → 이어서 실시간 → end
+      const id = url.searchParams.get('id') || '', job = RUN.jobs.get(id);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
+      const ev = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+      if (!job) { ev('data', RUN.readLog(id)); ev('end', { code: null, gone: true }); return res.end(); }
+      if (job.buf) ev('data', job.buf);
+      if (job.endedAt) { ev('end', { code: job.code, signal: job.signal, ms: job.endedAt - job.startedAt }); return res.end(); }
+      const onData = (s) => ev('data', s), onEnd = (r) => { ev('end', { ...r, ms: job.endedAt - job.startedAt }); res.end(); };
+      job.on('data', onData); job.once('end', onEnd);
+      res.on('close', () => { job.off('data', onData); job.off('end', onEnd); });
+      return;
+    }
+    case 'POST /api/run/kill': {
+      const { id } = JSON.parse(await readBody(req));
+      return send(res, 200, { ok: RUN.kill(id) });
+    }
+    case 'GET /api/run/log':
+      return send(res, 200, { log: RUN.readLog(url.searchParams.get('id') || '') });
+    case 'POST /api/run/new': { // 빈 스크립트 + 매니페스트를 만든다 (이후 편집기에서 수정)
+      const { name, lang } = JSON.parse(await readBody(req));
+      const ext = { bash: '.sh', python: '.py', node: '.js' }[lang] || '.sh';
+      const body = { '.sh': '#!/usr/bin/env bash\nset -euo pipefail\n\necho "hello from ${SS_RUN_NAME}"\n', '.py': '#!/usr/bin/env python3\nimport os\n\nprint("hello from", os.environ["SS_RUN_NAME"])\n', '.js': '#!/usr/bin/env node\nconsole.log("hello from", process.env.SS_RUN_NAME);\n' }[ext];
+      const tmp = path.join(os.tmpdir(), `ss-new-${process.pid}-${Date.now()}${ext}`);
+      fs.writeFileSync(tmp, body);
+      try { RUN.add({ name, description: '' }, tmp, {}); } finally { fs.rmSync(tmp, { force: true }); }
+      const m = RUN.get(name);
+      return send(res, 200, { name, script: m.scriptPath, manifest: path.join(RUN.DIR, name + '.json') });
+    }
+    case 'POST /api/run/install': // Claude 연동: skill + SessionStart hook + 실행 권한 (~/.claude)
+      return send(res, 200, RUN.install());
+    case 'DELETE /api/run/script': {
+      RUN.remove(url.searchParams.get('name') || '');
+      return send(res, 200, { ok: true });
+    }
+    case 'GET /api/db/connections':
+      return send(res, 200, { connections: DB.listConnections(), kinds: Object.fromEntries(Object.entries(DB.KINDS).map(([k, v]) => [k, { label: v.label, port: v.port || null, file: !!v.file }])) });
+    case 'PUT /api/db/connection': {
+      const { conn, password } = JSON.parse(await readBody(req));
+      return send(res, 200, DB.saveConnection(conn || {}, password));
+    }
+    case 'DELETE /api/db/connection':
+      DB.deleteConnection(url.searchParams.get('id') || '');
+      return send(res, 200, { ok: true });
+    case 'POST /api/db/test': {
+      const { conn, password } = JSON.parse(await readBody(req));
+      return send(res, 200, await DB.test(conn || {}, password));
+    }
+    case 'POST /api/db/driver': // 드라이버 설치 (npm → ~/.shooting-star/drivers)
+      return send(res, 200, await DB.installDriver(JSON.parse(await readBody(req)).kind));
+    case 'GET /api/db/children':
+      return send(res, 200, { items: await DB.children(url.searchParams.get('id') || '', { schema: url.searchParams.get('schema') || undefined, table: url.searchParams.get('table') || undefined }) });
+    case 'GET /api/db/selectsql':
+      return send(res, 200, { sql: DB.selectAll(url.searchParams.get('id') || '', url.searchParams.get('schema') || '', url.searchParams.get('table') || '') });
+    case 'POST /api/db/query': {
+      const { id, sql, limit, offset } = JSON.parse(await readBody(req));
+      return send(res, 200, await DB.query(id, sql, { limit, offset }));
+    }
+    case 'POST /api/db/count': {
+      const { id, sql } = JSON.parse(await readBody(req));
+      return send(res, 200, await DB.count(id, sql));
+    }
+    case 'GET /api/db/history':
+      return send(res, 200, { items: DB.history({ id: url.searchParams.get('id') || undefined, q: url.searchParams.get('q') || undefined, limit: url.searchParams.get('limit') || 100 }) });
+    case 'POST /api/db/cancel':
+      return send(res, 200, await DB.cancel(JSON.parse(await readBody(req)).id));
+    case 'GET /api/db/names':
+      return send(res, 200, { items: await DB.names(url.searchParams.get('id') || '') });
+    case 'GET /api/db/keys':
+      return send(res, 200, { pk: await DB.keys(url.searchParams.get('id') || '', url.searchParams.get('schema') || '', url.searchParams.get('table') || '') });
+    case 'POST /api/db/update': {
+      const { id, schema, table, changes } = JSON.parse(await readBody(req));
+      return send(res, 200, await DB.updateRows(id, schema, table, changes));
     }
     case 'GET /api/events': { // Server-Sent Events: 파일이 바뀌면 화면이 트리/열린 탭을 갱신한다
       getIndex(root);   // 파일 감시 시작
@@ -862,7 +947,7 @@ const server = http.createServer(async (req, res) => {
     await serveStatic(res, decodeURIComponent(url.pathname));
   } catch (e) {
     const status = e.status || (e.code === 'ENOENT' ? 404 : 500);
-    send(res, status, { error: e.message });
+    send(res, status, { error: e.message, ...(typeof e.code === 'string' && /^(NO_DRIVER|READ_ONLY)$/.test(e.code) ? { code: e.code } : {}) });
   }
 });
 

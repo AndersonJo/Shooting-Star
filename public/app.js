@@ -165,7 +165,7 @@ $('#filter-info').onclick = () => openSettings();
 const wsKey = (k) => `ws:${state.root}:${k}`; // 폴더(워크스페이스)별 탭/펼침 상태
 const persistTabs = () => {
   if (!state.root) return;
-  store.set(wsKey('tabs'), state.tabs.filter((t) => t.kind !== 'diff').map((t) => ({ path: t.path, mode: t.mode })));
+  store.set(wsKey('tabs'), state.tabs.filter((t) => t.kind !== 'diff' && t.kind !== 'run' && t.kind !== 'sql').map((t) => ({ path: t.path, mode: t.mode })));
   store.set(wsKey('active'), state.active);
   store.set(wsKey('expanded'), [...state.expanded]);
 };
@@ -458,7 +458,7 @@ async function reload(t = cur()) {
 //  · 트리: 바뀐 폴더만 다시 읽기   · 열린 탭: 저장 안 한 변경이 없으면 자동 반영, 있으면 ⚠ 충돌 표시(저장 시 덮어쓰기 확인)
 let pendingPvScroll = null;
 async function syncTab(t) {
-  if (!t || t.kind === 'image' || t.kind === 'diff' || (isMemo(t.path) || isExt(t.path)) && t.path !== state.active) return;
+  if (!t || t.kind === 'image' || t.kind === 'diff' || t.kind === 'run' || t.kind === 'sql' || (isMemo(t.path) || isExt(t.path)) && t.path !== state.active) return;
   if (Date.now() - (t._savedAt || 0) < 1500) return;   // 방금 우리가 저장한 파일의 변경 이벤트는 무시
   try {
     const f = await api('GET', 'file', { path: t.path });
@@ -494,6 +494,7 @@ function onFsEvent(d) { // d: { paths, all }
     renderTree();
     const set = d.all ? null : new Set(d.paths);
     for (const t of state.tabs) {
+      if (t.kind === 'run' || t.kind === 'sql') continue;
       if (t.kind === 'diff') { t.stale = true; if (t.path === state.active) renderContent(); continue; }   // 열려 있는 diff 는 다시 계산
       if (t.kind === 'image') { if (!set || set.has(t.path)) { imgv.ver.set(t.path, Date.now()); if (t.path === state.active) renderContent(); } continue; }   // 이미지가 바뀌면 다시 불러온다
       if (!isMemo(t.path) && !isExt(t.path) && (!set || set.has(t.path))) syncTab(t);
@@ -528,8 +529,8 @@ function renderTabs() {
   box.replaceChildren(...state.tabs.map((t) => {
     const x = el('span', { className: 'x', title: '닫기 (⌘W)' });
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.path); };
-    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : ''), title: (t.kind === 'diff' ? `${t.repoName}: ${t.file} — 변경 내용` : t.path) + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
-      el('span', { textContent: isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.kind === 'diff' ? t.file.split('/').pop() + ' (diff)' : t.path.split('/').pop() }), x);
+    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : ''), title: (t.kind === 'diff' ? `${t.repoName}: ${t.file} — 변경 내용` : t.kind === 'run' ? `Run: ${t.name}` : t.kind === 'sql' ? `SQL: ${t.connName}` : t.path) + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
+      el('span', { textContent: isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.kind === 'diff' ? t.file.split('/').pop() + ' (diff)' : t.kind === 'run' ? '▶ ' + t.name : t.kind === 'sql' ? '🗄 ' + t.connName + (t.n > 1 ? ' #' + t.n : '') : t.path.split('/').pop() }), x);
     tab.onclick = () => { flushAll(); state.active = t.path; state.selected = t.path; persistTabs(); renderAll(); };
     tab.onauxclick = (e) => e.button === 1 && closeTab(t.path);
     tab.oncontextmenu = (e) => { // 탭 우클릭: 닫기 / 다른 탭 모두 닫기 / 오른쪽 탭 모두 닫기 / 모두 닫기
@@ -559,6 +560,7 @@ function renderToolbar() {
   const bar = $('#toolbar'); const t = cur();
   drawPath(t);   // 전체 경로는 하단 상태바에 표시
   if (!t) { bar.replaceChildren(); return; }
+  if (t.kind === 'run' || t.kind === 'sql') { bar.replaceChildren(el('span', { className: 'path' })); return; }
   if (t.kind === 'diff') {
     const seg = el('span', { className: 'seg' }, ...MODES.diff.map(([m, label]) => btn(label, '', () => { t.mode = m; store.set('diffMode', m); renderToolbar(); renderContent(); }, t.mode === m ? 'on' : '')));
     bar.replaceChildren(el('span', { className: 'path' }), seg, el('span', { className: 'sep' }),
@@ -623,6 +625,7 @@ function minify() {
 
 function validate() {
   const t = cur(); const pos = $('#st-pos'); pos.textContent = '';
+  if (t && (t.kind === 'run' || t.kind === 'sql')) return setStatus('');
   if (t && t.kind === 'diff') return setStatus(t.stat || '');
   if (!t || t.kind === 'image') return setStatus('');
   let msg = '', cls = 'ok';
@@ -644,6 +647,8 @@ function renderContent() {
   const box = $('#content'); const t = cur();
   if (!t) { box.replaceChildren(EMPTY); return; }
   if (t.kind === 'image') { box.replaceChildren(imageViewer(t)); validate(); return; }
+  if (t.kind === 'run') { box.replaceChildren(runView(t)); validate(); return; }
+  if (t.kind === 'sql') { box.replaceChildren(sqlView(t)); validate(); return; }
   if (t.kind === 'diff') { box.replaceChildren(diffView(t)); validate(); return; }
   const panes = [];
   const editor = () => {
@@ -899,7 +904,7 @@ $('#tree').addEventListener('contextmenu', (ev) => {
   const items = [
     ['새 파일…', () => createEntry(baseDir, false)],
     ['새 폴더…', () => createEntry(baseDir, true)],
-    ...(row && isDir ? [[favs.includes(state.root + '/' + p) ? '즐겨찾기에서 제거' : '★ 즐겨찾기에 추가', () => toggleFavDir(state.root + '/' + p)]] : []),
+    ...(row ? [[favs.includes(favKey(p, isDir)) ? '즐겨찾기에서 제거' : '★ 즐겨찾기에 추가', () => toggleFavDir(favKey(p, isDir))]] : []),
     [isDir ? `${FM}에서 열기` : `${FM}에서 보기`, () => revealPath(p, 'reveal')],
   ];
   if (!isDir) items.push(['기본 앱으로 열기', () => revealPath(p, 'open')]);
@@ -1667,16 +1672,483 @@ function diffView(t) {
 }
 $('#btn-git-refresh').onclick = loadGit;
 
+
+// ───────── Run: ~/.shooting-star/run 에 등록된 스크립트 (CLI `ss run`, Claude 와 공유) ─────────
+const runUi = { scripts: [], history: [], dir: '', running: new Set() };
+const ANSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07/g;
+async function loadRun() {
+  const box = $('#run-list');
+  try { const r = await api('GET', 'run/list'); runUi.scripts = r.scripts; runUi.history = r.history; runUi.dir = r.dir; runUi.running = new Set(r.running.map((j) => j.name)); }
+  catch (e) { box.replaceChildren(el('div', { className: 'git-empty', textContent: 'Run 목록을 읽지 못했습니다: ' + e.message })); return; }
+  drawRun();
+}
+function drawRun() {
+  const box = $('#run-list'), kids = [];
+  if (!runUi.scripts.length) kids.push(el('div', { className: 'git-empty', textContent: '등록된 스크립트가 없습니다. ＋ 로 만들거나, Claude 에게 “이 스크립트를 ss run 으로 등록해줘” 라고 하세요. 터미널: ss run add <파일>' }));
+  for (const m of runUi.scripts) {
+    const row = el('div', { className: 'rn' + (m.broken || m.missing ? ' bad' : '') + (state.active === '@run/' + m.name ? ' sel' : ''), title: m.broken || (m.missing ? '스크립트 파일 없음' : m.scriptPath) },
+      el('div', { className: 'rt', textContent: m.name }), el('div', { className: 'rd', textContent: m.broken || m.description || (m.params.length ? m.params.map((p) => p.name).join(', ') : '파라미터 없음') }));
+    if (runUi.running.has(m.name)) row.append(el('span', { className: 'rp', textContent: '● 실행 중' }));
+    row.onclick = () => { if (!m.broken) openRunTab(m); };
+    row.oncontextmenu = (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, [
+        ...(m.broken ? [] : [['실행 화면 열기', () => openRunTab(m)], ['스크립트 편집', () => openExternal(m.scriptPath)]]),
+        ['매니페스트(.json) 편집', () => openExternal(runUi.dir + '/' + m.name + '.json')],
+        ['`ss run ' + m.name + '` 복사', () => copy('ss run ' + m.name, '명령 복사됨')],
+        ['등록 해제…', async () => { if (!confirm(`'${m.name}' 등록을 해제할까요? (실행 기록은 유지)`)) return; try { await api('DELETE', 'run/script', { name: m.name }); closeTab('@run/' + m.name).catch?.(() => {}); } catch (er) { toast(er.message); } loadRun(); }],
+      ]);
+    };
+    kids.push(row);
+  }
+  if (runUi.history.length) {
+    kids.push(el('div', { className: 'rn-sec', textContent: '최근 실행' }));
+    for (const h of runUi.history.slice(0, 15)) {
+      const ok = h.code === 0, m = runUi.scripts.find((x) => x.name === h.name);
+      const r = el('div', { className: 'rh', title: `${new Date(h.startedAt).toLocaleString()} · ${h.source}\n${JSON.stringify(h.params)}\n클릭: 이 실행의 출력 보기` },
+        el('span', { className: 'rc ' + (ok ? 'ok' : 'fail'), textContent: ok ? '✓' : '✗' + (h.code ?? '') }), el('span', { className: 'rn2', textContent: h.name }),
+        el('span', { className: 'rw', textContent: h.source === 'cli' ? 'CLI' : new Date(h.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }));
+      r.onclick = async () => { if (!m) return toast('등록 해제된 스크립트입니다'); const t = openRunTab(m); try { t.out = (await api('GET', 'run/log', { id: h.id })).log; t.status = { cls: ok ? 'ok' : 'fail', text: `이전 실행 · exit ${h.code ?? h.signal}` }; } catch {} t.dom = null; renderContent(); };
+      kids.push(r);
+    }
+  }
+  box.replaceChildren(...kids);
+  $('#run-foot').replaceChildren(el('span', { textContent: runUi.dir.replace(state.home || '\u0000', '~') }), ' · ', Object.assign(el('a', { textContent: 'Claude 연동 설치', href: '#', title: '~/.claude 에 ss-run skill + SessionStart hook + `ss run` 실행 권한 추가' }), { onclick: async (e) => { e.preventDefault(); try { const r = await api('POST', 'run/install'); toast(r.hookAdded || r.rulesAdded.length ? 'Claude 연동 설치됨 (새 세션부터)' : '이미 설치되어 있습니다'); } catch (er) { toast(er.message); } } }));
+}
+function openRunTab(m) {
+  const p = '@run/' + m.name; let t = tabOf(p);
+  if (!t) { t = { path: p, kind: 'run', name: m.name, content: '', orig: '', mtime: 0, mode: 'view', vals: {}, out: '', status: null, job: null }; state.tabs.push(t); }
+  t.m = m; t.scriptPath = m.scriptPath;
+  state.active = p; state.selected = p; renderAll(); drawRun(); return t;
+}
+const runCmdline = (t) => {
+  const parts = ['ss run', t.name];
+  for (const p of t.m.params) { const v = t.vals[p.name]; if (v === undefined || v === '' || v === false || (p.type !== 'bool' && p.default !== undefined && String(v) === String(p.default))) continue; parts.push(p.type === 'bool' ? '--' + p.name : `--${p.name} ${/[\s"'$]/.test(String(v)) ? JSON.stringify(String(v)) : v}`); }
+  return parts.join(' ');
+};
+function runView(t) {
+  if (t.dom) return t.dom;   // 실행 중에도 입력/출력 상태가 유지되도록 한 번 만든 DOM 을 재사용
+  const m = t.m, form = el('div', { className: 'rv-form' });
+  for (const p of m.params) if (t.vals[p.name] === undefined) t.vals[p.name] = p.default !== undefined ? p.default : p.type === 'bool' ? false : '';
+  const cmd = el('div', { className: 'rv-cmd' }), upd = () => { cmd.textContent = runCmdline(t); };
+  for (const p of m.params) {
+    let inp;
+    if (p.type === 'bool') inp = el('input', { type: 'checkbox', checked: !!t.vals[p.name], onchange() { t.vals[p.name] = this.checked; upd(); } });
+    else if (p.type === 'choice') { inp = el('select', { onchange() { t.vals[p.name] = this.value; upd(); } }, ...p.choices.map((c) => el('option', { value: c, textContent: c }))); inp.value = String(t.vals[p.name]); }
+    else inp = el('input', { type: p.type === 'number' ? 'number' : 'text', value: t.vals[p.name], placeholder: p.type === 'file' ? '/경로/파일' : '', oninput() { t.vals[p.name] = this.value; upd(); } });
+    inp.id = `rp-${p.name}`;
+    form.append(el('label', { htmlFor: inp.id, title: p.as === 'flag' ? (p.flag || '--' + p.name) : p.as }, p.name, p.required ? el('i', { textContent: ' *' }) : ''), inp);
+    if (p.description) form.append(el('div', { className: 'pd', textContent: p.description }));
+  }
+  if (!m.params.length) form.append(el('div', { className: 'pd', style: 'grid-column:1/-1', textContent: '파라미터가 없습니다.' }));
+  upd();
+  const out = el('pre', { className: 'rv-out', textContent: t.out }), st = el('span', { className: 'rv-st' });
+  const go = el('button', { className: 'go', textContent: '▶ 실행', title: '실행 (⌘/Ctrl+Enter)' }), stop = el('button', { textContent: '■ 중지', hidden: true });
+  const paint = () => { const s = t.status; st.className = 'rv-st ' + (s?.cls || ''); st.textContent = s?.text || ''; go.disabled = !!t.job; stop.hidden = !t.job; };
+  const append = (s) => { const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40; t.out = (t.out + s.replace(ANSI, '')).slice(-200000); out.textContent = t.out; if (stick) out.scrollTop = out.scrollHeight; };
+  const run = async () => {
+    if (t.job) return;
+    const missing = m.params.find((p) => p.required && (t.vals[p.name] === '' || t.vals[p.name] === undefined));
+    if (missing) { toast(`필수: ${missing.name}`); document.getElementById(`rp-${missing.name}`)?.focus(); return; }
+    if (m.danger && !confirm(`'${m.name}' 은(는) danger 스크립트입니다. 실행할까요?\n\n${runCmdline(t)}`)) return;
+    t.out = ''; out.textContent = ''; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; paint();
+    const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }
+    let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
+    t.job = { id: r.id }; t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
+    append(`$ ${r.cmdline}\n`);
+    const es = new EventSource(`/api/run/stream?id=${r.id}&root=${encodeURIComponent(state.root)}`); t.es = es;
+    es.addEventListener('data', (e) => append(JSON.parse(e.data)));
+    es.addEventListener('end', (e) => {
+      es.close(); const d = JSON.parse(e.data); t.job = null; t.es = null;
+      t.status = d.code === 0 ? { cls: 'ok', text: `✓ 완료 · ${(d.ms / 1000).toFixed(1)}s` } : { cls: 'fail', text: `✗ ${d.signal ? '중단됨 (' + d.signal + ')' : 'exit ' + d.code} · ${(d.ms / 1000).toFixed(1)}s` };
+      paint(); runUi.running.delete(m.name); loadRun();
+    });
+    es.onerror = () => { if (t.job && es.readyState === 2) { t.job = null; t.status = { cls: 'fail', text: '연결이 끊겼습니다' }; paint(); } };
+  };
+  go.onclick = run;
+  stop.onclick = async () => { if (t.job?.id) { try { await api('POST', 'run/kill', {}, { id: t.job.id }); } catch {} } };
+  const clear = el('button', { textContent: '지우기', onclick: () => { t.out = ''; out.textContent = ''; } });
+  const cp = el('button', { textContent: '출력 복사', onclick: () => copy(t.out, '출력 복사됨') });
+  const top = el('div', { className: 'rv-top' },
+    el('div', { className: 'rv-title' }, m.name, m.danger ? el('span', { className: 'danger', textContent: 'danger' }) : ''),
+    el('div', { className: 'rv-desc', textContent: m.description || '(설명 없음)' }), form, cmd,
+    el('div', { className: 'rv-act' }, go, stop, clear, cp, st));
+  const box = el('div', { className: 'rv' }, top, out);
+  box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); run(); } });
+  paint(); t.dom = box; return box;
+}
+$('#btn-run-refresh').onclick = loadRun;
+$('#btn-run-new').onclick = async () => {
+  const name = (prompt('새 스크립트 이름 (영문/숫자/._-)') || '').trim(); if (!name) return;
+  const lang = (prompt('언어: bash / python / node', 'bash') || 'bash').trim();
+  try { const r = await api('POST', 'run/new', {}, { name, lang }); await loadRun(); openExternal(r.script); toast('스크립트를 만들었습니다 — 설명/파라미터는 ' + name + '.json 에서 편집'); }
+  catch (e) { toast(e.message); }
+};
+
+
+// ───────── DB: 연결 / 스키마 트리 / SQL 콘솔 ─────────
+const dbUi = { conns: [], kinds: {}, open: new Set(), kids: new Map(), sel: '', n: 0 };
+const KIND_ICON = { postgres: '🐘', mysql: '🐬', mariadb: '🦭', sqlite: '🪶', duckdb: '🦆', trino: '🔺' };
+async function loadDb() {
+  try { const r = await api('GET', 'db/connections'); dbUi.conns = r.connections; dbUi.kinds = r.kinds; }
+  catch (e) { $('#db-list').replaceChildren(el('div', { className: 'dbr msg err', textContent: 'DB 목록을 읽지 못했습니다: ' + e.message })); return; }
+  drawDb();
+}
+async function dbLoadKids(key, id, schema, table) {
+  dbUi.kids.set(key, 'loading'); drawDb();
+  try { dbUi.kids.set(key, (await api('GET', 'db/children', { id, ...(schema ? { schema } : {}), ...(table ? { table } : {}) })).items); }
+  catch (e) { dbUi.kids.set(key, { error: e.message, code: e.code }); }
+  drawDb();
+}
+function dbToggle(key, load) {
+  if (dbUi.open.has(key)) dbUi.open.delete(key); else { dbUi.open.add(key); if (!dbUi.kids.has(key) || dbUi.kids.get(key)?.error) load(); }
+  drawDb();
+}
+function dbRow(depth, cls, arrow, icon, label, extra) {
+  const r = el('div', { className: 'dbr ' + cls, style: `padding-left:${10 + depth * 14}px` }, el('span', { className: 'ar', textContent: arrow }), icon ? el('span', { textContent: icon }) : '', el('span', { className: 'nm', textContent: label, title: label }));
+  if (extra) r.append(extra); return r;
+}
+function dbKidRows(key, depth, render) {
+  const k = dbUi.kids.get(key); if (!dbUi.open.has(key)) return [];
+  if (k === 'loading' || !k) return [dbRow(depth, 'msg', '', '', '불러오는 중…')];
+  if (k.error) {
+    const rows = [dbRow(depth, 'msg err', '', '', k.error)];
+    if (k.code === 'NO_DRIVER') { const c = dbUi.conns.find((x) => key.split(':')[1] === x.id); if (c) rows.push(driverBtnRow(depth, c, () => dbLoadKids(key, ...key.split(':').slice(1).map((x, i) => (i === 0 ? c.id : x))))); }
+    return rows;
+  }
+  if (!k.length) return [dbRow(depth, 'msg', '', '', '(비어 있음)')];
+  return k.flatMap((i) => render(i));
+}
+function driverBtnRow(depth, c, after) {
+  const b = el('button', { className: 'ib', textContent: '드라이버 설치' });
+  b.onclick = async (e) => { e.stopPropagation(); b.disabled = true; b.textContent = '설치 중… (최대 1~2분)'; try { await api('POST', 'db/driver', {}, { kind: c.kind }); toast(`${dbUi.kinds[c.kind]?.label} 드라이버 설치됨`); await loadDb(); after && after(); } catch (er) { b.disabled = false; b.textContent = '드라이버 설치'; toast(er.message); } };
+  return el('div', { className: 'dbr msg', style: `padding-left:${10 + depth * 14}px` }, b);
+}
+function drawDb() {
+  const box = $('#db-list'), rows = [];
+  if (!dbUi.conns.length) rows.push(el('div', { className: 'git-empty', textContent: '연결이 없습니다. ＋ 로 PostgreSQL / MySQL / MariaDB / SQLite / DuckDB / Trino 연결을 추가하세요. 터미널: ss db add …' }));
+  for (const c of dbUi.conns) {
+    const ck = 'c:' + c.id, open = dbUi.open.has(ck);
+    const row = dbRow(0, 'conn' + (dbUi.sel === ck ? ' sel' : ''), open ? '▼' : '▶', KIND_ICON[c.kind], c.name, el('span', { className: 'tg', textContent: (c.readOnly ? '🔒 ' : '') + (dbUi.kinds[c.kind]?.label || c.kind) }));
+    row.title = c.file || `${c.host}:${c.port}/${c.database || ''}`;
+    row.onclick = () => { dbUi.sel = ck; dbToggle(ck, () => dbLoadKids(ck, c.id)); };
+    row.ondblclick = () => openSql(c);
+    row.oncontextmenu = (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, [
+        ['새 SQL 콘솔', () => openSql(c)], ['연결 편집…', () => dbDialog(c)],
+        ['새로고침', () => { for (const k of [...dbUi.kids.keys()]) if (k.split(':')[1] === c.id) dbUi.kids.delete(k); if (dbUi.open.has(ck)) dbLoadKids(ck, c.id); }],
+        ...(c.driver === 'missing' ? [['드라이버 설치', async () => { try { toast('설치 중…'); await api('POST', 'db/driver', {}, { kind: c.kind }); toast('설치됨'); loadDb(); } catch (er) { toast(er.message); } }]] : []),
+        ['삭제…', async () => { if (!confirm(`연결 '${c.name}' 을(를) 삭제할까요? (저장된 비밀번호도 삭제)`)) return; try { await api('DELETE', 'db/connection', { id: c.id }); } catch (er) { toast(er.message); } loadDb(); }],
+      ]);
+    };
+    rows.push(row);
+    rows.push(...dbKidRows(ck, 1, (sc) => {
+      const sk = `s:${c.id}:${sc.name}`;
+      const sr = dbRow(1, '', dbUi.open.has(sk) ? '▼' : '▶', '📂', sc.name); sr.onclick = () => dbToggle(sk, () => dbLoadKids(sk, c.id, sc.name));
+      return [sr, ...dbKidRows(sk, 2, (t) => {
+        const tk = `t:${c.id}:${sc.name}:${t.name}`;
+        const tr = dbRow(2, '', dbUi.open.has(tk) ? '▼' : '▶', t.type === 'view' ? '👁' : '▦', t.name);
+        tr.onclick = () => dbToggle(tk, () => dbLoadKids(tk, c.id, sc.name, t.name));
+        tr.ondblclick = async (e) => { e.preventDefault(); try { const q = (await api('GET', 'db/selectsql', { id: c.id, schema: sc.name, table: t.name })).sql; openSql(c, q, true, { schema: sc.name, table: t.name, sql: q }); } catch (er) { toast(er.message); } };
+        tr.oncontextmenu = (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['데이터 보기 (SELECT *)', () => tr.ondblclick(e)], ['이름 복사', () => copy(t.name, '복사됨')]]); };
+        return [tr, ...dbKidRows(tk, 3, (col) => {
+          const cr = dbRow(3, 'col', '', col.pk ? '🔑' : '·', col.name, el('span', { className: 'tp', textContent: ' ' + (col.dataType || '') + (col.nullable === false ? ' •' : '') }));
+          cr.title = `${col.name}: ${col.dataType}${col.nullable === false ? ' NOT NULL' : ''}${col.pk ? ' (PK)' : ''}`; cr.ondblclick = () => copy(col.name, '컬럼 이름 복사됨'); return [cr];
+        })];
+      })];
+    }));
+  }
+  box.replaceChildren(...rows);
+}
+$('#btn-db-refresh').onclick = () => { dbUi.kids.clear(); loadDb(); for (const k of [...dbUi.open]) if (k.startsWith('c:')) { const id = k.slice(2); dbLoadKids(k, id); } };
+$('#btn-db-new').onclick = () => dbDialog(null);
+
+// 연결 추가/편집 대화상자
+function dbDialog(c) {
+  const edit = !!c, v = { kind: 'postgres', readOnly: true, https: false, ssl: false, ...(c || {}) };
+  const f = {};   // 입력 요소
+  const mk = (name, label, input, hint) => { f[name] = input; const lab = el('label', { textContent: label }); const rows = [lab, input]; if (hint) rows.push(el('div', { className: 'hint', textContent: hint })); f[name + '_rows'] = rows; return rows; };
+  const kind = el('select', {}, ...Object.entries(dbUi.kinds).map(([k, d]) => el('option', { value: k, textContent: d.label })));
+  kind.value = v.kind; if (edit) kind.disabled = true;
+  const txt = (val, ph, type = 'text') => el('input', { type, value: val ?? '', placeholder: ph || '' });
+  const fr = el('div', { className: 'fr' });
+  const add = (...a) => fr.append(...mk(...a));
+  add('kind', '종류', kind);
+  add('name', '이름', txt(v.name, '예: 운영 DB (읽기)'));
+  add('host', 'Host', txt(v.host, 'localhost'));
+  add('port', 'Port', txt(v.port, ''));
+  add('user', '사용자', txt(v.user));
+  add('password', '비밀번호', txt('', edit && c.hasPassword ? '(변경하지 않으려면 비워 두세요)' : '', 'password'), '~/.shooting-star/db/secrets.json (권한 0600)에 저장됩니다');
+  add('database', 'Database', txt(v.database, 'Trino 는 schema (선택)'));
+  add('catalog', 'Catalog', txt(v.catalog, 'Trino catalog'));
+  add('file', '파일', txt(v.file, '/경로/파일.db  (DuckDB 는 비우면 메모리)'));
+  const chk = (val) => el('input', { type: 'checkbox', checked: !!val });
+  add('ssl', 'SSL', chk(v.ssl)); add('https', 'HTTPS', chk(v.https));
+  add('readOnly', '읽기 전용', chk(v.readOnly), '켜 두면 SELECT 류만 실행됩니다 (DB 엔진 수준에서도 차단). Claude/ss db 도 동일하게 적용');
+  const res = el('div', { className: 'res' }), bg = el('div', { className: 'dlg-bg' });
+  const sync = () => {
+    const k = dbUi.kinds[kind.value] || {}, file = !!k.file, trino = kind.value === 'trino';
+    const show = { host: !file, port: !file, user: !file, password: !file, database: !file, catalog: trino, file, ssl: !file && !trino, https: trino };
+    for (const n of Object.keys(show)) for (const e of f[n + '_rows']) e.hidden = !show[n];
+    if (!file && !f.port.value) f.port.placeholder = k.port || '';
+  };
+  kind.onchange = sync; sync();
+  const read = () => ({ id: c?.id, kind: kind.value, name: f.name.value.trim(), host: f.host.value.trim(), port: f.port.value.trim(), user: f.user.value, database: f.database.value.trim(), catalog: f.catalog.value.trim(), file: f.file.value.trim(), ssl: f.ssl.checked, https: f.https.checked, readOnly: f.readOnly.checked });
+  const say = (cls, t) => { res.className = 'res ' + cls; res.textContent = t; };
+  const test = el('button', { textContent: '연결 테스트' }), save = el('button', { className: 'go', textContent: '저장', style: 'background:var(--accent);color:var(--bg);border-color:var(--accent)' }), cancel = el('button', { textContent: '취소' });
+  const withDriver = async (fn) => {
+    try { return await fn(); }
+    catch (e) {
+      if (e.code !== 'NO_DRIVER') throw e;
+      say('', `${dbUi.kinds[kind.value].label} 드라이버를 설치하는 중… (처음 한 번, 최대 1~2분)`);
+      await api('POST', 'db/driver', {}, { kind: kind.value }); return await fn();
+    }
+  };
+  test.onclick = async () => { test.disabled = true; say('', '연결 중…'); try { const r = await withDriver(() => api('POST', 'db/test', {}, { conn: read(), password: f.password.value })); say('ok', `✓ 연결 성공 (${r.ms}ms)`); } catch (e) { say('err', e.message); } test.disabled = false; };
+  save.onclick = async () => { try { await api('PUT', 'db/connection', {}, { conn: read(), password: f.password.value }); bg.remove(); await loadDb(); } catch (e) { say('err', e.message); } };
+  cancel.onclick = () => bg.remove();
+  bg.onmousedown = (e) => { if (e.target === bg) bg.remove(); };
+  bg.onkeydown = (e) => { if (e.key === 'Escape') bg.remove(); else if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') save.onclick(); };
+  bg.append(el('div', { className: 'dlg' }, el('h3', { textContent: edit ? '연결 편집' : '새 DB 연결' }), fr, res, el('div', { className: 'btns' }, test, el('span', { className: 'sp' }), cancel, save)));
+  document.body.append(bg); (f.name.value ? f.host : f.name).focus();
+}
+
+// SQL 콘솔 탭
+const READ_SQL = /^\s*(?:\/\*[\s\S]*?\*\/\s*|--[^\n]*\n\s*)*(select|with|show|describe|desc|explain|pragma|values|table|from)\b/i;
+const SQL_KW = ('SELECT FROM WHERE GROUP BY ORDER HAVING LIMIT OFFSET JOIN LEFT RIGHT INNER OUTER FULL CROSS ON AS AND OR NOT IN IS NULL LIKE ILIKE BETWEEN EXISTS CASE WHEN THEN ELSE END DISTINCT UNION ALL INSERT INTO VALUES UPDATE SET DELETE CREATE TABLE VIEW INDEX DROP ALTER ADD COLUMN PRIMARY KEY FOREIGN REFERENCES DEFAULT WITH EXPLAIN DESCRIBE SHOW COUNT SUM AVG MIN MAX COALESCE CAST ASC DESC TRUE FALSE USING OVER PARTITION').split(' ');
+const dbMeta = { names: new Map(), cols: new Map() };   // 자동완성 캐시: 연결 → 테이블 이름들 / '연결:스키마.테이블' → 컬럼들
+function dbNamesOf(id, again) {
+  if (!dbMeta.names.has(id)) { dbMeta.names.set(id, []); api('GET', 'db/names', { id }).then((r) => { dbMeta.names.set(id, r.items); again && again(); }).catch(() => {}); }
+  return dbMeta.names.get(id);
+}
+function dbColsOf(id, schema, table, again) {
+  const k = `${id}:${schema}.${table}`;
+  if (!dbMeta.cols.has(k)) { dbMeta.cols.set(k, []); api('GET', 'db/children', { id, schema, table }).then((r) => { dbMeta.cols.set(k, r.items); again && again(); }).catch(() => {}); }
+  return dbMeta.cols.get(k);
+}
+function sqlRefs(text, names) {   // FROM / JOIN / UPDATE / INTO 뒤의 테이블 (별칭 포함)
+  const refs = [], re = /\b(?:from|join|update|into)\s+([\w."`]+)(?:\s+(?:as\s+)?([A-Za-z_]\w*))?/gi; let m;
+  while ((m = re.exec(text))) {
+    const parts = m[1].replace(/["`]/g, '').split('.'), table = parts.pop(), schema = parts.pop();
+    const hit = names.find((n) => n.name.toLowerCase() === table.toLowerCase() && (!schema || n.schema.toLowerCase() === schema.toLowerCase()));
+    if (hit) refs.push({ schema: hit.schema, table: hit.name, alias: m[2] && !SQL_KW.includes(m[2].toUpperCase()) ? m[2] : null });
+  }
+  return refs;
+}
+function sqlCandidates(t, text, caret, manual, again) {
+  const m = /(?:([\w$"`]+)\.)?([\w$]*)$/.exec(text.slice(0, caret)), qual = m[1]?.replace(/["`]/g, ''), frag = m[2] || '';
+  if (!manual && !qual && !frag) return { items: [], frag };
+  const names = dbNamesOf(t.connId, again), refs = sqlRefs(text, names), f = frag.toLowerCase(), out = [];
+  const ok = (s) => !f || s.toLowerCase().startsWith(f);
+  const colsOf = (r) => dbColsOf(t.connId, r.schema, r.table, again).map((c) => ({ label: c.name, insert: c.name, kind: 'col', detail: `${r.alias || r.table} · ${c.dataType || ''}` }));
+  if (qual) {
+    const ql = qual.toLowerCase(), hit = refs.filter((r) => (r.alias || '').toLowerCase() === ql || r.table.toLowerCase() === ql);
+    if (hit.length) out.push(...hit.flatMap(colsOf));
+    else { const tabs = names.filter((n) => n.schema.toLowerCase() === ql); out.push(...tabs.map((n) => ({ label: n.name, insert: n.name, kind: n.type === 'view' ? 'view' : 'tbl', detail: n.schema }))); const tn = names.find((n) => n.name.toLowerCase() === ql); if (tn) out.push(...colsOf({ schema: tn.schema, table: tn.name })); }
+  } else {
+    out.push(...refs.flatMap(colsOf));
+    out.push(...names.map((n) => ({ label: n.name, insert: n.name, kind: n.type === 'view' ? 'view' : 'tbl', detail: n.schema })));
+    out.push(...SQL_KW.map((k) => ({ label: k, insert: /[a-z]/.test(frag) && frag === frag.toLowerCase() ? k.toLowerCase() : k, kind: 'kw', detail: '' })));
+  }
+  const seen = new Set(), items = [];
+  for (const c of out) { const key = c.kind + c.label; if (seen.has(key) || !ok(c.label) || (c.label.toLowerCase() === f && c.kind !== 'col')) continue; seen.add(key); items.push(c); if (items.length >= 14) break; }
+  return { items, frag };
+}
+function caretXY(ta, pos) {   // textarea 안의 커서 위치(픽셀)를 거울 요소로 계산
+  const d = document.createElement('div'), cs = getComputedStyle(ta);
+  for (const p of ['fontFamily', 'fontSize', 'lineHeight', 'letterSpacing', 'tabSize', 'paddingTop', 'paddingLeft', 'paddingRight', 'paddingBottom', 'whiteSpace', 'boxSizing']) d.style[p] = cs[p];
+  Object.assign(d.style, { position: 'absolute', visibility: 'hidden', top: '0', left: '-9999px', width: ta.clientWidth + 'px' });
+  d.textContent = ta.value.slice(0, pos); const sp = document.createElement('span'); sp.textContent = '​'; d.append(sp); document.body.append(d);
+  const r = { x: sp.offsetLeft - ta.scrollLeft, y: sp.offsetTop - ta.scrollTop, h: parseFloat(cs.lineHeight) || 18 }; d.remove(); return r;
+}
+function openSql(c, sql, run, meta) {
+  let n = 1; while (tabOf(`@sql/${c.id}/${n}`) && !(sql === undefined && n === 1)) n++;   // 같은 연결의 콘솔은 하나를 재사용하고, 쿼리를 들고 열면 새 콘솔
+  if (sql === undefined) n = 1;
+  const p = `@sql/${c.id}/${n}`; let t = tabOf(p);
+  if (!t) { t = { path: p, kind: 'sql', connId: c.id, connName: c.name, readOnly: c.readOnly, n, content: '', orig: '', mtime: 0, mode: 'view', sql: sql ?? store.get('sql:' + c.id, ''), res: null, limit: store.get('sqlLimit', 1000), running: false, meta: meta || null, pend: new Map() }; state.tabs.push(t); }
+  else if (sql !== undefined) { t.sql = sql; if (meta) t.meta = meta; }
+  state.active = p; state.selected = p; renderAll();
+  if (t.dom) { const ta = t.dom.querySelector('textarea'); ta.value = t.sql; ta.dispatchEvent(new Event('input')); }
+  if (run && t.run) t.run();
+}
+function sqlView(t) {
+  if (t.dom) return t.dom;
+  const ta = el('textarea', { className: 'editor hlon', value: t.sql, spellcheck: false, placeholder: 'SELECT …   (⌘/Ctrl+Enter: 실행 · 선택한 부분만 실행 · Ctrl+Space: 자동완성)' });
+  const pre = el('pre', { className: 'hl', ariaHidden: 'true' });
+  const paint = () => { pre.innerHTML = highlight('sql', ta.value) + '\n'; pre.scrollTop = ta.scrollTop; pre.scrollLeft = ta.scrollLeft; };
+  ta.onscroll = () => { pre.scrollTop = ta.scrollTop; pre.scrollLeft = ta.scrollLeft; closeAc(); };
+  const edwrap = el('div', { className: 'sq-edwrap' }, el('div', { className: 'ed' }, pre, ta));
+  const out = el('div', { className: 'sq-res' }), st = el('span', { className: 'st' });
+  const go = el('button', { className: 'go', textContent: '▶ 실행', title: '실행 (⌘/Ctrl+Enter)' }), stop = el('button', { textContent: '■ 취소', hidden: true });
+  const lim = el('select', { title: '한 쪽에 가져올 행 수 (SELECT 에 자동으로 LIMIT/OFFSET 적용)' }, ...[50, 100, 500, 1000, 5000, 20000].map((n) => el('option', { value: n, textContent: n.toLocaleString() + '행/쪽' }))); lim.value = String(t.limit); lim.onchange = () => { t.limit = Number(lim.value); store.set('sqlLimit', t.limit); };
+
+  // ── 자동완성
+  let ac = null;   // { box, items, sel, frag }
+  const closeAc = () => { if (ac) { ac.box.remove(); ac = null; } };
+  const acApply = (c) => {
+    const frag = ac.frag; closeAc(); ta.focus();
+    ta.setSelectionRange(ta.selectionStart - frag.length, ta.selectionStart); document.execCommand('insertText', false, c.insert);
+  };
+  const acShow = (manual) => {
+    if (ta.selectionStart !== ta.selectionEnd) return closeAc();
+    const again = () => { if (document.activeElement === ta) acShow(manual); };
+    const { items, frag } = sqlCandidates(t, ta.value, ta.selectionStart, manual, again);
+    if (!items.length) return closeAc();
+    const prevSel = ac && ac.items.length === items.length ? ac.sel : 0; closeAc();
+    const box = el('div', { className: 'ac' }); ac = { box, items, sel: prevSel, frag };
+    items.forEach((c, i) => { const r = el('div', { className: 'it' + (i === ac.sel ? ' sel' : '') }, el('span', { className: 'k k-' + c.kind, textContent: { col: '▪', tbl: '▦', view: '👁', kw: 'k' }[c.kind] }), el('span', { className: 'l', textContent: c.label }), el('span', { className: 'd', textContent: c.detail })); r.onmousedown = (e) => { e.preventDefault(); acApply(c); }; box.append(r); });
+    document.body.append(box);
+    const r = ta.getBoundingClientRect(), p = caretXY(ta, ta.selectionStart - frag.length);
+    box.style.left = Math.max(4, Math.min(window.innerWidth - box.offsetWidth - 8, r.left + p.x)) + 'px';
+    const below = r.top + p.y + p.h + 2; box.style.top = (below + box.offsetHeight > window.innerHeight - 8 ? Math.max(4, r.top + p.y - box.offsetHeight - 2) : below) + 'px';
+  };
+  const acMove = (d) => { ac.sel = (ac.sel + d + ac.items.length) % ac.items.length; [...ac.box.children].forEach((e, i) => e.classList.toggle('sel', i === ac.sel)); ac.box.children[ac.sel].scrollIntoView({ block: 'nearest' }); };
+
+  // ── 결과 그리드 (+ 셀 편집)
+  const editable = () => !!t.meta && !t.readOnly && t.lastSql === t.meta.sql && t.pk && t.pk.length && t.res && t.pk.every((k) => t.res.columns.includes(k));
+  const pend = () => t.pend;
+  const apply = el('button', { textContent: '변경 적용', hidden: true }), revert = el('button', { textContent: '되돌리기', hidden: true }), hint = el('span', { className: 'st', hidden: true });
+  const prev = el('button', { textContent: '◀', title: '이전 쪽' }), next = el('button', { textContent: '▶', title: '다음 쪽' }), total = el('button', { textContent: '총 행 수', title: '전체 행 수 세기 (count(*))' }), pager = el('span', { className: 'pg', hidden: true }, prev, next, total);
+  const paintPager = () => {
+    const r = t.res, on = !!r && r.columns.length && (r.paged || r.offset > 0); pager.hidden = !on; if (!on) return;
+    prev.disabled = t.running || !r.offset; next.disabled = t.running || !r.hasMore;
+    total.textContent = t.total != null ? `총 ${t.total.toLocaleString()}행 · ${Math.max(1, Math.ceil(t.total / t.limit)).toLocaleString()}쪽` : '총 행 수'; total.disabled = t.total != null;
+  };
+  prev.onclick = () => t.run((t.page || 0) - 1); next.onclick = () => t.run((t.page || 0) + 1);
+  total.onclick = async () => { total.disabled = true; total.textContent = '세는 중…'; try { t.total = (await api('POST', 'db/count', {}, { id: t.connId, sql: t.lastSql })).count; } catch (e) { toast(e.message); } paintPager(); };
+  const paintEdits = () => { paintPager(); const n = pend().size; apply.hidden = revert.hidden = !n; apply.textContent = `변경 ${n}건 적용`; hint.hidden = !editable() || !!n; hint.textContent = '✎ 셀을 더블클릭해 수정'; };
+  const cell = (v, ri, ci) => {
+    const key = ri + ':' + ci, ch = pend().get(key), val = ch ? ch.value : v, td = el('td');
+    if (val === null) { td.className = 'nl'; td.textContent = 'NULL'; } else { const x = String(val); td.textContent = x.length > 300 ? x.slice(0, 300) + '…' : x; if (x.length > 60) td.title = x.slice(0, 2000); if (typeof val === 'number') td.className = 'nu'; }
+    if (ch) td.classList.add('dirty');
+    td.dataset.r = ri; td.dataset.c = ci; return td;
+  };
+  const setCell = (ri, ci, value) => {
+    const orig = t.res.rows[ri][ci], key = ri + ':' + ci;
+    if (value === (orig === null ? null : orig) || (value !== null && orig !== null && String(orig) === value) || (orig === null && value === '')) pend().delete(key); else pend().set(key, { row: ri, col: ci, value });
+    drawGrid();
+  };
+  const editCell = (td) => {
+    if (!editable()) return; const ri = +td.dataset.r, ci = +td.dataset.c, ch = pend().get(ri + ':' + ci), cur = ch ? ch.value : t.res.rows[ri][ci];
+    const inp = el('input', { type: 'text', value: cur === null ? '' : String(cur), placeholder: 'NULL' }); td.className = 'ed'; td.replaceChildren(inp); inp.focus(); inp.select();
+    let done = false; const fin = (ok) => { if (done) return; done = true; if (ok) setCell(ri, ci, inp.value); else drawGrid(); };
+    inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); fin(true); } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); fin(false); } e.stopPropagation(); };
+    inp.onblur = () => fin(true);
+  };
+  const drawGrid = () => {
+    const r = t.res; paintEdits(); if (!r) return;
+    if (!r.columns.length) { out.replaceChildren(el('div', { className: 'msg', textContent: `✓ 실행 완료${r.affected != null ? ` — ${r.affected}행 영향` : ''}` })); return; }
+    const tbl = el('table', { className: 'grid' + (editable() ? ' editable' : '') }, el('thead', {}, el('tr', {}, el('th', { textContent: '#' }), ...r.columns.map((c) => el('th', { textContent: c, title: t.pk?.includes(c) ? 'PK' : '' })))));
+    const body = el('tbody'); r.rows.forEach((row, ri) => body.append(el('tr', {}, el('td', { className: 'rn', textContent: (r.offset || 0) + ri + 1 }), ...row.map((v, ci) => cell(v, ri, ci))))); tbl.append(body);
+    tbl.ondblclick = (e) => { const td = e.target.closest('td[data-c]'); if (td) editCell(td); };
+    tbl.oncontextmenu = (e) => {
+      const td = e.target.closest('td[data-c]'); if (!td) return; e.preventDefault();
+      const ri = +td.dataset.r, ci = +td.dataset.c, v = pend().get(ri + ':' + ci)?.value ?? r.rows[ri][ci];
+      showMenu(e.clientX, e.clientY, [['값 복사', () => copy(v === null ? '' : String(v), '값 복사됨')], ['행을 JSON 으로 복사', () => copy(JSON.stringify(Object.fromEntries(r.columns.map((c, i) => [c, r.rows[ri][i]])), null, 2), 'JSON 복사됨')],
+        ...(editable() ? [['셀 편집', () => editCell(td)], ['NULL 로 설정', () => setCell(ri, ci, null)]] : [])]);
+    };
+    out.replaceChildren(r.rows.length ? tbl : el('div', { className: 'msg', textContent: `결과 없음 (${r.columns.join(', ')})` }));
+  };
+  const show = (r) => { t.res = r; t.pend = new Map(); drawGrid(); };
+  const paintBtns = () => { go.disabled = t.running; stop.hidden = !t.running; paintPager(); };
+  t.run = async (page) => {   // page 가 없으면 새 실행(편집기의 SQL, 1쪽), 있으면 같은 SQL 의 그 쪽
+    if (t.running) return; closeAc();
+    if (pend().size && !confirm('적용하지 않은 셀 변경이 있습니다. 버리고 계속할까요?')) return;
+    let sql;
+    if (page === undefined) {
+      const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd); sql = (sel.trim() ? sel : ta.value).trim(); page = 0;
+      t.sql = ta.value; if (t.n === 1) store.set('sql:' + t.connId, t.sql);
+      if (!sql) return;
+      if (!t.readOnly && !READ_SQL.test(sql) && !confirm('데이터를 변경할 수 있는 쿼리입니다. 실행할까요?\n\n' + sql.slice(0, 300))) return;
+      t.total = null;
+    } else sql = t.lastSql;
+    t.running = true; t.lastSql = sql; paintBtns(); st.className = 'st'; st.textContent = '실행 중…';
+    try {
+      if (t.meta && !t.pk && !t.readOnly) { try { t.pk = (await api('GET', 'db/keys', { id: t.connId, schema: t.meta.schema, table: t.meta.table })).pk; } catch { t.pk = []; } }
+      const r = await api('POST', 'db/query', {}, { id: t.connId, sql, limit: t.limit, offset: page * t.limit }); t.page = page; show(r);
+      st.className = 'st ok'; st.textContent = r.columns.length ? `${r.rows.length ? `${(r.offset + 1).toLocaleString()}–${(r.offset + r.rows.length).toLocaleString()}행` : '0행'}${r.hasMore && !r.paged ? ' (잘림 · 페이징 불가)' : ''} · ${r.ms}ms` : `완료 · ${r.ms}ms`;
+      if (t.meta && !t.readOnly && t.pk && !t.pk.length) { hint.hidden = false; hint.textContent = 'PK 가 없어 편집할 수 없습니다'; }
+    } catch (e) {
+      st.className = 'st err'; st.textContent = '오류'; out.replaceChildren(el('div', { className: 'msg err', textContent: e.message })); t.res = null; paintEdits();
+      if (e.code === 'NO_DRIVER') { const c = dbUi.conns.find((x) => x.id === t.connId); if (c) { const b = el('button', { textContent: '드라이버 설치 후 다시 실행' }); b.onclick = async () => { b.disabled = true; b.textContent = '설치 중…'; try { await api('POST', 'db/driver', {}, { kind: c.kind }); loadDb(); t.running = false; t.run(); } catch (er) { toast(er.message); b.disabled = false; } }; out.append(b); } }
+    }
+    t.running = false; paintBtns();
+  };
+  go.onclick = () => t.run();
+  stop.onclick = async () => { try { const r = await api('POST', 'db/cancel', {}, { id: t.connId }); if (!r.ok) toast(r.note || '취소할 쿼리가 없습니다'); } catch (e) { toast(e.message); } };
+  revert.onclick = () => { t.pend = new Map(); drawGrid(); };
+  apply.onclick = async () => {
+    if (!editable() || !pend().size) return;
+    const rows = new Map(); for (const ch of pend().values()) { if (!rows.has(ch.row)) rows.set(ch.row, { pk: Object.fromEntries(t.pk.map((k) => [k, t.res.rows[ch.row][t.res.columns.indexOf(k)]])), set: {} }); rows.get(ch.row).set[t.res.columns[ch.col]] = ch.value; }
+    if (!confirm(`${t.connName}.${t.meta.table}: ${pend().size}개 셀(${rows.size}행)을 UPDATE 합니다. 한 트랜잭션으로 적용되고, 한 행이라도 1행이 아니면 전부 취소됩니다.`)) return;
+    apply.disabled = true;
+    try { const r = await api('POST', 'db/update', {}, { id: t.connId, schema: t.meta.schema, table: t.meta.table, changes: [...rows.values()] }); toast(`${r.applied}행 수정됨`); t.pend = new Map(); await t.run(t.page || 0); }
+    catch (e) { st.className = 'st err'; st.textContent = e.message.slice(0, 120); toast(e.message); }
+    apply.disabled = false;
+  };
+
+  // ── 기록
+  const histBtn = el('button', { textContent: '기록', title: '이 연결에서 실행한 쿼리 (최근 순)' });
+  let hist = null;
+  const closeHist = () => { if (hist) { hist.remove(); hist = null; } };
+  const loadHist = async (q) => {
+    let items = []; try { items = (await api('GET', 'db/history', { id: t.connId, limit: 100, ...(q ? { q } : {}) })).items; } catch (e) { toast(e.message); }
+    const list = hist.querySelector('.hl-list'); if (!list) return;
+    list.replaceChildren(...(items.length ? items.map((h) => {
+      const row = el('div', { className: 'hi' + (h.ok ? '' : ' bad'), title: h.sql.slice(0, 1500) + (h.err ? '\n\n⚠ ' + h.err : '') }, el('div', { className: 'hs', textContent: h.sql.replace(/\s+/g, ' ').trim().slice(0, 200) }), el('div', { className: 'hm', textContent: `${h.ok ? '✓' : '✗'} ${new Date(h.t).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${h.ms}ms${h.rows != null ? ' · ' + h.rows + '행' : ''}${h.src && h.src !== 'ui' ? ' · ' + h.src : ''}` }));
+      row.onclick = () => { ta.value = h.sql; ta.dispatchEvent(new Event('input')); closeHist(); ta.focus(); };
+      row.ondblclick = () => { closeHist(); t.run(); };
+      return row;
+    }) : [el('div', { className: 'hi', textContent: '기록이 없습니다' })]));
+  };
+  histBtn.onclick = (e) => {
+    e.stopPropagation(); if (hist) return closeHist();
+    const q = el('input', { type: 'text', placeholder: '검색…' }); q.oninput = () => loadHist(q.value.trim());
+    hist = el('div', { className: 'sq-hist' }, q, el('div', { className: 'hl-list' }), el('div', { className: 'hn', textContent: '클릭: 편집기에 넣기 · 더블클릭: 바로 실행 · 읽기 전용 연결에서 쓰기 쿼리는 실행되지 않습니다' }));
+    hist.onclick = (ev) => ev.stopPropagation(); box.append(hist); q.focus(); loadHist('');
+  };
+
+  ta.addEventListener('input', () => { t.sql = ta.value; if (t.n === 1) store.set('sql:' + t.connId, t.sql); paint(); if (document.activeElement === ta) acShow(false); });
+  ta.addEventListener('blur', () => setTimeout(closeAc, 120));
+  ta.addEventListener('click', closeAc);
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); t.run(); return; }
+    if (e.ctrlKey && e.code === 'Space') { e.preventDefault(); acShow(true); return; }
+    if (ac) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); return acMove(1); }
+      if (e.key === 'ArrowUp') { e.preventDefault(); return acMove(-1); }
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); return acApply(ac.items[ac.sel]); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); return closeAc(); }
+    }
+    if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); document.execCommand('insertText', false, '  '); }
+  });
+  const csvBtn = el('button', { textContent: 'CSV 복사', onclick: () => { if (!t.res?.columns.length) return; const q = (v) => (v === null ? '' : /[",\n\t]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v)); copy([t.res.columns, ...t.res.rows].map((r) => r.map(q).join(',')).join('\n'), 'CSV 복사됨'); } });
+  const bar = el('div', { className: 'sq-bar' }, go, stop, lim, pager, csvBtn, histBtn, st, hint, apply, revert, el('span', { className: 'sp' }), el('span', { className: 'st', textContent: (t.readOnly ? '🔒 읽기 전용 · ' : '') + t.connName }));
+  const box = el('div', { className: 'sq' }, edwrap, bar, out);
+  box.addEventListener('click', closeHist);
+  if (t.res) show(t.res); else paintEdits();
+  t.dom = box; paintBtns(); paint();
+  setTimeout(() => ta.focus(), 0);
+  return box;
+}
+
 // ───────── 아이콘 바: 파일 / 메모 ─────────
 function setView(v, forceShow) {
   state.view = v; store.set('view', v);
   $('#sidebar').classList.toggle('memo', v === 'memo');
   $('#sidebar').classList.toggle('git', v === 'git');
+  $('#sidebar').classList.toggle('run', v === 'run');
+  $('#sidebar').classList.toggle('db', v === 'db');
+  $('#db-view').hidden = v !== 'db';
+  $('#run-view').hidden = v !== 'run';
   $('#memo-view').hidden = v !== 'memo';
   $('#git-view').hidden = v !== 'git';
   document.querySelectorAll('#activity .act').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
   if (forceShow) document.body.classList.remove('no-side');
   if (v === 'git') loadGit();
+  if (v === 'run') loadRun();
+  if (v === 'db') loadDb();
   if (v === 'memo') { $('#memo-path').textContent = (state.memoDir || '').replace(state.home || '\u0000', '~'); loadMemos(); }
 }
 document.querySelectorAll('#activity .act').forEach((b) => {
@@ -2207,7 +2679,7 @@ function smartEditor(t) {
 
 // ───────── 하단 상태바의 전체 경로 (조각을 클릭하면 왼쪽 트리에서 그 위치로 이동) ─────────
 async function revealInTree(rel, isDir) { // 해당 항목까지 폴더를 펼치고 선택한 뒤 화면 가운데로 스크롤
-  if (document.body.classList.contains('no-side') || state.view === 'memo' || state.view === 'git') setView('files', true);
+  if (document.body.classList.contains('no-side') || ['memo', 'git', 'run', 'db'].includes(state.view)) setView('files', true);
   const parts = rel ? rel.split('/') : []; let acc = '';
   for (let i = 0; i < parts.length - (isDir ? 0 : 1); i++) { acc = acc ? acc + '/' + parts[i] : parts[i]; state.expanded.add(acc); }
   state.selected = rel; persistTabs(); await renderTree();
@@ -2217,6 +2689,8 @@ async function revealInTree(rel, isDir) { // 해당 항목까지 폴더를 펼�
 function drawPath(t) {
   const box = $('#st-path'); box.replaceChildren(); if (!t) return;
   const inner = el('span', { className: 'pth' }); box.append(inner);
+  if (t.kind === 'sql') { inner.textContent = t.connName; inner.title = 'SQL 콘솔'; return; }
+  if (t.kind === 'run') { inner.textContent = (t.scriptPath || t.name).replace(state.home || '\u0000', '~'); inner.title = '등록된 스크립트'; return; }
   if (t.kind === 'diff') { inner.textContent = (t.repo + '/' + t.file).replace(state.home || '\u0000', '~'); inner.title = '변경 내용 (diff)'; return; }
   if (isMemo(t.path)) { inner.textContent = ((state.memoDir || '') + '/' + t.path.slice(6)).replace(state.home || '\u0000', '~'); inner.title = '메모 파일 위치'; return; }
   if (isExt(t.path)) { inner.textContent = absOf(t.path).replace(state.home || '\u0000', '~'); inner.title = '워크스페이스 밖의 파일'; return; }
@@ -2230,7 +2704,7 @@ function drawPath(t) {
     const seg = el('span', { className: 'seg', textContent: s.label, title: inside ? (last ? '트리에서 파일 위치 보기' : '트리에서 이 폴더 보기') : isRoot ? '프로젝트 루트 (트리 맨 위로)' : '이 폴더를 워크스페이스로 열기' });
     seg.onclick = () => {
       if (inside) revealInTree(s.abs.slice(state.root.length + 1), !last);   // 프로젝트 안: 트리에서 펼치고 선택
-      else if (isRoot) { if (document.body.classList.contains('no-side') || state.view === 'memo' || state.view === 'git') setView('files', true); state.selected = ''; renderTree().then(() => { $('#tree').scrollTop = 0; }); }
+      else if (isRoot) { if (document.body.classList.contains('no-side') || ['memo', 'git', 'run', 'db'].includes(state.view)) setView('files', true); state.selected = ''; renderTree().then(() => { $('#tree').scrollTop = 0; }); }
       else go(s.abs);   // 프로젝트 루트보다 위: 그 폴더를 워크스페이스로 연다
     };
     inner.append(seg); if (i < view.length - 1) inner.append(el('span', { className: 'sep', textContent: '/' }));
@@ -2242,7 +2716,9 @@ const recents = () => store.get('recent', []);
 function addRecent(p) { store.set('recent', [p, ...recents().filter((x) => x !== p)].slice(0, 12)); }
 const pk = { items: [], sel: 0, dir: '', mode: 'dir' };
 // 즐겨찾기 폴더 (서버의 ~/.config/shooting-star/favorites.json 에 저장)
+// 파일은 'f:' + 절대경로, 폴더는 절대경로 그대로 저장한다
 let favs = [];
+const favKey = (rel, isDir) => (isDir ? '' : 'f:') + state.root + '/' + rel;
 const loadFavs = async () => { try { favs = await api('GET', 'favorites'); } catch { favs = []; } drawFavBtn(); };
 const saveFavs = async () => { await api('PUT', 'favorites', {}, { list: favs }); drawFavBtn(); };
 function drawFavBtn() {
@@ -2256,17 +2732,19 @@ function drawFavList() {
   const box = $('#favs');
   const head = el('div', { className: 'fav-head', textContent: '★ 즐겨찾기' });
   if (!favs.length) {
-    box.replaceChildren(head, el('div', { className: 'fav-empty', textContent: '위의 ☆ 로 현재 폴더 추가' }));
+    box.replaceChildren(head, el('div', { className: 'fav-empty', textContent: '위의 ☆ 로 현재 폴더 추가 · 파일/폴더 우클릭으로도 추가' }));
     return;
   }
-  const rows = favs.map((f) => {
+  const rows = favs.map((key) => {
+    const isFile = key.startsWith('f:'), f = isFile ? key.slice(2) : key;
     const x = el('span', { className: 'fx', textContent: '✕', title: '즐겨찾기에서 제거' });
-    x.onclick = async (e) => { e.stopPropagation(); favs = favs.filter((y) => y !== f); await saveFavs(); };
+    x.onclick = async (e) => { e.stopPropagation(); favs = favs.filter((y) => y !== key); await saveFavs(); };
     const segs = f.split('/').filter(Boolean), inside = f.startsWith(state.root + '/');
-    const row = el('div', { className: 'fav' + (f === state.root ? ' cur' : ''), title: f + (f === state.root ? '' : inside ? '\n클릭: 트리에서 이 폴더로 이동' : '\n클릭: 이 폴더를 워크스페이스로 열기') },
-      el('span', { className: 'fn', textContent: segs.at(-1) || '/' }), segs.length > 1 ? el('span', { className: 'fp', textContent: segs.at(-2) }) : '', x);   // 같은 이름이 여러 개여도 구분되도록 상위 폴더 이름을 흐리게 덧붙인다
+    const row = el('div', { className: 'fav' + (f === state.root && !isFile ? ' cur' : ''), title: f + (isFile ? '\n클릭: 파일 열기' : f === state.root ? '' : inside ? '\n클릭: 트리에서 이 폴더로 이동' : '\n클릭: 이 폴더를 워크스페이스로 열기') },
+      el('span', { className: 'fn', textContent: (isFile ? '📄 ' : '') + (segs.at(-1) || '/') }), segs.length > 1 ? el('span', { className: 'fp', textContent: segs.at(-2) }) : '', x);   // 같은 이름이 여러 개여도 구분되도록 상위 폴더 이름을 흐리게 덧붙인다
     row.onclick = () => {
-      if (f === state.root) revealInTree('', true);   // 현재 폴더면 트리 맨 위로
+      if (isFile) openExternal(f);   // 파일: 바로 열기 (워크스페이스 안이면 일반 탭)
+      else if (f === state.root) revealInTree('', true);   // 현재 폴더면 트리 맨 위로
       else if (f.startsWith(state.root + '/')) revealInTree(f.slice(state.root.length + 1), true);   // 현재 폴더 안이면 트리에서 바로 그 폴더로 이동 (펼치고 선택)
       else go(f);   // 밖이면 그 폴더를 워크스페이스로 연다
     };
@@ -2315,7 +2793,7 @@ async function pkLoad() {
       items.push({ label: '📁 ' + d, act: () => { $('#pk-input').value = base + '/' + d + '/'; pkLoad(); } });
   } catch { items.push({ label: '(존재하지 않는 경로)', act: () => {} }); }
   if (!part && pk.mode === 'dir') {
-    const favItems = favs.map((f) => ({ label: '★ ' + f, act: () => go(f), remove: f }));
+    const favItems = favs.filter((f) => !f.startsWith('f:')).map((f) => ({ label: '★ ' + f, act: () => go(f), remove: f }));
     items = [items[0], ...favItems, ...items.slice(1)];
     for (const r of recents()) if (r !== state.root && !favs.includes(r)) items.push({ label: '🕘 ' + r, act: () => go(r) });
   }

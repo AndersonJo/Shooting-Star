@@ -32,7 +32,7 @@ fi
 
 if [ "$MODE" = bundle ]; then
   mkdir -p "$APP/Contents/Resources/app"
-  cp -R "$DIR/server.js" "$DIR/package.json" "$DIR/public" "$APP/Contents/Resources/app/"
+  cp -R "$DIR"/*.js "$DIR/package.json" "$DIR/public" "$APP/Contents/Resources/app/"
   printf '{"port":%s}\n' "$PORT" > "$APP/Contents/Resources/config.json"
   # 터미널용 CLI (brew cask 의 binary 가 이 파일을 `ss` 로 연결한다)
   cat > "$APP/Contents/Resources/ss" <<'SH'

@@ -13,6 +13,8 @@
   <button class="act on" data-view="files" title="파일"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
   <button class="act" data-view="memo" title="메모 (⌘/Ctrl+Alt+N: 새 메모)"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h11l3 3v13H5z"/><path d="M8.5 10h7M8.5 14h7M8.5 17.5h4"/></svg></button>
   <button class="act" data-view="git" title="Git — 변경된 파일 커밋/푸시"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 8.2v7.6M18 11.2c0 4-6 3-11 5.6"/></svg></button>
+  <button class="act" data-view="run" title="Run — 등록된 스크립트 실행 (Claude 와 공유)"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M10 8.5l5 3.5-5 3.5z"/></svg></button>
+  <button class="act" data-view="db" title="DB — 연결 / 스키마 / SQL"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="3"/><path d="M4.5 6v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"/><path d="M4.5 12v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"/></svg></button>
 </nav>
 <aside id="sidebar">
   <header>
@@ -35,6 +37,15 @@
     <input id="memo-q" placeholder="메모 검색…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     <div id="memo-list"></div>
     <div class="mv-foot" id="memo-path"></div>
+  </div>
+  <div id="db-view" hidden>
+    <div class="mv-head"><span>DB</span><button id="btn-db-new" title="새 연결">＋</button><button id="btn-db-refresh" title="새로고침">⟳</button></div>
+    <div id="db-list"></div>
+  </div>
+  <div id="run-view" hidden>
+    <div class="mv-head"><span>Run</span><button id="btn-run-new" title="새 스크립트">＋</button><button id="btn-run-refresh" title="새로고침">⟳</button></div>
+    <div id="run-list"></div>
+    <div class="mv-foot" id="run-foot"></div>
   </div>
   <div id="git-view" hidden>
     <div class="mv-head"><span>Git</span><button id="btn-git-refresh" title="새로고침">⟳</button></div>
