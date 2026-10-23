@@ -19,11 +19,23 @@ exec "$NODE" "$DIR/server.js" "\$@"
 EOF
 chmod +x "$BIN/ss"
 echo "✓ 명령: $BIN/ss"
+# PATH: 로그인 셸 기준으로 rc 파일에 등록 (이미 있으면 건너뜀). 셸은 $SHELL 로 판단 (이 스크립트는 bash 로 돌기 때문)
+LINE="export PATH=\"$BIN:\$PATH\"  # shooting-star"
+case "$(basename "${SHELL:-}")" in
+  zsh)  RCS="$HOME/.zshrc" ;;
+  bash) RCS="$HOME/.bashrc"; [ "$(uname)" = Darwin ] && RCS="$RCS $HOME/.bash_profile" ;;
+  *)    RCS="$HOME/.profile" ;;
+esac
+ADDED=""
+for RC in $RCS; do
+  grep -qsF "# shooting-star" "$RC" && continue
+  printf '\n%s\n' "$LINE" >> "$RC"; ADDED="$ADDED $RC"
+done
+[ -n "$ADDED" ] && echo "✓ PATH 등록:$ADDED"
 case ":$PATH:" in
   *":$BIN:"*) ;;
-  *) RC="$HOME/.bashrc"; { [ -n "$ZSH_VERSION" ] || [ "$(basename "$SHELL")" = zsh ]; } && RC="$HOME/.zshrc"
-     echo "export PATH=\"$BIN:\$PATH\"" >> "$RC"
-     echo "✓ PATH 추가: $RC  (새 터미널을 열거나: source $RC)" ;;
+  *) echo "! 지금 열려 있는 터미널에는 아직 적용되지 않았습니다. 새 터미널을 열거나 아래를 실행하세요:"
+     echo "    export PATH=\"$BIN:\$PATH\"" ;;
 esac
 
 # 2) 앱
@@ -79,5 +91,9 @@ Categories=Development;Utility;
 EOF
   command -v update-desktop-database >/dev/null && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
   echo "✓ 앱: 앱 메뉴에서 'shooting-star' 검색"
+fi
+# 3) Claude 연동 (스킬 + SessionStart hook + 권한). 건너뛰려면: SS_NO_AGENT=1 ./install.sh
+if [ -z "$SS_NO_AGENT" ]; then
+  "$BIN/ss" run install || echo "! Claude 연동 실패 — 나중에 'ss run install' 로 다시 시도하세요"
 fi
 echo "사용법: ss .  (현재 폴더 열기) · ss --stop (서버 종료)"
