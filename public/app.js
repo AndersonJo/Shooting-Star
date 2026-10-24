@@ -2776,12 +2776,14 @@ function openExternal(abs) {
   openFile(inside ? abs.slice(state.root.length + 1) : '@ext' + abs);
 }
 async function pkLoad() {
-  const v = $('#pk-input').value;
+  let v = $('#pk-input').value;
+  if (v && !/^[/~]/.test(v)) v = state.root + '/' + v;   // 상대 경로 (.claude/skills/x/SKILL.md) 는 워크스페이스 기준
   const slash = v.lastIndexOf('/'); const dir = v.slice(0, slash + 1) || '/'; const part = v.slice(slash + 1).toLowerCase();
   let items = [];
   try {
     const file = pk.mode === 'file';
-    const r = await api('GET', 'browse', file ? { path: dir, files: '1' } : { path: dir });
+    const dot = part.startsWith('.') ? { dot: '1' } : {};   // '.claude' 같은 숨김 폴더/파일은 점으로 시작해 칠 때 보인다
+    const r = await api('GET', 'browse', file ? { path: dir, files: '1', ...dot } : { path: dir, ...dot });
     pk.dir = r.path;
     const base = r.path.replace(/\/$/, '');
     if (file) {

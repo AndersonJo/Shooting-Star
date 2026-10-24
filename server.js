@@ -784,7 +784,7 @@ async function api(req, res, url, root) {
       return send(res, 200, { app: 'shooting-star', root, name: path.basename(root) || root, home: HOME, last: readLast() || defaultWorkspace(), memoDir: ensureMemoDir(), version: VERSION, build: BUILD, dir: __dirname, pid: process.pid, platform: process.platform });
     case 'GET /api/browse': { // 폴더 선택기: 절대경로의 하위 폴더 목록
       const dir = fs.realpathSync(path.resolve((p || defaultWorkspace()).replace(/^~(?=$|\/)/, HOME)));
-      const ents = (await fsp.readdir(dir, { withFileTypes: true })).filter((e) => !e.name.startsWith('.'));
+      const ents = (await fsp.readdir(dir, { withFileTypes: true })).filter((e) => url.searchParams.get('dot') === '1' || !e.name.startsWith('.'));   // 숨김 항목은 '.' 로 시작하는 이름을 치고 있을 때만
       const isD = (e) => e.isDirectory() || (e.isSymbolicLink() && isDirSafe(path.join(dir, e.name)));
       const byName = (a, b) => a.localeCompare(b);
       const list = ents.filter(isD).map((e) => e.name).sort(byName);
