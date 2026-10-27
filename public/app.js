@@ -649,7 +649,7 @@ function renderContent() {
   if (t.kind === 'image') { box.replaceChildren(imageViewer(t)); validate(); return; }
   if (t.kind === 'run') { box.replaceChildren(runView(t)); validate(); return; }
   if (t.kind === 'sql') { box.replaceChildren(sqlView(t)); validate(); return; }
-  if (t.kind === 'diff') { box.replaceChildren(diffView(t)); validate(); return; }
+  if (t.kind === 'diff') { box.replaceChildren(diffView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   const panes = [];
   const editor = () => {
     const lang = langOf(t.path);
@@ -1838,7 +1838,7 @@ function drawDb() {
       showMenu(e.clientX, e.clientY, [
         ['새 SQL 콘솔', () => openSql(c)], ['연결 편집…', () => dbDialog(c)],
         ['새로고침', () => { for (const k of [...dbUi.kids.keys()]) if (k.split(':')[1] === c.id) dbUi.kids.delete(k); if (dbUi.open.has(ck)) dbLoadKids(ck, c.id); }],
-        ...(c.driver === 'missing' ? [['드라이버 설치', async () => { try { toast('설치 중…'); await api('POST', 'db/driver', {}, { kind: c.kind }); toast('설치됨'); loadDb(); } catch (er) { toast(er.message); } }]] : []),
+        ...(dbUi.kinds[c.kind]?.pkg ? [[c.driver === 'missing' ? '드라이버 설치' : `드라이버 업데이트${c.driverVersion ? ` (현재 ${c.driverVersion})` : ''}`, async () => { try { toast('설치 중…'); const r = await api('POST', 'db/driver', {}, { kind: c.kind }); toast(`${dbUi.kinds[c.kind].pkg}${r.version ? '@' + r.version : ''} 설치됨${c.driver === 'missing' ? '' : ' · 앱을 다시 시작하면 적용'}`); loadDb(); } catch (er) { toast(er.message); } }]] : []),
         ['삭제…', async () => { if (!confirm(`연결 '${c.name}' 을(를) 삭제할까요? (저장된 비밀번호도 삭제)`)) return; try { await api('DELETE', 'db/connection', { id: c.id }); } catch (er) { toast(er.message); } loadDb(); }],
       ]);
     };
@@ -1881,7 +1881,7 @@ function dbDialog(c) {
   add('user', '사용자', txt(v.user));
   add('password', '비밀번호', txt('', edit && c.hasPassword ? '(변경하지 않으려면 비워 두세요)' : '', 'password'), '~/.shooting-star/db/secrets.json (권한 0600)에 저장됩니다');
   add('database', 'Database', txt(v.database, 'Trino 는 schema (선택)'));
-  add('catalog', 'Catalog', txt(v.catalog, 'Trino catalog'));
+  add('catalog', 'Catalog', txt(v.catalog, '선택 — 비우면 모든 catalog'));
   add('file', '파일', txt(v.file, '/경로/파일.db  (DuckDB 는 비우면 메모리)'));
   const chk = (val) => el('input', { type: 'checkbox', checked: !!val });
   add('ssl', 'SSL', chk(v.ssl)); add('https', 'HTTPS', chk(v.https));
@@ -1905,7 +1905,7 @@ function dbDialog(c) {
       await api('POST', 'db/driver', {}, { kind: kind.value }); return await fn();
     }
   };
-  test.onclick = async () => { test.disabled = true; say('', '연결 중…'); try { const r = await withDriver(() => api('POST', 'db/test', {}, { conn: read(), password: f.password.value })); say('ok', `✓ 연결 성공 (${r.ms}ms)`); } catch (e) { say('err', e.message); } test.disabled = false; };
+  test.onclick = async () => { test.disabled = true; say('', dbUi.kinds[kind.value]?.driver === 'missing' ? `${dbUi.kinds[kind.value].label} 드라이버를 자동 설치한 뒤 연결합니다… (처음 한 번, 최대 1~2분)` : '연결 중…'); try { const r = await withDriver(() => api('POST', 'db/test', {}, { conn: read(), password: f.password.value })); say('ok', `✓ 연결 성공 (${r.ms}ms)`); } catch (e) { say('err', e.message); } test.disabled = false; };
   save.onclick = async () => { try { await api('PUT', 'db/connection', {}, { conn: read(), password: f.password.value }); bg.remove(); await loadDb(); } catch (e) { say('err', e.message); } };
   cancel.onclick = () => bg.remove();
   bg.onmousedown = (e) => { if (e.target === bg) bg.remove(); };
@@ -1931,7 +1931,7 @@ function sqlRefs(text, names) {   // FROM / JOIN / UPDATE / INTO 뒤의 테이�
   const refs = [], re = /\b(?:from|join|update|into)\s+([\w."`]+)(?:\s+(?:as\s+)?([A-Za-z_]\w*))?/gi; let m;
   while ((m = re.exec(text))) {
     const parts = m[1].replace(/["`]/g, '').split('.'), table = parts.pop(), schema = parts.pop();
-    const hit = names.find((n) => n.name.toLowerCase() === table.toLowerCase() && (!schema || n.schema.toLowerCase() === schema.toLowerCase()));
+    const hit = names.find((n) => n.name.toLowerCase() === table.toLowerCase() && (!schema || n.schema.toLowerCase() === schema.toLowerCase() || n.schema.toLowerCase().endsWith('.' + schema.toLowerCase())));
     if (hit) refs.push({ schema: hit.schema, table: hit.name, alias: m[2] && !SQL_KW.includes(m[2].toUpperCase()) ? m[2] : null });
   }
   return refs;
@@ -2161,6 +2161,7 @@ document.querySelectorAll('#activity .act').forEach((b) => {
 // ───────── 문서 안에서 찾기 (⌘/Ctrl+F) ─────────
 // 편집기: 원문에서 찾아 입력창 뒤의 표시 레이어(pre.fm)에 모든 일치를 칠한다. 보기 모드(마크다운/CSV/트리): 화면 텍스트에서 직접 찾아 <mark> 로 감싼다.
 const fb = { open: false, q: '', matches: [], idx: -1, dom: false, built: false, timer: 0, opts: store.get('fbopts', { case: false, word: false, regex: false }) };
+const FIND_ROOTS = '#preview, .smart-doc, .dvbox';   // 보기 모드에서 화면 텍스트를 찾는 영역 (diff 포함)
 const escHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function fbRegex() {
   if (!fb.q) return null;
@@ -2188,7 +2189,7 @@ function buildFileFind() {
 }
 const placeFindBar = () => { $('#fbar').style.top = ($('#content').offsetTop + 8) + 'px'; };
 function openFileFind() {
-  if (!cur() || cur().kind === 'image' || cur().kind === 'diff') return;
+  if (!cur() || cur().kind === 'image') return;
   buildFileFind();
   const ta = $('textarea.editor'); let sel = '';
   if (ta && ta.selectionEnd > ta.selectionStart) sel = ta.value.slice(ta.selectionStart, ta.selectionEnd); else sel = String(getSelection());
@@ -2205,14 +2206,14 @@ function closeFileFind() {
 }
 function clearFindMarks() {
   const fm = $('pre.fm'); if (fm) fm.textContent = '';
-  document.querySelectorAll('#preview mark.fmd, .smart-doc mark.fmd').forEach((m) => m.replaceWith(m.textContent));
-  ($('#preview') || $('.smart-doc'))?.normalize();
+  document.querySelectorAll(FIND_ROOTS.replace(/,|$/g, ' mark.fmd$&')).forEach((m) => m.replaceWith(m.textContent));
+  $(FIND_ROOTS)?.normalize();
 }
 // 화면(DOM) 텍스트에서 찾아 <mark> 로 감싼다. 반환: mark 요소 배열
 function markDom(root, re0, limit = 5000) {
   const re = new RegExp(re0.source, re0.flags), marks = [], nodes = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) => (n.parentElement.closest('button, script, style') || !n.data.trim() ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    acceptNode: (n) => (n.parentElement.closest('button, script, style, .dv td.ln') || !n.data.trim() ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
   });
   while (walker.nextNode()) nodes.push(walker.currentNode);   // 순회 중에 DOM 을 바꾸지 않도록 먼저 수집
   for (const n of nodes) {
@@ -2231,7 +2232,7 @@ function markDom(root, re0, limit = 5000) {
 function runFileFind(fresh) {
   if (!fb.open) return;
   store.set('fbq', fb.q);
-  const ta = $('textarea.editor'), pv = $('#preview') || $('.smart-doc'), re = fbRegex();
+  const ta = $('textarea.editor'), pv = $(FIND_ROOTS), re = fbRegex();
   clearFindMarks(); fb.matches = [];
   if (!re || re === 'bad') { fb.idx = -1; return drawFindCount(re); }
   if (ta) { // 편집기(편집/분할): 원문 기준
@@ -2256,7 +2257,7 @@ function gotoFind(i) {
   const n = fb.matches.length; fb.idx = n ? ((i % n) + n) % n : -1; drawFindCount();
   const m = fb.matches[fb.idx]; if (!m) { renderFM(); return; }
   if (fb.dom) {
-    document.querySelectorAll('#preview mark.fmd.cur, .smart-doc mark.fmd.cur').forEach((x) => x.classList.remove('cur'));
+    document.querySelectorAll(FIND_ROOTS.replace(/,|$/g, ' mark.fmd.cur$&')).forEach((x) => x.classList.remove('cur'));
     m.classList.add('cur'); m.scrollIntoView({ block: 'center', inline: 'nearest' });
   } else {
     renderFM();

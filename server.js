@@ -649,7 +649,7 @@ async function api(req, res, url, root) {
       return send(res, 200, { ok: true });
     }
     case 'GET /api/db/connections':
-      return send(res, 200, { connections: DB.listConnections(), kinds: Object.fromEntries(Object.entries(DB.KINDS).map(([k, v]) => [k, { label: v.label, port: v.port || null, file: !!v.file }])) });
+      return send(res, 200, { connections: DB.listConnections(), kinds: Object.fromEntries(Object.entries(DB.KINDS).map(([k, v]) => [k, { label: v.label, port: v.port || null, file: !!v.file, pkg: v.pkg || null, driver: DB.driverState(k) }])) });
     case 'PUT /api/db/connection': {
       const { conn, password } = JSON.parse(await readBody(req));
       return send(res, 200, DB.saveConnection(conn || {}, password));

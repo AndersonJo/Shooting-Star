@@ -1,6 +1,6 @@
 'use strict';
 // shooting-star DB: 연결 관리 / 스키마 조회 / 쿼리 실행. UI(서버 API)와 CLI(`ss db …`)가 같이 쓴다.
-// 드라이버는 앱에 포함하지 않고, 처음 연결할 때 ~/.shooting-star/drivers 에 npm 으로 설치한다 (SQLite 는 node:sqlite 내장, Trino 는 REST).
+// 드라이버는 앱에 포함하지 않고, 처음 연결할 때 ~/.shooting-star/drivers 에 npm 으로 자동 설치한다 (7일마다 최신으로 업데이트) (SQLite 는 node:sqlite 내장, Trino 는 REST).
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -44,13 +44,13 @@ function normalize(c) {
   else {
     if (!c.host) throw err('host 가 필요합니다');
     Object.assign(out, { host: String(c.host), port: Number(c.port) || k.port, user: String(c.user || ''), database: String(c.database || '') });
-    if (c.kind === 'trino') { out.catalog = String(c.catalog || ''); out.https = !!c.https; if (!out.catalog) throw err('Trino 는 catalog 가 필요합니다'); }
+    if (c.kind === 'trino') { out.catalog = String(c.catalog || ''); out.https = !!c.https; }   // catalog 는 선택: 비우면 모든 catalog 를 보여 주고 SQL 에서 catalog.schema.table 로 쓴다
     if (c.ssl) out.ssl = true;
   }
   return out;
 }
 function listConnections() {
-  return readConns().map((c) => ({ ...c, hasPassword: !k_file(c) && hasSecret(c.id), driver: driverState(c.kind) }));
+  return readConns().map((c) => ({ ...c, hasPassword: !k_file(c) && hasSecret(c.id), driver: driverState(c.kind), driverVersion: driverVersion(c.kind) }));
 }
 const k_file = (c) => !!KINDS[c.kind]?.file;
 function saveConnection(c, password) {
@@ -78,23 +78,38 @@ function driverState(kind) {
   return fs.existsSync(path.join(DRIVERS, 'node_modules', k.pkg)) ? 'installed' : 'missing';
 }
 function hasNodeSqlite() { try { require('node:sqlite'); return true; } catch { return false; } }
-function loadDriver(kind) {
-  const st = driverState(kind);
-  if (kind === 'sqlite') { if (st !== 'builtin') throw err('SQLite 는 Node 22.5 이상이 필요합니다 (brew upgrade node)', 400, 'NO_DRIVER'); return require('node:sqlite'); }
-  if (st === 'missing') throw err(`${KINDS[kind].label} 드라이버(${KINDS[kind].pkg})가 설치되어 있지 않습니다`, 424, 'NO_DRIVER');
-  return createRequire(path.join(DRIVERS, 'x.js'))(KINDS[kind].pkg);
+// 드라이버가 없으면 처음 연결할 때 자동으로 설치하고, 설치된 지 UPDATE_DAYS 가 지나면 백그라운드로 최신 버전으로 올린다 (다음 실행부터 적용)
+const UPDATE_DAYS = 7, installing = new Map();   // pkg → 진행 중인 설치 Promise (mysql/mariadb 처럼 같은 패키지를 동시에 설치하지 않도록)
+const stampFile = (pkg) => path.join(DRIVERS, '.updated-' + pkg.replace(/[\/@]/g, '_'));
+async function loadDriver(kind) {
+  const k = KINDS[kind];
+  if (kind === 'sqlite') { if (driverState(kind) !== 'builtin') throw err('SQLite 는 Node 22.5 이상이 필요합니다 (brew upgrade node)', 400, 'NO_DRIVER'); return require('node:sqlite'); }
+  if (driverState(kind) === 'missing') {
+    try { await installDriver(kind); } catch (e) { throw err(`${k.label} 드라이버(${k.pkg}) 자동 설치 실패 — ${e.message}`, 424, 'NO_DRIVER'); }
+  } else {
+    let age = Infinity; try { age = Date.now() - fs.statSync(stampFile(k.pkg)).mtimeMs; } catch {}
+    if (age > UPDATE_DAYS * 864e5) installDriver(kind).catch(() => {});   // 업데이트는 기다리지 않는다 (실패해도 현재 버전으로 계속)
+  }
+  return createRequire(path.join(DRIVERS, 'x.js'))(k.pkg);
 }
-function installDriver(kind) {
+function installDriver(kind) {   // 설치 = 업데이트: 항상 최신 버전(@latest)으로 설치한다
   const k = KINDS[kind]; if (!k?.pkg) return Promise.resolve({ ok: true, note: '설치가 필요 없습니다' });
+  if (installing.has(k.pkg)) return installing.get(k.pkg);
   fs.mkdirSync(DRIVERS, { recursive: true });
   const pj = path.join(DRIVERS, 'package.json'); if (!fs.existsSync(pj)) fs.writeFileSync(pj, '{"name":"ss-drivers","private":true}\n');
   // 앱(Spotlight)으로 실행되면 PATH 가 없으므로 node 옆의 npm 을 쓴다
   const nodeDir = path.dirname(process.execPath), npm = fs.existsSync(path.join(nodeDir, 'npm')) ? path.join(nodeDir, 'npm') : 'npm';
   const env = { ...process.env, PATH: [nodeDir, '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || '/usr/bin:/bin'].join(path.delimiter) };
-  return new Promise((resolve, reject) => execFile(npm, ['install', '--prefix', DRIVERS, k.pkg, '--no-audit', '--no-fund', '--loglevel=error'], { env, timeout: 300000, maxBuffer: 4 << 20 }, (e, so, se) => {
+  const p = new Promise((resolve, reject) => execFile(npm, ['install', '--prefix', DRIVERS, k.pkg + '@latest', '--no-audit', '--no-fund', '--loglevel=error'], { env, timeout: 300000, maxBuffer: 4 << 20 }, (e, so, se) => {
     if (e) return reject(err(`${k.pkg} 설치 실패: ${(String(se) || e.message).trim().slice(-600)}`, 500));
-    resolve({ ok: true });
-  }));
+    try { fs.writeFileSync(stampFile(k.pkg), ''); } catch {}
+    resolve({ ok: true, version: driverVersion(kind) });
+  })).finally(() => installing.delete(k.pkg));
+  installing.set(k.pkg, p); return p;
+}
+function driverVersion(kind) {
+  const k = KINDS[kind]; if (!k?.pkg) return '';
+  try { return JSON.parse(fs.readFileSync(path.join(DRIVERS, 'node_modules', k.pkg, 'package.json'), 'utf8')).version; } catch { return ''; }
 }
 
 // ───────── 값 직렬화 ─────────
@@ -113,7 +128,7 @@ function ser(v) {
 // ───────── 어댑터: { query(sql, {limit}) → {columns, rows, affected?}, close() } ─────────
 const pwOf = (c) => getSecret(c.id);
 async function openPostgres(c) {
-  const { Client } = loadDriver('postgres');
+  const { Client } = await loadDriver('postgres');
   const cfg = { host: c.host, port: c.port, user: c.user || undefined, password: pwOf(c) || undefined, database: c.database || undefined, ssl: c.ssl ? { rejectUnauthorized: false } : undefined, connectionTimeoutMillis: 10000, statement_timeout: 120000 };
   const cl = new Client(cfg);
   await cl.connect();
@@ -132,7 +147,7 @@ async function openPostgres(c) {
   };
 }
 async function openMysql(c) {
-  const mysql = loadDriver(c.kind);
+  const mysql = await loadDriver(c.kind);
   const cfg = { host: c.host, port: c.port, user: c.user || undefined, password: pwOf(c) || undefined, database: c.database || undefined, ssl: c.ssl ? { rejectUnauthorized: false } : undefined, connectTimeout: 10000, dateStrings: true, supportBigNumbers: true, bigNumberStrings: true, rowsAsArray: true };
   const cn = await mysql.createConnection(cfg);
   return {
@@ -148,7 +163,7 @@ async function openMysql(c) {
   };
 }
 async function openSqlite(c) {
-  const { DatabaseSync } = loadDriver('sqlite');
+  const { DatabaseSync } = await loadDriver('sqlite');
   if (c.file !== ':memory:' && !fs.existsSync(c.file)) throw err(`파일이 없습니다: ${c.file}`, 404);
   const db = new DatabaseSync(c.file, { readOnly: !!c.readOnly });
   return {
@@ -164,7 +179,7 @@ async function openSqlite(c) {
   };
 }
 async function openDuckdb(c) {
-  const { DuckDBInstance } = loadDriver('duckdb');
+  const { DuckDBInstance } = await loadDriver('duckdb');
   const file = c.file === ':memory:' || !c.file ? ':memory:' : c.file;
   if (file !== ':memory:' && c.readOnly && !fs.existsSync(file)) throw err(`파일이 없습니다: ${file}`, 404);
   const inst = await DuckDBInstance.create(file, file !== ':memory:' && c.readOnly ? { access_mode: 'READ_ONLY' } : {});
@@ -183,7 +198,7 @@ async function openDuckdb(c) {
 async function openTrino(c) {
   const base = `${c.https ? 'https' : 'http'}://${c.host}:${c.port}`;
   const pw = pwOf(c);
-  const headers = { 'X-Trino-User': c.user || os.userInfo().username, 'X-Trino-Catalog': c.catalog, ...(c.database ? { 'X-Trino-Schema': c.database } : {}), 'User-Agent': 'shooting-star' };
+  const headers = { 'X-Trino-User': c.user || os.userInfo().username, ...(c.catalog ? { 'X-Trino-Catalog': c.catalog, ...(c.database ? { 'X-Trino-Schema': c.database } : {}) } : {}), 'User-Agent': 'shooting-star' };
   if (pw) headers.Authorization = 'Basic ' + Buffer.from(`${c.user}:${pw}`).toString('base64');
   let ctl = null, nextUri = null;
   const req = (url, opt) => { const t = setTimeout(() => ctl.abort(), 30000); return fetch(url, { ...opt, headers, signal: ctl.signal }).finally(() => clearTimeout(t)); };
@@ -305,9 +320,17 @@ const SYS = {
   postgres: ['pg_catalog', 'information_schema', 'pg_toast'], mysql: ['information_schema', 'mysql', 'performance_schema', 'sys'], mariadb: ['information_schema', 'mysql', 'performance_schema', 'sys'],
   duckdb: ['information_schema', 'pg_catalog'], trino: ['information_schema'],
 };
-async function children(ref, { schema, table } = {}) {
+// Trino 에서 catalog 를 비워 두면 트리의 스키마 이름이 'catalog.schema' 가 된다 → information_schema 앞에 붙일 catalog 와 실제 스키마로 나눈다
+function trinoScope(c, schema) {
+  if (c.kind !== 'trino') return { cat: '', schema };
+  if (c.catalog) return { cat: qid('trino', c.catalog) + '.', schema };
+  const i = String(schema ?? '').indexOf('.');
+  return i < 0 ? { cat: '', schema } : { cat: qid('trino', schema.slice(0, i)) + '.', schema: schema.slice(i + 1) };
+}
+async function children(ref, { schema: s0, table } = {}) {
   const c = findConn(ref), kind = c.kind, q = (sql) => query(c, sql, { limit: 5000, force: true, internal: true }).then((r) => r.rows);
-  const cat = kind === 'trino' ? qid(kind, c.catalog) + '.' : '';
+  if (kind === 'trino' && !c.catalog && !s0) return (await q("SELECT table_cat, table_schem FROM system.jdbc.schemas WHERE table_schem <> 'information_schema' ORDER BY 1, 2")).map(([ct, sc]) => ({ name: `${ct}.${sc}`, type: 'schema' }));
+  const { cat, schema } = trinoScope(c, s0);
   if (kind === 'sqlite') {
     if (!schema) return [{ name: 'main', type: 'schema' }];
     if (!table) return (await q("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")).map(([name, type]) => ({ name, type }));
@@ -325,7 +348,8 @@ async function children(ref, { schema, table } = {}) {
 async function names(ref) {   // 자동완성용: 모든 테이블/뷰 이름
   const c = findConn(ref), kind = c.kind, q = (sql) => query(c, sql, { limit: 5000, force: true, internal: true }).then((r) => r.rows);
   if (kind === 'sqlite') return (await q("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")).map(([name, type]) => ({ schema: 'main', name, type }));
-  const cat = kind === 'trino' ? qid(kind, c.catalog) + '.' : '';
+  if (kind === 'trino' && !c.catalog) return (await q("SELECT table_cat, table_schem, table_name, table_type FROM system.jdbc.tables WHERE table_schem <> 'information_schema' ORDER BY 1, 2, 3")).map(([ct, sc, name, tt]) => ({ schema: `${ct}.${sc}`, name, type: /view/i.test(tt) ? 'view' : 'table' }));
+  const { cat } = trinoScope(c);
   const sys = (SYS[kind] || []).map(lit).join(','), cw = kind === 'duckdb' ? ' AND table_catalog = current_database()' : '';
   return (await q(`SELECT table_schema, table_name, table_type FROM ${cat}information_schema.tables WHERE table_schema NOT IN (${sys || "''"})${cw} ORDER BY 1, 2`)).map(([schema, name, tt]) => ({ schema, name, type: /view/i.test(tt) ? 'view' : 'table' }));
 }
@@ -365,7 +389,7 @@ async function updateRows(ref, schema, table, changes) {
   return { applied: stmts.length };
 }
 const selectAll = (ref, schema, table, limit = 100) => {
-  const c = findConn(ref), k = c.kind, t = (schema && k !== 'sqlite' ? qid(k, schema) + '.' : '') + qid(k, table);
+  const c = findConn(ref), k = c.kind, sc = k === 'trino' && !c.catalog ? String(schema || '').split('.').map((x) => qid(k, x)).join('.') : schema && qid(k, schema), t = (schema && k !== 'sqlite' ? sc + '.' : '') + qid(k, table);
   return `SELECT * FROM ${t} LIMIT ${limit}`;
 };
 
@@ -377,10 +401,10 @@ const HELP = `ss db — DB 연결/쿼리 (UI 의 DB 메뉴, Claude/OpenAI 에이
                                                쿼리 실행 (읽기 전용 연결은 SELECT 류만)
   ss db schema <연결> [<스키마> [<테이블>]]      스키마/테이블/컬럼 조회
   ss db add <이름> --kind postgres|mysql|mariadb|sqlite|duckdb|trino [--host h --port p --user u --database d | --file f]
-            [--catalog c] [--password-env VAR] [--write]      (비밀번호는 환경변수에서 읽어 ~/.shooting-star/db/secrets.json 에 저장; --write 가 없으면 읽기 전용)
+            [--catalog c (Trino, 선택)] [--password-env VAR] [--write]      (비밀번호는 환경변수에서 읽어 ~/.shooting-star/db/secrets.json 에 저장; --write 가 없으면 읽기 전용)
   ss db history [연결] [n]                     최근 실행한 쿼리 (UI 와 공유)
   ss db rm <연결>
-  ss db driver <종류>                          드라이버 설치 (postgres/mysql/mariadb/duckdb)
+  ss db driver <종류>                          드라이버 설치·최신으로 업데이트 (postgres/mysql/mariadb/duckdb)
 `;
 const csv = (cols, rows) => [cols, ...rows].map((r) => r.map((v) => (v === null ? '' : /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v))).join(',')).join('\n');
 function table(cols, rows) {
@@ -429,7 +453,7 @@ async function cli(argv) {
     }
     if (sub === 'history') { const c = pos[0] && /\D/.test(pos[0]) ? findConn(pos[0]) : null; for (const h of history({ id: c?.id, limit: Number(c ? pos[1] : pos[0]) || 20 })) console.log(`${new Date(h.t).toLocaleString()}  [${h.conn}] ${h.ok ? '✓' : '✗'} ${h.ms}ms ${h.src || ''}\n  ${h.sql.replace(/\s+/g, ' ').slice(0, 200)}${h.err ? '\n  ⚠ ' + h.err : ''}`); return 0; }
     if (sub === 'rm') { deleteConnection(findConn(pos[0]).id); console.log('removed'); return 0; }
-    if (sub === 'driver') { if (!KINDS[pos[0]]) throw err(`종류: ${Object.keys(KINDS).join(', ')}`); console.error('설치 중…'); await installDriver(pos[0]); console.log('✓ 설치됨'); return 0; }
+    if (sub === 'driver') { if (!KINDS[pos[0]]) throw err(`종류: ${Object.keys(KINDS).join(', ')}`); console.error('설치 중…'); const r = await installDriver(pos[0]); console.log(`✓ 설치됨${r.version ? ' (' + KINDS[pos[0]].pkg + '@' + r.version + ')' : ''}`); return 0; }
     throw err(`알 수 없는 명령: ${sub}\n` + HELP);
   } catch (e) { console.error(e.message); return e.code === 'NO_DRIVER' ? 3 : 2; }
   finally { for (const k of [...pool.keys()]) if (!k.startsWith('t:')) closeConn(k); }
