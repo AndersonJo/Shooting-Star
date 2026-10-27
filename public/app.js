@@ -1824,6 +1824,15 @@ function driverBtnRow(depth, c, after) {
   b.onclick = async (e) => { e.stopPropagation(); b.disabled = true; b.textContent = '설치 중… (최대 1~2분)'; try { await api('POST', 'db/driver', {}, { kind: c.kind }); toast(`${dbUi.kinds[c.kind]?.label} 드라이버 설치됨`); await loadDb(); after && after(); } catch (er) { b.disabled = false; b.textContent = '드라이버 설치'; toast(er.message); } };
   return el('div', { className: 'dbr msg', style: `padding-left:${10 + depth * 14}px` }, b);
 }
+function dbConnMenu(e, c) {   // 연결 우클릭 메뉴 (트리·검색 결과 공용)
+  e.preventDefault();
+  showMenu(e.clientX, e.clientY, [
+    ['새 SQL 콘솔', () => openSql(c)], ['연결 편집…', () => dbDialog(c)],
+    ['새로고침 (DB 에서 다시 가져오기)', () => dbRefresh(c.id)],
+    ...(dbUi.kinds[c.kind]?.pkg ? [[c.driver === 'missing' ? '드라이버 설치' : `드라이버 업데이트${c.driverVersion ? ` (현재 ${c.driverVersion})` : ''}`, async () => { try { toast('설치 중…'); const r = await api('POST', 'db/driver', {}, { kind: c.kind }); toast(`${dbUi.kinds[c.kind].pkg}${r.version ? '@' + r.version : ''} 설치됨${c.driver === 'missing' ? '' : ' · 앱을 다시 시작하면 적용'}`); loadDb(); } catch (er) { toast(er.message); } }]] : []),
+    ['삭제…', async () => { if (!confirm(`연결 '${c.name}' 을(를) 삭제할까요? (저장된 비밀번호도 삭제)`)) return; try { await api('DELETE', 'db/connection', { id: c.id }); } catch (er) { toast(er.message); } loadDb(); }],
+  ]);
+}
 function drawDb() {
   if (dbUi.q) return drawDbSearch();
   const box = $('#db-list'), rows = [];
@@ -1834,15 +1843,7 @@ function drawDb() {
     row.title = (c.file || `${c.host}:${c.port}/${c.database || ''}`) + (dbUi.at.get(c.id) ? `\n목록 캐시: ${new Date(dbUi.at.get(c.id)).toLocaleString()} (우클릭 → 새로고침으로 다시 가져오기)` : '');
     row.onclick = () => { dbUi.sel = ck; dbToggle(ck, () => dbLoadKids(ck, c.id)); };
     row.ondblclick = () => openSql(c);
-    row.oncontextmenu = (e) => {
-      e.preventDefault();
-      showMenu(e.clientX, e.clientY, [
-        ['새 SQL 콘솔', () => openSql(c)], ['연결 편집…', () => dbDialog(c)],
-        ['새로고침 (DB 에서 다시 가져오기)', () => dbRefresh(c.id)],
-        ...(dbUi.kinds[c.kind]?.pkg ? [[c.driver === 'missing' ? '드라이버 설치' : `드라이버 업데이트${c.driverVersion ? ` (현재 ${c.driverVersion})` : ''}`, async () => { try { toast('설치 중…'); const r = await api('POST', 'db/driver', {}, { kind: c.kind }); toast(`${dbUi.kinds[c.kind].pkg}${r.version ? '@' + r.version : ''} 설치됨${c.driver === 'missing' ? '' : ' · 앱을 다시 시작하면 적용'}`); loadDb(); } catch (er) { toast(er.message); } }]] : []),
-        ['삭제…', async () => { if (!confirm(`연결 '${c.name}' 을(를) 삭제할까요? (저장된 비밀번호도 삭제)`)) return; try { await api('DELETE', 'db/connection', { id: c.id }); } catch (er) { toast(er.message); } loadDb(); }],
-      ]);
-    };
+    row.oncontextmenu = (e) => dbConnMenu(e, c);
     rows.push(row);
     rows.push(...dbKidRows(ck, 1, (sc) => {
       const sk = `s:${c.id}:${sc.name}`;
@@ -1895,8 +1896,9 @@ function drawDbSearch() {
     const schemas = new Set([...(Array.isArray(kids) ? kids.map((x) => x.name) : []), ...(Array.isArray(ns) ? ns.map((x) => x.schema) : [])]);
     for (const sc of schemas) if (String(sc).toLowerCase().includes(q)) hits.push({ schema: sc });
     if (Array.isArray(ns)) for (const t of ns) if (t.name.toLowerCase().includes(q) || `${t.schema}.${t.name}`.toLowerCase().includes(q)) hits.push(t);
-    if (!hits.length && Array.isArray(ns)) continue;
-    rows.push(dbRow(0, 'conn', '', KIND_ICON[c.kind], c.name, el('span', { className: 'tg', textContent: Array.isArray(ns) ? `${hits.length.toLocaleString()}개` : '' })));
+    if (!hits.length && Array.isArray(ns) && !c.name.toLowerCase().includes(q)) continue;   // 연결 이름이 맞으면 결과가 없어도 보여 준다
+    const cr = dbRow(0, 'conn', '', KIND_ICON[c.kind], c.name, el('span', { className: 'tg', textContent: Array.isArray(ns) ? `${hits.length.toLocaleString()}개` : '' }));
+    cr.oncontextmenu = (e) => dbConnMenu(e, c); cr.ondblclick = () => openSql(c); rows.push(cr);
     if (ns === 'loading') rows.push(dbRow(1, 'msg', '', '', '테이블 목록 불러오는 중… (처음 한 번, 이후 캐시)'));
     else if (ns?.error) rows.push(dbRow(1, 'msg err', '', '', ns.error));
     for (const h of hits.slice(0, MAX)) {
@@ -1909,6 +1911,7 @@ function drawDbSearch() {
 클릭: 트리에서 보기`;
       r.onclick = () => dbReveal(c, h.schema, h.name);
       if (h.name) r.ondblclick = async () => { try { const sql = (await api('GET', 'db/selectsql', { id: c.id, schema: h.schema, table: h.name })).sql; openSql(c, sql, true, { schema: h.schema, table: h.name, sql }); } catch (er) { toast(er.message); } };
+      r.oncontextmenu = (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['트리에서 보기', () => r.onclick()], ...(h.name ? [['데이터 보기 (SELECT *)', () => r.ondblclick()], ['이름 복사', () => copy(h.name, '복사됨')], ['스키마.테이블 복사', () => copy(`${h.schema}.${h.name}`, '복사됨')]] : [['이름 복사', () => copy(String(h.schema), '복사됨')]])]); };
       first ||= r; rows.push(r);
     }
     if (hits.length > MAX) rows.push(dbRow(1, 'msg', '', '', `… ${(hits.length - MAX).toLocaleString()}개 더 (검색어를 더 구체적으로)`));
