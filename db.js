@@ -40,6 +40,7 @@ function normalize(c) {
   const k = KINDS[c.kind]; if (!k) throw err(`지원하지 않는 DB 종류: ${c.kind} (${Object.keys(KINDS).join(', ')})`);
   if (!c.name || !/^[^\s].{0,63}$/.test(c.name)) throw err('이름을 입력하세요 (최대 64자)');
   const out = { id: c.id || crypto.randomBytes(4).toString('hex'), name: c.name.trim(), kind: c.kind, readOnly: c.readOnly !== false };
+  if (c.schemas && String(c.schemas).trim()) out.schemas = String(c.schemas).trim();   // 트리/자동완성에 보일 스키마 (쉼표로 구분한 패턴)
   if (k.file) { if (!c.file && c.kind !== 'duckdb') throw err('파일 경로가 필요합니다'); out.file = String(c.file || ':memory:').replace(/^~(?=$|\/)/, HOME); }
   else {
     if (!c.host) throw err('host 가 필요합니다');
@@ -60,10 +61,11 @@ function saveConnection(c, password) {
   if (typeof password === 'string' && password !== '' && !k_file(n)) setSecret(n.id, password);   // 비밀번호를 먼저 저장 (실패하면 연결도 만들지 않는다)
   if (old) list[list.indexOf(old)] = n; else list.push(n);
   writeConns(list);
+  if (old && ['kind', 'host', 'port', 'user', 'database', 'catalog', 'file', 'https'].some((k) => (old[k] ?? '') !== (n[k] ?? ''))) clearCache(n.id);   // 다른 DB 를 가리키게 되면 캐시를 버린다
   closeConn(n.id);
   return n;
 }
-function deleteConnection(id) { writeConns(readConns().filter((c) => c.id !== id)); delSecret(id); closeConn(id); }
+function deleteConnection(id) { writeConns(readConns().filter((c) => c.id !== id)); delSecret(id); closeConn(id); clearCache(id); }
 function findConn(ref) {   // id 또는 이름
   const list = readConns(), c = list.find((x) => x.id === ref) || list.find((x) => x.name === ref);
   if (!c) throw err(`연결을 찾을 수 없습니다: ${ref}  (ss db list)`, 404);
@@ -338,8 +340,16 @@ function trinoScope(c, schema) {
   const i = String(schema ?? '').indexOf('.');
   return i < 0 ? { cat: '', schema } : { cat: qid('trino', schema.slice(0, i)) + '.', schema: schema.slice(i + 1) };
 }
-async function children(ref, { schema: s0, table } = {}) {
-  const c = findConn(ref), kind = c.kind, q = (sql) => query(c, sql, { limit: 5000, force: true, internal: true }).then((r) => r.rows);
+// 스키마 필터: 'sales, mart_*, !*_tmp' → 포함 패턴 중 하나에 맞고(없으면 전부) 제외(!) 패턴에 안 맞는 것. * = 아무 글자, 대소문자 무시
+function schemaFilter(spec) {
+  const pats = String(spec || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (!pats.length) return () => true;
+  const re = (p) => new RegExp('^' + p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$', 'i');
+  const inc = pats.filter((p) => p[0] !== '!').map(re), exc = pats.filter((p) => p[0] === '!').map((p) => re(p.slice(1).trim()));
+  return (name) => (!inc.length || inc.some((r) => r.test(name))) && !exc.some((r) => r.test(name));
+}
+async function childrenLive(c, { schema: s0, table } = {}) {
+  const kind = c.kind, q = (sql) => query(c, sql, { limit: 20000, force: true, internal: true }).then((r) => r.rows);
   if (kind === 'trino' && !trinoCat(c.catalog, c.database).catalog && !s0) return (await q("SELECT table_cat, table_schem FROM system.jdbc.schemas WHERE table_schem <> 'information_schema' ORDER BY 1, 2")).map(([ct, sc]) => ({ name: `${ct}.${sc}`, type: 'schema' }));
   const { cat, schema } = trinoScope(c, s0);
   if (kind === 'sqlite') {
@@ -356,13 +366,37 @@ async function children(ref, { schema: s0, table } = {}) {
   if (!table) return (await q(`SELECT table_name, table_type FROM ${cat}information_schema.tables WHERE table_schema = ${lit(schema)}${cw} ORDER BY 1`)).map(([name, tt]) => ({ name, type: /view/i.test(tt) ? 'view' : 'table' }));
   return (await q(`SELECT column_name, data_type, is_nullable FROM ${cat}information_schema.columns WHERE table_schema = ${lit(schema)} AND table_name = ${lit(table)}${cw} ORDER BY ordinal_position`)).map(([name, dataType, nl]) => ({ name, type: 'column', dataType, nullable: /^y/i.test(nl) }));
 }
-async function names(ref) {   // 자동완성용: 모든 테이블/뷰 이름
-  const c = findConn(ref), kind = c.kind, q = (sql) => query(c, sql, { limit: 5000, force: true, internal: true }).then((r) => r.rows);
+async function namesLive(c) {   // 모든 테이블/뷰 이름. 스키마 필터의 포함 패턴은 LIKE 로 DB 에서 미리 줄인다 (정확한 판정은 schemaFilter 가)
+  const kind = c.kind, q = (sql) => query(c, sql, { limit: 100000, force: true, internal: true }).then((r) => r.rows);
   if (kind === 'sqlite') return (await q("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")).map(([name, type]) => ({ schema: 'main', name, type }));
-  if (kind === 'trino' && !trinoCat(c.catalog, c.database).catalog) return (await q("SELECT table_cat, table_schem, table_name, table_type FROM system.jdbc.tables WHERE table_schem <> 'information_schema' ORDER BY 1, 2, 3")).map(([ct, sc, name, tt]) => ({ schema: `${ct}.${sc}`, name, type: /view/i.test(tt) ? 'view' : 'table' }));
+  const inc = String(c.schemas || '').split(',').map((x) => x.trim()).filter((x) => x && x[0] !== '!');
+  const like = (col) => (inc.length ? ` AND (${inc.map((p) => `LOWER(${col}) LIKE ${lit(p.toLowerCase().replace(/\*/g, '%'))}`).join(' OR ')})` : '');
+  if (kind === 'trino' && !trinoCat(c.catalog, c.database).catalog) return (await q(`SELECT table_cat, table_schem, table_name, table_type FROM system.jdbc.tables WHERE table_schem <> 'information_schema'${like("table_cat || '.' || table_schem")} ORDER BY 1, 2, 3`)).map(([ct, sc, name, tt]) => ({ schema: `${ct}.${sc}`, name, type: /view/i.test(tt) ? 'view' : 'table' }));
   const { cat } = trinoScope(c);
   const sys = (SYS[kind] || []).map(lit).join(','), cw = kind === 'duckdb' ? ' AND table_catalog = current_database()' : '';
-  return (await q(`SELECT table_schema, table_name, table_type FROM ${cat}information_schema.tables WHERE table_schema NOT IN (${sys || "''"})${cw} ORDER BY 1, 2`)).map(([schema, name, tt]) => ({ schema, name, type: /view/i.test(tt) ? 'view' : 'table' }));
+  return (await q(`SELECT table_schema, table_name, table_type FROM ${cat}information_schema.tables WHERE table_schema NOT IN (${sys || "''"})${cw}${like('table_schema')} ORDER BY 1, 2`)).map(([schema, name, tt]) => ({ schema, name, type: /view/i.test(tt) ? 'view' : 'table' }));
+}
+
+// ───────── 메타데이터 캐시: 스키마/테이블/컬럼 목록은 한 번 가져오면 ~/.shooting-star/db/cache/<연결id>.json 에 두고,
+// 명시적으로 새로고침(clearCache)하기 전까지 DB 에 다시 묻지 않는다. 스키마 필터는 캐시 위에서 적용한다.
+const CACHE_DIR = path.join(DIR, 'cache');
+const cacheFile = (id) => path.join(CACHE_DIR, String(id).replace(/[^\w-]/g, '_') + '.json');
+const readCache = (id) => { try { return JSON.parse(fs.readFileSync(cacheFile(id), 'utf8')); } catch { return {}; } };
+async function cached(c, key, load) {
+  const all = readCache(c.id); if (all[key]) return all[key];
+  const ent = { at: Date.now(), items: await load() };
+  fs.mkdirSync(CACHE_DIR, { recursive: true }); fs.writeFileSync(cacheFile(c.id), JSON.stringify({ ...readCache(c.id), [key]: ent }), { mode: 0o600 });
+  return ent;
+}
+function clearCache(id) { for (const x of id ? [id] : readConns().map((c) => c.id)) fs.rmSync(cacheFile(x), { force: true }); }
+async function children(ref, { schema, table } = {}) {   // → { items, at }
+  const c = findConn(ref), ent = await cached(c, ['children', schema || '', table || ''].join('\u0000'), () => childrenLive(c, { schema, table }));
+  if (schema) return ent;
+  const keep = schemaFilter(c.schemas); return { ...ent, items: ent.items.filter((x) => keep(String(x.name))) };
+}
+async function names(ref) {   // 자동완성·검색용 → { items, at }
+  const c = findConn(ref), ent = await cached(c, 'names\u0000' + (c.schemas || ''), () => namesLive(c));
+  const keep = schemaFilter(c.schemas); return { ...ent, items: ent.items.filter((x) => keep(String(x.schema))) };
 }
 async function keys(ref, schema, table) {   // 기본 키 컬럼들 (순서대로)
   const c = typeof ref === 'object' ? ref : findConn(ref), kind = c.kind, q = (sql) => query(c, sql, { limit: 100, force: true, internal: true }).then((r) => r.rows);
@@ -410,9 +444,9 @@ const HELP = `ss db — DB 연결/쿼리 (UI 의 DB 메뉴, Claude/OpenAI 에이
   ss db list [--json]                          등록된 연결
   ss db query <연결> "<SQL>" [--limit 1000] [--offset 0] [--json|--csv]
                                                쿼리 실행 (읽기 전용 연결은 SELECT 류만)
-  ss db schema <연결> [<스키마> [<테이블>]]      스키마/테이블/컬럼 조회
+  ss db schema <연결> [<스키마> [<테이블>]] [--refresh]   스키마/테이블/컬럼 조회 (캐시 사용, --refresh: 캐시 버리고 다시 가져옴)
   ss db add <이름> --kind postgres|mysql|mariadb|sqlite|duckdb|trino [--host h --port p --user u --database d | --file f]
-            [--catalog c (Trino, 선택)] [--password-env VAR] [--write]      (비밀번호는 환경변수에서 읽어 ~/.shooting-star/db/secrets.json 에 저장; --write 가 없으면 읽기 전용)
+            [--catalog c (Trino, 선택)] [--schemas 'a, b_*, !tmp_*'] [--password-env VAR] [--write]      (비밀번호는 환경변수에서 읽어 ~/.shooting-star/db/secrets.json 에 저장; --write 가 없으면 읽기 전용)
   ss db history [연결] [n]                     최근 실행한 쿼리 (UI 와 공유)
   ss db rm <연결>
   ss db driver <종류>                          드라이버 설치·최신으로 업데이트 (postgres/mysql/mariadb/duckdb)
@@ -453,13 +487,14 @@ async function cli(argv) {
       return 0;
     }
     if (sub === 'schema') {
-      const items = await children(pos[0], { schema: pos[1], table: pos[2] });
+      if (o.refresh) clearCache(findConn(pos[0]).id);
+      const { items } = await children(pos[0], { schema: pos[1], table: pos[2] });
       for (const i of items) console.log(i.type === 'column' ? `${i.name}\t${i.dataType}${i.nullable ? '' : ' NOT NULL'}${i.pk ? ' PK' : ''}` : `${i.name}${i.type === 'view' ? ' (view)' : ''}`);
       return 0;
     }
     if (sub === 'add') {
       const pw = o['password-env'] ? process.env[o['password-env']] : undefined;
-      const n = saveConnection({ name: pos[0], kind: o.kind, host: o.host, port: o.port, user: o.user, database: o.database, file: o.file, catalog: o.catalog, https: !!o.https, ssl: !!o.ssl, readOnly: !o.write }, pw);
+      const n = saveConnection({ name: pos[0], kind: o.kind, host: o.host, port: o.port, user: o.user, database: o.database, file: o.file, catalog: o.catalog, schemas: o.schemas, https: !!o.https, ssl: !!o.ssl, readOnly: !o.write }, pw);
       console.log(`added: ${n.name} [${n.kind}]${n.readOnly ? ' 읽기 전용' : ''}`); return 0;
     }
     if (sub === 'history') { const c = pos[0] && /\D/.test(pos[0]) ? findConn(pos[0]) : null; for (const h of history({ id: c?.id, limit: Number(c ? pos[1] : pos[0]) || 20 })) console.log(`${new Date(h.t).toLocaleString()}  [${h.conn}] ${h.ok ? '✓' : '✗'} ${h.ms}ms ${h.src || ''}\n  ${h.sql.replace(/\s+/g, ' ').slice(0, 200)}${h.err ? '\n  ⚠ ' + h.err : ''}`); return 0; }
@@ -470,4 +505,4 @@ async function cli(argv) {
   finally { for (const k of [...pool.keys()]) if (!k.startsWith('t:')) closeConn(k); }
 }
 
-module.exports = { count, history, cancel, names, keys, updateRows, KINDS, listConnections, saveConnection, deleteConnection, findConn, installDriver, driverState, query, test, children, selectAll, cli, err, getSecret };
+module.exports = { clearCache, count, history, cancel, names, keys, updateRows, KINDS, listConnections, saveConnection, deleteConnection, findConn, installDriver, driverState, query, test, children, selectAll, cli, err, getSecret };

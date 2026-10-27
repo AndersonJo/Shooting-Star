@@ -1787,7 +1787,7 @@ $('#btn-run-new').onclick = async () => {
 
 
 // ───────── DB: 연결 / 스키마 트리 / SQL 콘솔 ─────────
-const dbUi = { conns: [], kinds: {}, open: new Set(), kids: new Map(), sel: '', n: 0 };
+const dbUi = { conns: [], kinds: {}, open: new Set(), kids: new Map(), at: new Map(), names: new Map(), q: '', sel: '', n: 0 };   // at: 연결 → 캐시한 시각, names: 연결 → 검색용 테이블 목록
 const KIND_ICON = { postgres: '🐘', mysql: '🐬', mariadb: '🦭', sqlite: '🪶', duckdb: '🦆', trino: '🔺' };
 async function loadDb() {
   try { const r = await api('GET', 'db/connections'); dbUi.conns = r.connections; dbUi.kinds = r.kinds; }
@@ -1796,7 +1796,7 @@ async function loadDb() {
 }
 async function dbLoadKids(key, id, schema, table) {
   dbUi.kids.set(key, 'loading'); drawDb();
-  try { dbUi.kids.set(key, (await api('GET', 'db/children', { id, ...(schema ? { schema } : {}), ...(table ? { table } : {}) })).items); }
+  try { const r = await api('GET', 'db/children', { id, ...(schema ? { schema } : {}), ...(table ? { table } : {}) }); dbUi.kids.set(key, r.items); if (!schema) dbUi.at.set(id, r.at); }
   catch (e) { dbUi.kids.set(key, { error: e.message, code: e.code }); }
   drawDb();
 }
@@ -1825,19 +1825,20 @@ function driverBtnRow(depth, c, after) {
   return el('div', { className: 'dbr msg', style: `padding-left:${10 + depth * 14}px` }, b);
 }
 function drawDb() {
+  if (dbUi.q) return drawDbSearch();
   const box = $('#db-list'), rows = [];
   if (!dbUi.conns.length) rows.push(el('div', { className: 'git-empty', textContent: '연결이 없습니다. ＋ 로 PostgreSQL / MySQL / MariaDB / SQLite / DuckDB / Trino 연결을 추가하세요. 터미널: ss db add …' }));
   for (const c of dbUi.conns) {
     const ck = 'c:' + c.id, open = dbUi.open.has(ck);
     const row = dbRow(0, 'conn' + (dbUi.sel === ck ? ' sel' : ''), open ? '▼' : '▶', KIND_ICON[c.kind], c.name, el('span', { className: 'tg', textContent: (c.readOnly ? '🔒 ' : '') + (dbUi.kinds[c.kind]?.label || c.kind) }));
-    row.title = c.file || `${c.host}:${c.port}/${c.database || ''}`;
+    row.title = (c.file || `${c.host}:${c.port}/${c.database || ''}`) + (dbUi.at.get(c.id) ? `\n목록 캐시: ${new Date(dbUi.at.get(c.id)).toLocaleString()} (우클릭 → 새로고침으로 다시 가져오기)` : '');
     row.onclick = () => { dbUi.sel = ck; dbToggle(ck, () => dbLoadKids(ck, c.id)); };
     row.ondblclick = () => openSql(c);
     row.oncontextmenu = (e) => {
       e.preventDefault();
       showMenu(e.clientX, e.clientY, [
         ['새 SQL 콘솔', () => openSql(c)], ['연결 편집…', () => dbDialog(c)],
-        ['새로고침', () => { for (const k of [...dbUi.kids.keys()]) if (k.split(':')[1] === c.id) dbUi.kids.delete(k); if (dbUi.open.has(ck)) dbLoadKids(ck, c.id); }],
+        ['새로고침 (DB 에서 다시 가져오기)', () => dbRefresh(c.id)],
         ...(dbUi.kinds[c.kind]?.pkg ? [[c.driver === 'missing' ? '드라이버 설치' : `드라이버 업데이트${c.driverVersion ? ` (현재 ${c.driverVersion})` : ''}`, async () => { try { toast('설치 중…'); const r = await api('POST', 'db/driver', {}, { kind: c.kind }); toast(`${dbUi.kinds[c.kind].pkg}${r.version ? '@' + r.version : ''} 설치됨${c.driver === 'missing' ? '' : ' · 앱을 다시 시작하면 적용'}`); loadDb(); } catch (er) { toast(er.message); } }]] : []),
         ['삭제…', async () => { if (!confirm(`연결 '${c.name}' 을(를) 삭제할까요? (저장된 비밀번호도 삭제)`)) return; try { await api('DELETE', 'db/connection', { id: c.id }); } catch (er) { toast(er.message); } loadDb(); }],
       ]);
@@ -1845,11 +1846,11 @@ function drawDb() {
     rows.push(row);
     rows.push(...dbKidRows(ck, 1, (sc) => {
       const sk = `s:${c.id}:${sc.name}`;
-      const sr = dbRow(1, '', dbUi.open.has(sk) ? '▼' : '▶', '📂', sc.name); sr.onclick = () => dbToggle(sk, () => dbLoadKids(sk, c.id, sc.name));
+      const sr = dbRow(1, dbUi.sel === sk ? 'sel' : '', dbUi.open.has(sk) ? '▼' : '▶', '📂', sc.name); sr.onclick = () => { dbUi.sel = sk; dbToggle(sk, () => dbLoadKids(sk, c.id, sc.name)); };
       return [sr, ...dbKidRows(sk, 2, (t) => {
         const tk = `t:${c.id}:${sc.name}:${t.name}`;
-        const tr = dbRow(2, '', dbUi.open.has(tk) ? '▼' : '▶', t.type === 'view' ? '👁' : '▦', t.name);
-        tr.onclick = () => dbToggle(tk, () => dbLoadKids(tk, c.id, sc.name, t.name));
+        const tr = dbRow(2, dbUi.sel === tk ? 'sel' : '', dbUi.open.has(tk) ? '▼' : '▶', t.type === 'view' ? '👁' : '▦', t.name);
+        tr.onclick = () => { dbUi.sel = tk; dbToggle(tk, () => dbLoadKids(tk, c.id, sc.name, t.name)); };
         tr.ondblclick = async (e) => { e.preventDefault(); try { const q = (await api('GET', 'db/selectsql', { id: c.id, schema: sc.name, table: t.name })).sql; openSql(c, q, true, { schema: sc.name, table: t.name, sql: q }); } catch (er) { toast(er.message); } };
         tr.oncontextmenu = (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['데이터 보기 (SELECT *)', () => tr.ondblclick(e)], ['이름 복사', () => copy(t.name, '복사됨')]]); };
         return [tr, ...dbKidRows(tk, 3, (col) => {
@@ -1861,7 +1862,75 @@ function drawDb() {
   }
   box.replaceChildren(...rows);
 }
-$('#btn-db-refresh').onclick = () => { dbUi.kids.clear(); loadDb(); for (const k of [...dbUi.open]) if (k.startsWith('c:')) { const id = k.slice(2); dbLoadKids(k, id); } };
+// 새로고침: 서버의 메타데이터 캐시를 버리고, 열려 있는 노드만 DB 에서 다시 가져온다 (id 없으면 모든 연결)
+async function dbRefresh(id) {
+  try { await api('POST', 'db/cache/clear', {}, { id }); } catch (e) { return toast(e.message); }
+  const mine = (k) => !id || k.split(':')[1] === id;
+  for (const k of [...dbUi.kids.keys()]) if (mine(k)) dbUi.kids.delete(k);
+  for (const x of [...dbUi.names.keys(), ...dbMeta.names.keys()]) if (!id || x === id) { dbUi.names.delete(x); dbMeta.names.delete(x); }
+  for (const k of [...dbMeta.cols.keys()]) if (!id || k.startsWith(id + ':')) dbMeta.cols.delete(k);
+  await loadDb();
+  for (const k of [...dbUi.open].filter(mine)) { const [t, cid, sc, tb] = k.split(':'); dbLoadKids(k, cid, t !== 'c' ? sc : undefined, t === 't' ? tb : undefined); }
+  if (dbUi.q) dbSearchLoad();
+}
+$('#btn-db-refresh').onclick = () => dbRefresh();
+
+// ───────── DB 검색: 스키마 이름(불러온 것) + 테이블 이름(연결마다 한 번 가져와 캐시)에서 찾는다 ─────────
+function dbSearchLoad() {
+  for (const c of dbUi.conns) {
+    if (dbUi.names.has(c.id)) continue;
+    dbUi.names.set(c.id, 'loading');
+    api('GET', 'db/names', { id: c.id }).then((r) => { dbUi.names.set(c.id, r.items); dbMeta.names.set(c.id, r.items); }, (e) => dbUi.names.set(c.id, { error: e.message })).then(() => dbUi.q && drawDb());
+  }
+}
+function hlName(text, q) {   // 일치 부분을 <mark> 로
+  const i = text.toLowerCase().indexOf(q); if (i < 0) return [text];
+  return [text.slice(0, i), el('mark', { textContent: text.slice(i, i + q.length) }), text.slice(i + q.length)];
+}
+function drawDbSearch() {
+  const box = $('#db-list'), rows = [], q = dbUi.q.toLowerCase(), MAX = 300;
+  let first = null;
+  for (const c of dbUi.conns) {
+    const ns = dbUi.names.get(c.id), kids = dbUi.kids.get('c:' + c.id), hits = [];
+    const schemas = new Set([...(Array.isArray(kids) ? kids.map((x) => x.name) : []), ...(Array.isArray(ns) ? ns.map((x) => x.schema) : [])]);
+    for (const sc of schemas) if (String(sc).toLowerCase().includes(q)) hits.push({ schema: sc });
+    if (Array.isArray(ns)) for (const t of ns) if (t.name.toLowerCase().includes(q) || `${t.schema}.${t.name}`.toLowerCase().includes(q)) hits.push(t);
+    if (!hits.length && Array.isArray(ns)) continue;
+    rows.push(dbRow(0, 'conn', '', KIND_ICON[c.kind], c.name, el('span', { className: 'tg', textContent: Array.isArray(ns) ? `${hits.length.toLocaleString()}개` : '' })));
+    if (ns === 'loading') rows.push(dbRow(1, 'msg', '', '', '테이블 목록 불러오는 중… (처음 한 번, 이후 캐시)'));
+    else if (ns?.error) rows.push(dbRow(1, 'msg err', '', '', ns.error));
+    for (const h of hits.slice(0, MAX)) {
+      const r = h.name
+        ? dbRow(1, '', '', h.type === 'view' ? '👁' : '▦', '')
+        : dbRow(1, '', '', '📂', '');
+      r.querySelector('.nm').replaceChildren(...(h.name ? [el('span', { className: 'sc', textContent: h.schema + '.' }), ...hlName(h.name, q)] : hlName(String(h.schema), q)));
+      r.title = h.name ? `${h.schema}.${h.name}
+클릭: 트리에서 보기 · 더블클릭: 데이터 보기` : `${h.schema}
+클릭: 트리에서 보기`;
+      r.onclick = () => dbReveal(c, h.schema, h.name);
+      if (h.name) r.ondblclick = async () => { try { const sql = (await api('GET', 'db/selectsql', { id: c.id, schema: h.schema, table: h.name })).sql; openSql(c, sql, true, { schema: h.schema, table: h.name, sql }); } catch (er) { toast(er.message); } };
+      first ||= r; rows.push(r);
+    }
+    if (hits.length > MAX) rows.push(dbRow(1, 'msg', '', '', `… ${(hits.length - MAX).toLocaleString()}개 더 (검색어를 더 구체적으로)`));
+  }
+  if (!rows.length) rows.push(el('div', { className: 'git-empty', textContent: '일치하는 스키마/테이블이 없습니다' }));
+  dbUi.first = first; box.replaceChildren(...rows);
+}
+async function dbReveal(c, schema, table) {   // 검색 결과 → 검색을 닫고 트리에서 펼쳐 선택
+  const ck = 'c:' + c.id, sk = `s:${c.id}:${schema}`;
+  dbUi.q = ''; $('#db-q').value = ''; dbUi.open.add(ck); dbUi.open.add(sk); dbUi.sel = table ? `t:${c.id}:${schema}:${table}` : sk;
+  if (!Array.isArray(dbUi.kids.get(ck))) await dbLoadKids(ck, c.id);
+  if (!Array.isArray(dbUi.kids.get(sk))) await dbLoadKids(sk, c.id, schema); else drawDb();
+  $('#db-list .dbr.sel')?.scrollIntoView({ block: 'center' });
+}
+{
+  let timer = 0; const inp = $('#db-q');
+  inp.oninput = () => { clearTimeout(timer); timer = setTimeout(() => { dbUi.q = inp.value.trim(); if (dbUi.q) dbSearchLoad(); drawDb(); }, 120); };
+  inp.onkeydown = (e) => {
+    if (e.key === 'Escape') { inp.value = ''; dbUi.q = ''; drawDb(); }
+    else if (e.key === 'Enter' && dbUi.q) { e.preventDefault(); dbUi.first?.onclick(); }
+  };
+}
 $('#btn-db-new').onclick = () => dbDialog(null);
 
 // 연결 추가/편집 대화상자
@@ -1882,6 +1951,7 @@ function dbDialog(c) {
   add('password', '비밀번호', txt('', edit && c.hasPassword ? '(변경하지 않으려면 비워 두세요)' : '', 'password'), '~/.shooting-star/db/secrets.json (권한 0600)에 저장됩니다');
   add('database', 'Database', txt(v.database, 'Trino: schema, Catalog 를 비우면 catalog 또는 catalog/schema'));
   add('catalog', 'Catalog', txt(v.catalog, '선택 — 비우면 Database 칸(catalog[/schema]) 또는 모든 catalog'));
+  add('schemas', '표시할 스키마', txt(v.schemas, '비우면 전부 · 예: sales, mart_*, !*_tmp'), '왼쪽 트리와 자동완성에 보일 스키마. 쉼표로 구분, * = 아무 글자, ! = 제외. SQL 실행에는 영향 없음');
   add('file', '파일', txt(v.file, '/경로/파일.db  (DuckDB 는 비우면 메모리)'));
   const chk = (val) => el('input', { type: 'checkbox', checked: !!val });
   add('ssl', 'SSL', chk(v.ssl)); add('https', 'HTTPS', chk(v.https));
@@ -1889,12 +1959,12 @@ function dbDialog(c) {
   const res = el('div', { className: 'res' }), bg = el('div', { className: 'dlg-bg' });
   const sync = () => {
     const k = dbUi.kinds[kind.value] || {}, file = !!k.file, trino = kind.value === 'trino';
-    const show = { host: !file, port: !file, user: !file, password: !file, database: !file, catalog: trino, file, ssl: !file && !trino, https: trino };
+    const show = { host: !file, port: !file, user: !file, password: !file, database: !file, catalog: trino, schemas: kind.value !== 'sqlite', file, ssl: !file && !trino, https: trino };
     for (const n of Object.keys(show)) for (const e of f[n + '_rows']) e.hidden = !show[n];
     if (!file && !f.port.value) f.port.placeholder = k.port || '';
   };
   kind.onchange = sync; sync();
-  const read = () => ({ id: c?.id, kind: kind.value, name: f.name.value.trim(), host: f.host.value.trim(), port: f.port.value.trim(), user: f.user.value, database: f.database.value.trim(), catalog: f.catalog.value.trim(), file: f.file.value.trim(), ssl: f.ssl.checked, https: f.https.checked, readOnly: f.readOnly.checked });
+  const read = () => ({ id: c?.id, kind: kind.value, name: f.name.value.trim(), host: f.host.value.trim(), port: f.port.value.trim(), user: f.user.value, database: f.database.value.trim(), catalog: f.catalog.value.trim(), schemas: f.schemas.value.trim(), file: f.file.value.trim(), ssl: f.ssl.checked, https: f.https.checked, readOnly: f.readOnly.checked });
   const say = (cls, t) => { res.className = 'res ' + cls; res.textContent = t; };
   const test = el('button', { textContent: '연결 테스트' }), save = el('button', { className: 'go', textContent: '저장', style: 'background:var(--accent);color:var(--bg);border-color:var(--accent)' }), cancel = el('button', { textContent: '취소' });
   const withDriver = async (fn) => {
@@ -1906,7 +1976,13 @@ function dbDialog(c) {
     }
   };
   test.onclick = async () => { test.disabled = true; say('', dbUi.kinds[kind.value]?.driver === 'missing' ? `${dbUi.kinds[kind.value].label} 드라이버를 자동 설치한 뒤 연결합니다… (처음 한 번, 최대 1~2분)` : '연결 중…'); try { const r = await withDriver(() => api('POST', 'db/test', {}, { conn: read(), password: f.password.value })); say('ok', `✓ 연결 성공 (${r.ms}ms)`); } catch (e) { say('err', e.message); } test.disabled = false; };
-  save.onclick = async () => { try { await api('PUT', 'db/connection', {}, { conn: read(), password: f.password.value }); bg.remove(); await loadDb(); } catch (e) { say('err', e.message); } };
+  save.onclick = async () => {
+    try {
+      const n = await api('PUT', 'db/connection', {}, { conn: read(), password: f.password.value }); bg.remove();
+      for (const k of [...dbUi.kids.keys()]) if (k.split(':')[1] === n.id) dbUi.kids.delete(k);   // 설정(스키마 필터 등)이 바뀌었으니 트리·자동완성 캐시를 버린다
+      dbMeta.names.delete(n.id); await loadDb(); if (dbUi.open.has('c:' + n.id)) dbLoadKids('c:' + n.id, n.id);
+    } catch (e) { say('err', e.message); }
+  };
   cancel.onclick = () => bg.remove();
   bg.onmousedown = (e) => { if (e.target === bg) bg.remove(); };
   bg.onkeydown = (e) => { if (e.key === 'Escape') bg.remove(); else if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') save.onclick(); };

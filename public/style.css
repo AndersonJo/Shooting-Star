@@ -480,8 +480,8 @@ table.csv tr:hover td { background: var(--accent-bg); }
 .mv-head span { flex: 1; }
 .mv-head button { font-size: 16px; color: var(--fg2); border: 0; padding: 0 6px; }
 .mv-head button:hover { color: var(--fg); background: none; }
-#memo-q { margin: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--bd); border-radius: 6px; padding: 5px 9px; font: 13px var(--sans); outline: 0; }
-#memo-q:focus { border-color: var(--accent); }
+#memo-q, #db-q { margin: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--bd); border-radius: 6px; padding: 5px 9px; font: 13px var(--sans); outline: 0; }
+#memo-q:focus, #db-q:focus { border-color: var(--accent); }
 #memo-list { flex: 1; overflow: auto; padding-bottom: 8px; }
 .memo { position: relative; padding: 7px 12px 7px 14px; cursor: pointer; border-left: 2px solid transparent; }
 .memo:hover { background: var(--hover); }
@@ -942,6 +942,8 @@ table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
 .dbr.col .tp { color: var(--fg2); font: 11px var(--mono); overflow: hidden; text-overflow: ellipsis; }
 .dbr.msg { color: var(--fg2); cursor: default; font-size: 12px; }
 .dbr.msg.err { color: var(--err); white-space: normal; }
+.dbr mark { background: var(--mark-bg); color: var(--mark-fg); border-radius: 2px; }
+.dbr .sc { color: var(--fg2); }
 .dbr .ib { border: 1px solid var(--bd); border-radius: 4px; padding: 0 6px; font-size: 11px; margin-left: 6px; }
 .dlg-bg { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 60; }
 .dlg { background: var(--bg); border: 1px solid var(--bd); border-radius: 8px; padding: 16px 18px; width: 440px; max-width: 92vw; max-height: 90vh; overflow: auto; box-shadow: 0 10px 40px rgba(0,0,0,.4); }

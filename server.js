@@ -664,7 +664,7 @@ async function api(req, res, url, root) {
     case 'POST /api/db/driver': // 드라이버 설치 (npm → ~/.shooting-star/drivers)
       return send(res, 200, await DB.installDriver(JSON.parse(await readBody(req)).kind));
     case 'GET /api/db/children':
-      return send(res, 200, { items: await DB.children(url.searchParams.get('id') || '', { schema: url.searchParams.get('schema') || undefined, table: url.searchParams.get('table') || undefined }) });
+      return send(res, 200, await DB.children(url.searchParams.get('id') || '', { schema: url.searchParams.get('schema') || undefined, table: url.searchParams.get('table') || undefined }));
     case 'GET /api/db/selectsql':
       return send(res, 200, { sql: DB.selectAll(url.searchParams.get('id') || '', url.searchParams.get('schema') || '', url.searchParams.get('table') || '') });
     case 'POST /api/db/query': {
@@ -680,7 +680,9 @@ async function api(req, res, url, root) {
     case 'POST /api/db/cancel':
       return send(res, 200, await DB.cancel(JSON.parse(await readBody(req)).id));
     case 'GET /api/db/names':
-      return send(res, 200, { items: await DB.names(url.searchParams.get('id') || '') });
+      return send(res, 200, await DB.names(url.searchParams.get('id') || ''));
+    case 'POST /api/db/cache/clear': // 메타데이터 캐시 버리기 (id 없으면 전체)
+      DB.clearCache(JSON.parse(await readBody(req)).id); return send(res, 200, { ok: true });
     case 'GET /api/db/keys':
       return send(res, 200, { pk: await DB.keys(url.searchParams.get('id') || '', url.searchParams.get('schema') || '', url.searchParams.get('table') || '') });
     case 'POST /api/db/update': {
