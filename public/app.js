@@ -521,8 +521,8 @@ window.addEventListener('pageshow', onActivate);
 window.onNativeActivate = onActivate;   // macOS 앱 껍데기에서 호출
 
 // ───────── 렌더링 ─────────
-function renderAll() { renderTabs(); renderToolbar(); renderContent(); renderTree(); validate(); }
-function renderChrome() { renderTabs(); renderToolbar(); renderTree(); validate(); }
+function renderAll() { renderTabs(); renderToolbar(); renderContent(); renderTree(); validate(); drawConsoles(); }
+function renderChrome() { renderTabs(); renderToolbar(); renderTree(); validate(); drawConsoles(); }
 
 function renderTabs() {
   const box = $('#tabs');
@@ -1792,7 +1792,7 @@ const KIND_ICON = { postgres: '🐘', mysql: '🐬', mariadb: '🦭', sqlite: '�
 async function loadDb() {
   try { const r = await api('GET', 'db/connections'); dbUi.conns = r.connections; dbUi.kinds = r.kinds; }
   catch (e) { $('#db-list').replaceChildren(el('div', { className: 'dbr msg err', textContent: 'DB 목록을 읽지 못했습니다: ' + e.message })); return; }
-  drawDb();
+  drawDb(); drawConsoles();
 }
 async function dbLoadKids(key, id, schema, table) {
   dbUi.kids.set(key, 'loading'); drawDb();
@@ -1996,6 +1996,56 @@ function dbDialog(c) {
 // SQL 콘솔 탭
 const READ_SQL = /^\s*(?:\/\*[\s\S]*?\*\/\s*|--[^\n]*\n\s*)*(select|with|show|describe|desc|explain|pragma|values|table|from)\b/i;
 const SQL_KW = ('SELECT FROM WHERE GROUP BY ORDER HAVING LIMIT OFFSET JOIN LEFT RIGHT INNER OUTER FULL CROSS ON AS AND OR NOT IN IS NULL LIKE ILIKE BETWEEN EXISTS CASE WHEN THEN ELSE END DISTINCT UNION ALL INSERT INTO VALUES UPDATE SET DELETE CREATE TABLE VIEW INDEX DROP ALTER ADD COLUMN PRIMARY KEY FOREIGN REFERENCES DEFAULT WITH EXPLAIN DESCRIBE SHOW COUNT SUM AVG MIN MAX COALESCE CAST ASC DESC TRUE FALSE USING OVER PARTITION').split(' ');
+// ───────── SQL 콘솔 목록 (DB 패널 아래): 탭을 닫아도 SQL 과 함께 남아서 다시 열 수 있다. 목록에서 삭제해야 사라진다
+var sqlCons, consReady = false;   // renderTabs 가 이 코드보다 먼저 불릴 수 있어 var + 지연 초기화
+const CONS_MAX = 200;
+const consList = () => (sqlCons ||= store.get('sqlConsoles', []));
+let consTimer = 0;
+const consSave = () => { clearTimeout(consTimer); consTimer = setTimeout(() => store.set('sqlConsoles', consList()), 300); };
+function consPut(t) {   // 열린 콘솔 탭 → 목록에 반영 (없으면 맨 위에 추가)
+  const L = consList(); let e = L.find((x) => x.path === t.path);
+  if (!e) { e = { path: t.path, connId: t.connId, n: t.n }; L.unshift(e); }
+  Object.assign(e, { sql: t.sql, meta: t.meta || null, at: Date.now() });
+  while (L.length > CONS_MAX) { const i = L.findLastIndex((x) => !tabOf(x.path)); if (i < 0) break; L.splice(i, 1); }   // 넘치면 오래된 닫힌 콘솔부터 정리
+  consSave();
+}
+async function consRemove(paths) {
+  for (const p of paths) if (tabOf(p) && !(await closeTab(p))) return;
+  sqlCons = consList().filter((x) => !paths.includes(x.path)); consSave(); drawConsoles();
+}
+function consOpen(e) {
+  const c = dbUi.conns.find((x) => x.id === e.connId); if (!c) return toast('연결이 삭제되었습니다. SQL 복사 후 다른 연결에서 쓰세요');
+  openSql(c, undefined, false, null, e.n);
+}
+function drawConsoles() {
+  const box = $('#db-cons'); if (!box || !consReady) return;
+  const L = consList(), open = L.filter((x) => tabOf(x.path)).length;
+  $('#db-cons-head span').textContent = ['콘솔', open && `열림 ${open}`, L.length - open && `닫힘 ${L.length - open}`].filter(Boolean).join(' · ');
+  if (box.hidden) return;
+  if (!L.length) { box.replaceChildren(el('div', { className: 'dbr msg', textContent: '콘솔이 없습니다. 연결을 더블클릭하면 SQL 콘솔이 열립니다' })); return; }
+  box.replaceChildren(...L.map((e) => {
+    const c = dbUi.conns.find((x) => x.id === e.connId), isOpen = !!tabOf(e.path);
+    const first = (e.sql || '').split('\n').map((l) => l.trim()).find(Boolean) || '(비어 있음)';
+    const r = dbRow(0, 'cons' + (state.active === e.path ? ' sel' : '') + (isOpen ? ' open' : ''), '', isOpen ? '●' : '○', (c?.name || '(삭제된 연결)') + (e.n > 1 ? ' #' + e.n : ''), el('span', { className: 'pv', textContent: first }));
+    r.title = `${isOpen ? '열림' : '닫힘'} · ${new Date(e.at || 0).toLocaleString()}\n\n${(e.sql || '').slice(0, 600)}\n\n클릭: ${isOpen ? '탭으로 이동' : '다시 열기'} · 우클릭: 닫기/삭제`;
+    r.onclick = () => consOpen(e);
+    r.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      showMenu(ev.clientX, ev.clientY, [
+        [isOpen ? '탭으로 이동' : '다시 열기', () => consOpen(e)],
+        ...(isOpen ? [['탭 닫기 (목록에는 남김)', () => closeTab(e.path)]] : []),
+        ['SQL 복사', () => copy(e.sql || '', 'SQL 복사됨')],
+        ['삭제', () => consRemove([e.path])],
+      ]);
+    };
+    return r;
+  }));
+}
+$('#db-cons-head').onclick = (e) => { if (e.target.closest('button')) return; const b = $('#db-cons'); b.hidden = !b.hidden; store.set('consHidden', b.hidden); $('#db-cons-head').classList.toggle('folded', b.hidden); drawConsoles(); };
+$('#btn-cons-clean').onclick = () => { const closed = consList().filter((x) => !tabOf(x.path)).map((x) => x.path); if (!closed.length) return toast('닫힌 콘솔이 없습니다'); if (confirm(`닫힌 콘솔 ${closed.length}개를 목록에서 삭제할까요?`)) consRemove(closed); };
+if (store.get('consHidden', false)) { $('#db-cons').hidden = true; $('#db-cons-head').classList.add('folded'); }
+consReady = true; drawConsoles();
+
 const dbMeta = { names: new Map(), cols: new Map() };   // 자동완성 캐시: 연결 → 테이블 이름들 / '연결:스키마.테이블' → 컬럼들
 function dbNamesOf(id, again) {
   if (!dbMeta.names.has(id)) { dbMeta.names.set(id, []); api('GET', 'db/names', { id }).then((r) => { dbMeta.names.set(id, r.items); again && again(); }).catch(() => {}); }
@@ -2041,12 +2091,13 @@ function caretXY(ta, pos) {   // textarea 안의 커서 위치(픽셀)를 거울
   d.textContent = ta.value.slice(0, pos); const sp = document.createElement('span'); sp.textContent = '​'; d.append(sp); document.body.append(d);
   const r = { x: sp.offsetLeft - ta.scrollLeft, y: sp.offsetTop - ta.scrollTop, h: parseFloat(cs.lineHeight) || 18 }; d.remove(); return r;
 }
-function openSql(c, sql, run, meta) {
-  let n = 1; while (tabOf(`@sql/${c.id}/${n}`) && !(sql === undefined && n === 1)) n++;   // 같은 연결의 콘솔은 하나를 재사용하고, 쿼리를 들고 열면 새 콘솔
-  if (sql === undefined) n = 1;
-  const p = `@sql/${c.id}/${n}`; let t = tabOf(p);
-  if (!t) { t = { path: p, kind: 'sql', connId: c.id, connName: c.name, readOnly: c.readOnly, n, content: '', orig: '', mtime: 0, mode: 'view', sql: sql ?? store.get('sql:' + c.id, ''), res: null, limit: store.get('sqlLimit', 1000), running: false, meta: meta || null, pend: new Map() }; state.tabs.push(t); }
+function openSql(c, sql, run, meta, n) {   // n: 콘솔 번호를 지정해 다시 열기 (콘솔 목록에서)
+  const pathOf = (k) => `@sql/${c.id}/${k}`;
+  if (n === undefined) { n = 1; if (sql !== undefined) while (tabOf(pathOf(n)) || consList().some((x) => x.path === pathOf(n))) n++; }   // 같은 연결의 콘솔 1 은 재사용하고, 쿼리를 들고 열면 새 콘솔
+  const p = pathOf(n), saved = consList().find((x) => x.path === p); let t = tabOf(p);
+  if (!t) { t = { path: p, kind: 'sql', connId: c.id, connName: c.name, readOnly: c.readOnly, n, content: '', orig: '', mtime: 0, mode: 'view', sql: sql ?? saved?.sql ?? store.get('sql:' + c.id, ''), res: null, limit: store.get('sqlLimit', 1000), running: false, meta: meta || saved?.meta || null, pend: new Map() }; state.tabs.push(t); }
   else if (sql !== undefined) { t.sql = sql; if (meta) t.meta = meta; }
+  consPut(t);
   state.active = p; state.selected = p; renderAll();
   if (t.dom) { const ta = t.dom.querySelector('textarea'); ta.value = t.sql; ta.dispatchEvent(new Event('input')); }
   if (run && t.run) t.run();
@@ -2137,7 +2188,7 @@ function sqlView(t) {
     let sql;
     if (page === undefined) {
       const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd); sql = (sel.trim() ? sel : ta.value).trim(); page = 0;
-      t.sql = ta.value; if (t.n === 1) store.set('sql:' + t.connId, t.sql);
+      t.sql = ta.value; consPut(t);
       if (!sql) return;
       if (!t.readOnly && !READ_SQL.test(sql) && !confirm('데이터를 변경할 수 있는 쿼리입니다. 실행할까요?\n\n' + sql.slice(0, 300))) return;
       t.total = null;
@@ -2188,7 +2239,7 @@ function sqlView(t) {
     hist.onclick = (ev) => ev.stopPropagation(); box.append(hist); q.focus(); loadHist('');
   };
 
-  ta.addEventListener('input', () => { t.sql = ta.value; if (t.n === 1) store.set('sql:' + t.connId, t.sql); paint(); if (document.activeElement === ta) acShow(false); });
+  ta.addEventListener('input', () => { t.sql = ta.value; consPut(t); paint(); if (document.activeElement === ta) acShow(false); });
   ta.addEventListener('blur', () => setTimeout(closeAc, 120));
   ta.addEventListener('click', closeAc);
   ta.addEventListener('keydown', (e) => {
