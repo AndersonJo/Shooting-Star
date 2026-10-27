@@ -966,8 +966,13 @@ table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
 .dlg .res.ok { color: var(--ok); } .dlg .res.err { color: var(--err); }
 .sq { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .sq { position: relative; }
-.sq-edwrap { flex: none; height: 36%; min-height: 70px; resize: vertical; overflow: hidden; border-bottom: 1px solid var(--bd); }
-.sq-bar { flex: none; display: flex; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--bd); background: var(--bg2); font-size: 12px; }
+.sq-edwrap { flex: none; height: 36%; min-height: 70px; overflow: hidden; border-bottom: 1px solid var(--bd); }
+.sq-bar { flex: none; display: flex; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--bd); background: var(--bg2); font-size: 12px; cursor: row-resize; position: relative; }
+.sq-bar::before { content: ''; position: absolute; left: 50%; top: 2px; width: 36px; height: 3px; margin-left: -18px; border-radius: 2px; background: var(--bd); }   /* 끌 수 있다는 표시 */
+.sq-bar:hover::before { background: var(--fg2); }
+.sq-bar button, .sq-bar select, .sq-bar .st, .sq-bar .pg { cursor: default; }
+.sq-bar button { cursor: pointer; }
+body.row-resizing, body.row-resizing * { cursor: row-resize !important; user-select: none !important; }
 .sq-bar button.go { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; padding: 2px 12px; }
 .sq-bar .sp { flex: 1; }
 .sq-bar .st { color: var(--fg2); font-family: var(--mono); }

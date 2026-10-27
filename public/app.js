@@ -2257,6 +2257,19 @@ function sqlView(t) {
   const bar = el('div', { className: 'sq-bar' }, go, stop, lim, pager, csvBtn, histBtn, st, hint, apply, revert, el('span', { className: 'sp' }), el('span', { className: 'st', textContent: (t.readOnly ? '🔒 읽기 전용 · ' : '') + t.connName }));
   const box = el('div', { className: 'sq' }, edwrap, bar, out);
   box.addEventListener('click', closeHist);
+  // 실행 버튼 줄을 위아래로 끌어 편집기/결과 높이를 조절 (버튼·입력 위가 아닌 빈 곳에서). 높이는 기억해 두고 다른 콘솔에도 적용
+  const edH = store.get('sqlEdH', 0); if (edH) edwrap.style.height = edH + 'px';
+  bar.title = '빈 곳을 위아래로 끌면 편집기/결과 높이 조절 · 더블클릭: 기본 높이';
+  bar.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.target.closest('button, select, input, a, .pg')) return;
+    e.preventDefault();
+    const y0 = e.clientY, h0 = edwrap.offsetHeight, max = box.clientHeight - bar.offsetHeight - 60;
+    document.body.classList.add('row-resizing');
+    const move = (ev) => { edwrap.style.height = Math.max(70, Math.min(max, h0 + ev.clientY - y0)) + 'px'; };
+    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); document.body.classList.remove('row-resizing'); store.set('sqlEdH', edwrap.offsetHeight); };
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+  });
+  bar.addEventListener('dblclick', (e) => { if (e.target.closest('button, select, input, a, .pg')) return; edwrap.style.height = ''; store.set('sqlEdH', 0); });
   if (t.res) show(t.res); else paintEdits();
   t.dom = box; paintBtns(); paint();
   setTimeout(() => ta.focus(), 0);
