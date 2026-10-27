@@ -1880,8 +1880,8 @@ function dbDialog(c) {
   add('port', 'Port', txt(v.port, ''));
   add('user', '사용자', txt(v.user));
   add('password', '비밀번호', txt('', edit && c.hasPassword ? '(변경하지 않으려면 비워 두세요)' : '', 'password'), '~/.shooting-star/db/secrets.json (권한 0600)에 저장됩니다');
-  add('database', 'Database', txt(v.database, 'Trino 는 schema (선택)'));
-  add('catalog', 'Catalog', txt(v.catalog, '선택 — 비우면 모든 catalog'));
+  add('database', 'Database', txt(v.database, 'Trino: schema, Catalog 를 비우면 catalog 또는 catalog/schema'));
+  add('catalog', 'Catalog', txt(v.catalog, '선택 — 비우면 Database 칸(catalog[/schema]) 또는 모든 catalog'));
   add('file', '파일', txt(v.file, '/경로/파일.db  (DuckDB 는 비우면 메모리)'));
   const chk = (val) => el('input', { type: 'checkbox', checked: !!val });
   add('ssl', 'SSL', chk(v.ssl)); add('https', 'HTTPS', chk(v.https));

@@ -44,7 +44,7 @@ function normalize(c) {
   else {
     if (!c.host) throw err('host 가 필요합니다');
     Object.assign(out, { host: String(c.host), port: Number(c.port) || k.port, user: String(c.user || ''), database: String(c.database || '') });
-    if (c.kind === 'trino') { out.catalog = String(c.catalog || ''); out.https = !!c.https; }   // catalog 는 선택: 비우면 모든 catalog 를 보여 주고 SQL 에서 catalog.schema.table 로 쓴다
+    if (c.kind === 'trino') { out.https = !!c.https; Object.assign(out, trinoCat(c.catalog, out.database)); }   // catalog 는 선택: 비우면 모든 catalog 를 보여 주고 SQL 에서 catalog.schema.table 로 쓴다
     if (c.ssl) out.ssl = true;
   }
   return out;
@@ -198,9 +198,12 @@ async function openDuckdb(c) {
 async function openTrino(c) {
   const base = `${c.https ? 'https' : 'http'}://${c.host}:${c.port}`;
   const pw = pwOf(c);
-  const headers = { 'X-Trino-User': c.user || os.userInfo().username, ...(c.catalog ? { 'X-Trino-Catalog': c.catalog, ...(c.database ? { 'X-Trino-Schema': c.database } : {}) } : {}), 'User-Agent': 'shooting-star' };
+  const { catalog, database } = trinoCat(c.catalog, c.database);
+  const headers = { 'X-Trino-User': c.user || os.userInfo().username, ...(catalog ? { 'X-Trino-Catalog': catalog, ...(database ? { 'X-Trino-Schema': database } : {}) } : {}), 'User-Agent': 'shooting-star' };
   if (pw) headers.Authorization = 'Basic ' + Buffer.from(`${c.user}:${pw}`).toString('base64');
   let ctl = null, nextUri = null;
+  // TLS 를 앞단(게이트웨이/LB)에서 끝내면 서버가 nextUri 를 http:// 로 돌려줄 수 있다 → 같은 호스트면 접속한 주소 기준으로 고친다
+  const fix = (u) => { try { const x = new URL(u); if (x.hostname === c.host) { const b = new URL(base); x.protocol = b.protocol; x.port = b.port; } return x.href; } catch { return u; } };
   const req = (url, opt) => { const t = setTimeout(() => ctl.abort(), 30000); return fetch(url, { ...opt, headers, signal: ctl.signal }).finally(() => clearTimeout(t)); };
   return {
     async query(sql, { limit }) {
@@ -209,20 +212,20 @@ async function openTrino(c) {
       try { res = await req(base + '/v1/statement', { method: 'POST', body: sql }); } catch (e) { throw err(ctl.signal.aborted ? '취소되었거나 시간이 초과되었습니다' : e.message, 400); }
       let columns = [], rows = [];
       for (;;) {
-        const j = await res.json().catch(() => ({}));
-        if (!res.ok && !j.error) throw err(`Trino HTTP ${res.status}`, 502);
+        const text = await res.text().catch(() => ''); let j = {}; try { j = JSON.parse(text); } catch {}
+        if (!res.ok && !j.error) throw err(`Trino HTTP ${res.status}${text.trim() ? ': ' + text.trim().replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 400) : ''}`, 502);
         if (j.error) throw err(j.error.message || 'Trino 오류', 400);
         if (j.columns && !columns.length) columns = j.columns.map((x) => x.name);
         if (j.data) rows.push(...j.data);
         nextUri = j.nextUri || null;
         if (rows.length > limit || !j.nextUri) break;
         await new Promise((r) => setTimeout(r, j.data ? 0 : 150));
-        try { res = await req(j.nextUri, {}); } catch (e) { throw err(ctl.signal.aborted ? '취소되었거나 시간이 초과되었습니다' : e.message, 400); }
+        try { res = await req(fix(j.nextUri), {}); } catch (e) { throw err(ctl.signal.aborted ? '취소되었거나 시간이 초과되었습니다' : e.message, 400); }
       }
-      if (nextUri) fetch(nextUri, { method: 'DELETE', headers }).catch(() => {});   // 남은 결과는 서버에서 정리
+      if (nextUri) fetch(fix(nextUri), { method: 'DELETE', headers }).catch(() => {});   // 남은 결과는 서버에서 정리
       return { columns, rows: rows.slice(0, limit + 1), affected: columns.length ? undefined : 0 };
     },
-    async cancel() { ctl?.abort(); if (nextUri) await fetch(nextUri, { method: 'DELETE', headers }).catch(() => {}); },
+    async cancel() { ctl?.abort(); if (nextUri) await fetch(fix(nextUri), { method: 'DELETE', headers }).catch(() => {}); },
     close() {},
   };
 }
@@ -320,16 +323,24 @@ const SYS = {
   postgres: ['pg_catalog', 'information_schema', 'pg_toast'], mysql: ['information_schema', 'mysql', 'performance_schema', 'sys'], mariadb: ['information_schema', 'mysql', 'performance_schema', 'sys'],
   duckdb: ['information_schema', 'pg_catalog'], trino: ['information_schema'],
 };
+// Trino: JDBC(jdbc:trino://host/catalog/schema)·DBeaver 처럼 Database 칸에 'catalog' 나 'catalog/schema' 를 적으면 catalog 로 쓴다
+function trinoCat(catalog, database) {
+  catalog = String(catalog || '').trim(); database = String(database || '').trim();
+  if (catalog || !database) return { catalog, database };
+  const [cat, ...rest] = database.split(/[/.]/);
+  return { catalog: cat, database: rest.join('.') };
+}
 // Trino 에서 catalog 를 비워 두면 트리의 스키마 이름이 'catalog.schema' 가 된다 → information_schema 앞에 붙일 catalog 와 실제 스키마로 나눈다
 function trinoScope(c, schema) {
   if (c.kind !== 'trino') return { cat: '', schema };
-  if (c.catalog) return { cat: qid('trino', c.catalog) + '.', schema };
+  const { catalog } = trinoCat(c.catalog, c.database);
+  if (catalog) return { cat: qid('trino', catalog) + '.', schema };
   const i = String(schema ?? '').indexOf('.');
   return i < 0 ? { cat: '', schema } : { cat: qid('trino', schema.slice(0, i)) + '.', schema: schema.slice(i + 1) };
 }
 async function children(ref, { schema: s0, table } = {}) {
   const c = findConn(ref), kind = c.kind, q = (sql) => query(c, sql, { limit: 5000, force: true, internal: true }).then((r) => r.rows);
-  if (kind === 'trino' && !c.catalog && !s0) return (await q("SELECT table_cat, table_schem FROM system.jdbc.schemas WHERE table_schem <> 'information_schema' ORDER BY 1, 2")).map(([ct, sc]) => ({ name: `${ct}.${sc}`, type: 'schema' }));
+  if (kind === 'trino' && !trinoCat(c.catalog, c.database).catalog && !s0) return (await q("SELECT table_cat, table_schem FROM system.jdbc.schemas WHERE table_schem <> 'information_schema' ORDER BY 1, 2")).map(([ct, sc]) => ({ name: `${ct}.${sc}`, type: 'schema' }));
   const { cat, schema } = trinoScope(c, s0);
   if (kind === 'sqlite') {
     if (!schema) return [{ name: 'main', type: 'schema' }];
@@ -348,7 +359,7 @@ async function children(ref, { schema: s0, table } = {}) {
 async function names(ref) {   // 자동완성용: 모든 테이블/뷰 이름
   const c = findConn(ref), kind = c.kind, q = (sql) => query(c, sql, { limit: 5000, force: true, internal: true }).then((r) => r.rows);
   if (kind === 'sqlite') return (await q("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")).map(([name, type]) => ({ schema: 'main', name, type }));
-  if (kind === 'trino' && !c.catalog) return (await q("SELECT table_cat, table_schem, table_name, table_type FROM system.jdbc.tables WHERE table_schem <> 'information_schema' ORDER BY 1, 2, 3")).map(([ct, sc, name, tt]) => ({ schema: `${ct}.${sc}`, name, type: /view/i.test(tt) ? 'view' : 'table' }));
+  if (kind === 'trino' && !trinoCat(c.catalog, c.database).catalog) return (await q("SELECT table_cat, table_schem, table_name, table_type FROM system.jdbc.tables WHERE table_schem <> 'information_schema' ORDER BY 1, 2, 3")).map(([ct, sc, name, tt]) => ({ schema: `${ct}.${sc}`, name, type: /view/i.test(tt) ? 'view' : 'table' }));
   const { cat } = trinoScope(c);
   const sys = (SYS[kind] || []).map(lit).join(','), cw = kind === 'duckdb' ? ' AND table_catalog = current_database()' : '';
   return (await q(`SELECT table_schema, table_name, table_type FROM ${cat}information_schema.tables WHERE table_schema NOT IN (${sys || "''"})${cw} ORDER BY 1, 2`)).map(([schema, name, tt]) => ({ schema, name, type: /view/i.test(tt) ? 'view' : 'table' }));
@@ -389,7 +400,7 @@ async function updateRows(ref, schema, table, changes) {
   return { applied: stmts.length };
 }
 const selectAll = (ref, schema, table, limit = 100) => {
-  const c = findConn(ref), k = c.kind, sc = k === 'trino' && !c.catalog ? String(schema || '').split('.').map((x) => qid(k, x)).join('.') : schema && qid(k, schema), t = (schema && k !== 'sqlite' ? sc + '.' : '') + qid(k, table);
+  const c = findConn(ref), k = c.kind, sc = k === 'trino' && !trinoCat(c.catalog, c.database).catalog ? String(schema || '').split('.').map((x) => qid(k, x)).join('.') : schema && qid(k, schema), t = (schema && k !== 'sqlite' ? sc + '.' : '') + qid(k, table);
   return `SELECT * FROM ${t} LIMIT ${limit}`;
 };
 

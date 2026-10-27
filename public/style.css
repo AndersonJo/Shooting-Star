@@ -908,7 +908,7 @@ table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
 .rh .rc.ok { color: var(--ok); } .rh .rc.fail { color: var(--err); }
 .rh .rn2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
 .rh .rw { flex: none; color: var(--fg2); font-size: 11px; }
-.rv { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
+.rv { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
 .rv-top { flex: none; padding: 14px 18px 10px; border-bottom: 1px solid var(--bd); overflow: auto; max-height: 55%; }
 .rv-title { font: 600 16px var(--mono); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .rv-title .danger { font: 600 11px var(--sans); color: var(--err); border: 1px solid var(--err); border-radius: 9px; padding: 0 6px; }
@@ -953,7 +953,7 @@ table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
 .dlg .btns .sp { flex: 1; }
 .dlg .res { margin-top: 10px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 .dlg .res.ok { color: var(--ok); } .dlg .res.err { color: var(--err); }
-.sq { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.sq { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .sq { position: relative; }
 .sq-edwrap { flex: none; height: 36%; min-height: 70px; resize: vertical; overflow: hidden; border-bottom: 1px solid var(--bd); }
 .sq-bar { flex: none; display: flex; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--bd); background: var(--bg2); font-size: 12px; }
