@@ -2372,7 +2372,7 @@ function markDom(root, re0, limit = 5000) {
   }
   return marks;
 }
-function runFileFind(fresh) {
+function runFileFind(fresh) { // fresh=false: 내용이 바뀌어 표시만 다시 (입력 중엔 일치 위치로 스크롤하지 않는다)
   if (!fb.open) return;
   store.set('fbq', fb.q);
   const ta = $('textarea.editor'), pv = $(FIND_ROOTS), re = fbRegex();
@@ -2389,21 +2389,21 @@ function runFileFind(fresh) {
     fb.idx = fresh || fb.idx < 0 ? 0 : Math.min(fb.idx, fb.matches.length - 1);
   }
   if (!fb.matches.length) fb.idx = -1; else if (fb.idx < 0) fb.idx = 0;
-  gotoFind(fb.idx);
+  gotoFind(fb.idx, fresh);
 }
 function drawFindCount(re) {
   const c = $('#fb-count'); const n = fb.matches.length;
   c.classList.toggle('none', (!!fb.q && !n) || re === 'bad');
   c.textContent = re === 'bad' ? '정규식 오류' : !fb.q ? '' : n ? `${fb.idx + 1}/${n}${n >= 10000 ? '+' : ''}` : '결과 없음';
 }
-function gotoFind(i) {
+function gotoFind(i, scroll = true) {
   const n = fb.matches.length; fb.idx = n ? ((i % n) + n) % n : -1; drawFindCount();
   const m = fb.matches[fb.idx]; if (!m) { renderFM(); return; }
   if (fb.dom) {
     document.querySelectorAll(FIND_ROOTS.replace(/,|$/g, ' mark.fmd.cur$&')).forEach((x) => x.classList.remove('cur'));
-    m.classList.add('cur'); m.scrollIntoView({ block: 'center', inline: 'nearest' });
+    m.classList.add('cur'); if (scroll) m.scrollIntoView({ block: 'center', inline: 'nearest' });
   } else {
-    renderFM();
+    renderFM(); if (!scroll) return;
     const ta = $('textarea.editor'), lines = ta.value.slice(0, m.s).split('\n');
     taScrollTo(ta, ta.value.split('\n'), lines.length, lines.at(-1).length);
   }
@@ -2614,7 +2614,12 @@ function listEnter(e, ta) {
   const m = /^(\s*)([-*+]|\d+[.)])(\s+)(\[[ xX]\]\s+)?(.*)$/.exec(v.slice(ls, le));
   if (!m || s < ls + m[1].length + m[2].length + m[3].length) return false;   // 기호 앞/안에서는 평소 Enter
   e.preventDefault();
-  if (!m[5].trim() && s >= le) { ta.setSelectionRange(ls, le); document.execCommand('insertText', false, ''); return true; }
+  if (!m[5].trim() && s >= le) { // 빈 항목에서 Enter: 기호를 지우고 빈 줄로 (목록 끝내기)
+    // 빈 문자열 insertText 는 WebKit 에서 줄 전체를 지우며 앞 줄과 합쳐 버린다 → 앞 줄바꿈까지 골라 '\n' 으로 바꾼다
+    if (ls > 0) { ta.setSelectionRange(ls - 1, le); document.execCommand('insertText', false, '\n'); }
+    else { ta.setSelectionRange(0, le); document.execCommand('delete'); }
+    return true;
+  }
   const marker = /^\d+/.test(m[2]) ? `${parseInt(m[2], 10) + 1}${m[2].slice(-1)}` : m[2];
   document.execCommand('insertText', false, '\n' + m[1] + marker + m[3] + (m[4] ? '[ ] ' : ''));
   return true;
