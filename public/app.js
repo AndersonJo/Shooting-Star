@@ -956,11 +956,22 @@ $('#btn-new-file').onclick = () => createEntry(state.selected && !tabOf(state.se
 $('#btn-new-dir').onclick = () => createEntry(dirOf(state.selected || ''), true);
 
 // ───────── 빠른 열기 (⌘P) ─────────
-const pal = { files: null, items: [], sel: 0 };
+const pal = { files: null, items: [], sel: 0, dir: '', inDir: false };
 async function openPalette() {
   $('#palette').hidden = false; const inp = $('#pal-input'); inp.value = ''; inp.focus();
-  pal.files = await api('GET', 'files'); filterPalette('');
+  pal.dir = dirOfSel(); setPalScope(store.get('palInDir', false));
+  pal.files = await api('GET', 'files'); filterPalette(inp.value);
 }
+// 검색 범위: 전체 | 트리에서 선택한 폴더 (폴더가 없으면 전체). 내용 검색의 범위 버튼과 같은 동작
+function setPalScope(inDir) {
+  pal.inDir = inDir && !!pal.dir;
+  $('#pal-all').classList.toggle('on', !pal.inDir); $('#pal-dir').classList.toggle('on', pal.inDir);
+  $('#pal-dir').textContent = '📁 ' + (pal.dir ? pal.dir.split('/').pop() : '선택한 폴더'); $('#pal-dir').title = pal.dir || '트리에서 폴더를 선택하세요';
+  $('#pal-dir').disabled = !pal.dir; $('#pal-input').placeholder = pal.inDir ? pal.dir + ' 안에서 파일 이름 검색…' : '파일 이름 검색…';
+  if (pal.files) filterPalette($('#pal-input').value);
+}
+const pickPalScope = (inDir) => { store.set('palInDir', inDir); setPalScope(inDir); $('#pal-input').focus(); };
+$('#pal-all').onclick = () => pickPalScope(false); $('#pal-dir').onclick = () => pickPalScope(true);
 // 파일 이름 중심 검색 (PyCharm 의 Search Everywhere 와 비슷):
 // 이름 접두 > 이름 내 부분일치(단어 경계 우선) > 이름 내 글자 순서 일치 > 경로 부분일치. 경로 전체에 흩뿌린 매칭은 제외.
 function matchFile(q, f) {
@@ -986,11 +997,17 @@ function matchFile(q, f) {
   return k >= 0 ? { tier: 4, pos: range(k, ql.length) } : null;
 }
 function filterPalette(q) {
-  const recent = state.tabs.map((t) => t.path).filter((p) => !isMemo(p));
+  const pre = pal.inDir ? pal.dir + '/' : '', inScope = (f) => f.startsWith(pre);
+  const recent = state.tabs.map((t) => t.path).filter((p) => !isMemo(p) && inScope(p));
+  const files = pal.files.filter(inScope);
+  const match = (f) => { // 범위 폴더 이름 자체가 경로 일치로 잡히지 않도록 범위 아래 경로로만 비교
+    const m = matchFile(q, f.slice(pre.length));
+    return m && { ...m, pos: m.pos.map((p) => p + pre.length) };
+  };
   const res = q
-    ? pal.files.map((f) => ({ f, m: matchFile(q, f) })).filter((x) => x.m)
+    ? files.map((f) => ({ f, m: match(f) })).filter((x) => x.m)
         .sort((a, b) => a.m.tier - b.m.tier || a.f.length - b.f.length || a.f.localeCompare(b.f)).slice(0, 80)
-    : [...recent, ...pal.files.filter((f) => !recent.includes(f))].slice(0, 80).map((f) => ({ f, m: { pos: [] } }));
+    : [...recent, ...files.filter((f) => !recent.includes(f))].slice(0, 80).map((f) => ({ f, m: { pos: [] } }));
   pal.items = res; pal.sel = 0; drawPalette();
 }
 function drawPalette() {
@@ -1016,6 +1033,7 @@ const closePalette = () => { $('#palette').hidden = true; };
 $('#pal-input').oninput = (e) => filterPalette(e.target.value);
 $('#pal-input').onkeydown = (e) => {
   if (e.key === 'Escape') closePalette();
+  else if (e.key === 'Tab') { e.preventDefault(); if (pal.dir) pickPalScope(!pal.inDir); }
   else if (e.key === 'ArrowDown' || (e.ctrlKey && e.key.toLowerCase() === 'n')) { e.preventDefault(); pal.sel = Math.min(pal.sel + 1, pal.items.length - 1); drawPalette(); }
   else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key.toLowerCase() === 'p')) { e.preventDefault(); pal.sel = Math.max(pal.sel - 1, 0); drawPalette(); }
   else if (e.key === 'PageDown') { e.preventDefault(); pal.sel = Math.min(pal.sel + 8, pal.items.length - 1); drawPalette(); }
