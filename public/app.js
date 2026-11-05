@@ -925,7 +925,7 @@ $('#tree').addEventListener('contextmenu', (ev) => {
 });
 // ───────── 암호화 문서 ─────────
 // 암호는 이 페이지의 메모리에만 둔다 (디스크/localStorage 에 저장하지 않음). 앱을 닫거나 새로고침하면, 또는 한동안 쓰지 않으면 잊는다.
-const VAULT_IDLE_MS = 30 * 60 * 1000, PASS_MIN = 8;
+const VAULT_IDLE_MS = 30 * 60 * 1000, PASS_MIN = 5;
 const vault = { pass: null, used: Date.now() };
 for (const ev of ['keydown', 'mousedown']) document.addEventListener(ev, () => { vault.used = Date.now(); }, true);
 function askPassword(title, { confirm: twice = false, note = '' } = {}) { // 입력한 암호, 취소하면 null
