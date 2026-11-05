@@ -337,6 +337,30 @@ async function doUpdate(job) {
   if (job.relaunchApp) relaunchApp(job.relaunchApp); else if (job.restart) restartServer();
 }
 
+// ───────── 암호화 문서 (*.enc) ─────────
+// git 에 평문이 올라가지 않도록 문서 전체를 암호화해서 저장한다. 암호는 요청 헤더로만 받고 서버에 남기지 않는다.
+// 형식: MAGIC | salt(16) | iv(12) | tag(16) | 암호문. scrypt 로 키를 만들고 AES-256-GCM 으로 암호화 (머리글도 인증). NUL 이 있어 git 은 바이너리로 다룬다.
+const ENC_MAGIC = Buffer.from('SSENC\0\x01', 'latin1'), ENC_HEAD = ENC_MAGIC.length + 16 + 12, ENC_MIN = ENC_HEAD + 16;
+const isEncPath = (p) => String(p).endsWith('.enc');
+const passOf = (req) => { const v = req.headers['x-ss-pass']; if (!v) throw httpError(423, 'locked'); return decodeURIComponent(v); };
+const encKey = (pass, salt) => new Promise((resolve, reject) => crypto.scrypt(pass.normalize('NFC'), salt, 32, { N: 2 ** 16, r: 8, p: 1, maxmem: 96 * 1048576 }, (e, k) => (e ? reject(e) : resolve(k))));
+async function encryptDoc(text, pass) {
+  const salt = crypto.randomBytes(16), iv = crypto.randomBytes(12), head = Buffer.concat([ENC_MAGIC, salt, iv]);
+  const c = crypto.createCipheriv('aes-256-gcm', await encKey(pass, salt), iv); c.setAAD(head);
+  const body = Buffer.concat([c.update(text, 'utf8'), c.final()]);
+  return Buffer.concat([head, c.getAuthTag(), body]);
+}
+async function decryptDoc(buf, pass) {
+  if (buf.length < ENC_MIN || !buf.subarray(0, ENC_MAGIC.length).equals(ENC_MAGIC)) throw httpError(415, 'shooting-star 암호화 파일이 아닙니다');
+  const salt = buf.subarray(ENC_MAGIC.length, ENC_MAGIC.length + 16), iv = buf.subarray(ENC_MAGIC.length + 16, ENC_HEAD);
+  const d = crypto.createDecipheriv('aes-256-gcm', await encKey(pass, salt), iv); d.setAAD(buf.subarray(0, ENC_HEAD)); d.setAuthTag(buf.subarray(ENC_HEAD, ENC_MIN));
+  try { return Buffer.concat([d.update(buf.subarray(ENC_MIN)), d.final()]).toString('utf8'); } catch { throw httpError(401, '암호가 맞지 않습니다'); }
+}
+async function writeAtomic(abs, buf) { // 쓰다 끊겨도 암호문이 깨지지 않도록 (깨지면 복구할 수 없다)
+  const tmp = `${abs}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try { await fsp.writeFile(tmp, buf, { flag: 'wx' }); await fsp.rename(tmp, abs); } catch (e) { await fsp.rm(tmp, { force: true }).catch(() => {}); throw e; }
+}
+
 // ───────── 파일 인덱스 ─────────
 // 워크스페이스를 열면 백그라운드로 파일 목록을 인덱싱하고, fs.watch 이벤트가 알려 준 경로만 증분 갱신한다.
 // 검색 팝업은 디스크를 다시 훑지 않고 이 메모리 인덱스를 바로 쓴다.
@@ -846,6 +870,7 @@ async function api(req, res, url, root) {
       if (!st.isFile()) throw httpError(400, 'not a file');
       if (st.size > MAX_SIZE) throw httpError(413, 'file too large (>5MB)');
       const buf = await fsp.readFile(abs);
+      if (isEncPath(abs)) return send(res, 200, { content: st.size ? await decryptDoc(buf, passOf(req)) : '', mtime: st.mtimeMs, size: st.size });
       if (buf.subarray(0, 8000).includes(0)) throw httpError(415, 'binary file');
       return send(res, 200, { content: buf.toString('utf8'), mtime: st.mtimeMs, size: st.size });
     }
@@ -859,8 +884,31 @@ async function api(req, res, url, root) {
           if (Math.abs(st.mtimeMs - mtime) > 1) throw httpError(409, 'file changed on disk');
         } catch (e) { if (e.status) throw e; }
       }
-      await fsp.writeFile(abs, content, 'utf8');
+      if (isEncPath(abs)) await writeAtomic(abs, await encryptDoc(content, passOf(req)));   // 암호 없이는 쓰지 않는다 (평문이 디스크에 남지 않도록)
+      else await fsp.writeFile(abs, content, 'utf8');
       return send(res, 200, { mtime: (await fsp.stat(abs)).mtimeMs });
+    }
+    case 'POST /api/crypt/lock': { // 평문 문서 → <이름>.enc (다시 풀어 본 뒤에 원본을 지운다)
+      const abs = resolveSafe(root, p), dest = abs + '.enc', pass = passOf(req);
+      if (isEncPath(abs)) throw httpError(400, '이미 암호화된 파일입니다');
+      const st = await fsp.stat(abs);
+      if (!st.isFile()) throw httpError(400, 'not a file');
+      if (st.size > MAX_SIZE) throw httpError(413, 'file too large (>5MB)');
+      if (fs.existsSync(dest)) throw httpError(409, 'target exists');
+      const buf = await fsp.readFile(abs);
+      if (buf.subarray(0, 8000).includes(0)) throw httpError(415, 'binary file');
+      const enc = await encryptDoc(buf.toString('utf8'), pass);
+      if (await decryptDoc(enc, pass) !== buf.toString('utf8')) throw httpError(500, '암호화 검증 실패');
+      await writeAtomic(dest, enc); await fsp.rm(abs); markDirty(root);
+      return send(res, 200, { path: p + '.enc', mtime: (await fsp.stat(dest)).mtimeMs });
+    }
+    case 'POST /api/crypt/unlock': { // <이름>.enc → 평문 문서
+      const abs = resolveSafe(root, p), dest = abs.slice(0, -4);
+      if (!isEncPath(abs)) throw httpError(400, '암호화된 파일이 아닙니다');
+      if (fs.existsSync(dest)) throw httpError(409, 'target exists');
+      const text = await decryptDoc(await fsp.readFile(abs), passOf(req));
+      await fsp.writeFile(dest, text, { flag: 'wx' }); await fsp.rm(abs); markDirty(root);
+      return send(res, 200, { path: p.slice(0, -4), mtime: (await fsp.stat(dest)).mtimeMs });
     }
     case 'POST /api/create': {
       const abs = resolveSafe(root, p);
@@ -896,6 +944,7 @@ async function api(req, res, url, root) {
       const { to } = JSON.parse(await readBody(req));
       const from = resolveSafe(root, p), dest = resolveSafe(root, to);
       if (fs.existsSync(dest)) throw httpError(409, 'target exists');
+      if (isEncPath(from) !== isEncPath(dest)) throw httpError(400, '.enc 는 이름 변경으로 붙이거나 뗄 수 없습니다 (암호화 / 암호 해제 메뉴를 쓰세요)');
       await fsp.rename(from, dest); markDirty(root);
       return send(res, 200, { ok: true });
     }

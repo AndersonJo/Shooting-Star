@@ -16,8 +16,9 @@ const store = {
 };
 
 const ROOT_Q = new URLSearchParams(location.search).get('root');
-async function api(method, route, params = {}, body, signal) {
+async function api(method, route, { pass, ...params } = {}, body, signal) {
   let rootDir = ROOT_Q;
+  const pw = pass ?? (isEnc(params.path) ? tabOf(params.path)?.pass : null);   // 암호는 탭별로 들고 다닌다 (문서마다 암호가 달라도 다른 암호로 덮어쓰지 않도록)
   if (typeof params.path === 'string' && params.path.startsWith('@memo/')) { // 메모는 ~/.shooting-star/memos 를 루트로 접근
     rootDir = state.memoDir; params = { ...params, path: params.path.slice(6) };
     if (body && typeof body.to === 'string') body = { ...body, to: body.to.replace(/^@memo\//, '') };
@@ -29,7 +30,7 @@ async function api(method, route, params = {}, body, signal) {
   const qs = new URLSearchParams(params).toString();
   const res = await fetch(`/api/${route}${qs ? '?' + qs : ''}`, {
     method,
-    headers: { 'X-SS': '1', ...(rootDir ? { 'X-SS-Root': encodeURIComponent(rootDir) } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { 'X-SS': '1', ...(rootDir ? { 'X-SS-Root': encodeURIComponent(rootDir) } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...(pw ? { 'X-SS-Pass': encodeURIComponent(pw) } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     signal,
   });
@@ -40,6 +41,7 @@ async function api(method, route, params = {}, body, signal) {
 
 // 경로 종류: '@memo/x' = 메모 폴더, '@ext/Users/a/b.md' = 워크스페이스 밖의 파일(절대경로), 그 외 = 워크스페이스 기준 상대경로
 function isExt(p) { return typeof p === 'string' && p.startsWith('@ext/'); }
+function isEnc(p) { return typeof p === 'string' && p.endsWith('.enc'); }   // 암호화 문서: <원래 이름>.enc
 function rootRel(p) { return isMemo(p) ? { root: state.memoDir, rel: p.slice(6) } : isExt(p) ? { root: '/', rel: p.slice(5) } : { root: state.root, rel: p }; }
 const absOf = (p) => (isExt(p) ? p.slice(4) : isMemo(p) ? state.memoDir + '/' + p.slice(6) : state.root + '/' + p);
 
@@ -62,7 +64,7 @@ const setStatus = (msg, cls = '') => { const s = $('#st-msg'); s.textContent = m
 const extOf = (p) => (p.match(/\.([^./]+)$/)?.[1] || '').toLowerCase();
 const IMG_EXT = new Set('png jpg jpeg gif webp avif svg bmp ico tif tiff heic heif'.split(' '));
 function kindOf(p) {
-  const e = extOf(p);
+  const e = extOf(isEnc(p) ? p.slice(0, -4) : p);
   if (IMG_EXT.has(e)) return 'image';
   if (['md', 'markdown', 'mdx'].includes(e)) return 'md';
   if (e === 'json' || e === 'jsonc' || e === 'geojson') return 'json';
@@ -72,6 +74,7 @@ function kindOf(p) {
   return 'text';
 }
 const ICON = { md: 'M↓', json: '{}', jsonl: '{}', yaml: 'Y', csv: '▦', text: '≡', image: '▣' };
+const iconOf = (p) => (isEnc(p) ? '🔒' : ICON[kindOf(p)]);
 const MODES = {
   md: [['view', '보기'], ['split', '분할'], ['edit', '편집'], ['smart', '스마트 편집']],
   json: [['edit', '편집'], ['tree', '트리']],
@@ -194,7 +197,7 @@ async function renderTree() {
       const gm = e.dir ? gitMarks.dirs.get(p) : gitMarks.files.get(p);   // git 변경 표시 (M 수정 / A 새 파일 / U 충돌)
       const row = el('div', { className: 'row' + (state.selected === p ? ' sel' : '') + (tab && dirty(tab) ? ' dirty' : '') + (gm ? ' g-' + gm + (e.dir ? ' g-dir' : '') : '') },
         el('span', { className: 'arrow', textContent: e.dir ? (open ? '▼' : '▶') : '' }),
-        e.dir ? el('span', { className: 'ico dir' }) : el('span', { className: 'ico k-' + kindOf(e.name), textContent: ICON[kindOf(e.name)] }),
+        e.dir ? el('span', { className: 'ico dir' }) : el('span', { className: 'ico k-' + kindOf(e.name), textContent: iconOf(e.name) }),
         el('span', { className: 'nm', textContent: e.name }));
       row.style.paddingLeft = 6 + depth * 14 + 'px';
       row.dataset.path = p; row.dataset.dir = e.dir ? '1' : '';
@@ -344,9 +347,10 @@ async function openFile(p, mode, at) {
   if (!t && kindOf(p) === 'image') { t = { path: p, content: '', orig: '', mtime: 0, kind: 'image', mode: 'view' }; state.tabs.push(t); }   // 이미지는 뷰어가 직접 불러온다
   if (!t) {
     try {
-      const f = await api('GET', 'file', { path: p });
+      const f = isEnc(p) ? await readEnc(p) : await api('GET', 'file', { path: p });
+      if (!f) return;   // 암호 입력을 취소함
       const kind = kindOf(p);
-      t = { path: p, content: f.content, orig: f.content, mtime: f.mtime, kind, mode: mode || DEFAULT_MODE[kind] };
+      t = { path: p, content: f.content, orig: f.content, mtime: f.mtime, kind, mode: mode || DEFAULT_MODE[kind], pass: f.pass };
       state.tabs.push(t);
     } catch (e) { toast(`열 수 없음: ${e.message}`); return; }
   }
@@ -422,7 +426,7 @@ function showSaved() {
 }
 function beaconSave(t) { // 페이지를 닫는 중에도 전달되도록 keepalive 로 저장 (용량이 작은 파일만)
   const { root, rel: p } = rootRel(t.path);
-  fetch('/api/file?path=' + encodeURIComponent(p), { method: 'PUT', keepalive: true, headers: { 'X-SS': '1', 'X-SS-Root': encodeURIComponent(root), 'Content-Type': 'application/json' }, body: JSON.stringify({ content: t.content, mtime: t.mtime }) }).catch(() => {});
+  fetch('/api/file?path=' + encodeURIComponent(p), { method: 'PUT', keepalive: true, headers: { 'X-SS': '1', 'X-SS-Root': encodeURIComponent(root), 'Content-Type': 'application/json', ...(t.pass ? { 'X-SS-Pass': encodeURIComponent(t.pass) } : {}) }, body: JSON.stringify({ content: t.content, mtime: t.mtime }) }).catch(() => {});
 }
 window.addEventListener('blur', flushAll);
 document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
@@ -910,6 +914,8 @@ $('#tree').addEventListener('contextmenu', (ev) => {
   ];
   if (!isDir) items.push(['기본 앱으로 열기', () => revealPath(p, 'open')]);
   if (state.platform === 'darwin') items.push(['터미널에서 열기', () => revealPath(p, 'terminal')]);
+  if (row && !isDir && isEnc(p)) items.push(['🔓 암호 해제 (평문으로 되돌리기)…', () => decryptEntry(p)], ['지금 잠그기', lockAll]);
+  else if (row && !isDir && kindOf(p) !== 'image') items.push(['🔒 암호화…', () => encryptEntry(p)]);
   if (row) items.push(
     ['이름 변경…', () => renameEntry(p)],
     ['경로 복사', () => copy(p, '경로 복사됨')],
@@ -917,6 +923,72 @@ $('#tree').addEventListener('contextmenu', (ev) => {
     ['삭제', () => deleteEntry(p, isDir), 'danger']);
   showMenu(ev.clientX, ev.clientY, items);
 });
+// ───────── 암호화 문서 ─────────
+// 암호는 이 페이지의 메모리에만 둔다 (디스크/localStorage 에 저장하지 않음). 앱을 닫거나 새로고침하면, 또는 한동안 쓰지 않으면 잊는다.
+const VAULT_IDLE_MS = 30 * 60 * 1000, PASS_MIN = 8;
+const vault = { pass: null, used: Date.now() };
+for (const ev of ['keydown', 'mousedown']) document.addEventListener(ev, () => { vault.used = Date.now(); }, true);
+function askPassword(title, { confirm: twice = false, note = '' } = {}) { // 입력한 암호, 취소하면 null
+  const box = $('#pw'), a = $('#pw-1'), b = $('#pw-2'), msg = $('#pw-msg');
+  $('#pw-title').textContent = title; a.value = b.value = ''; b.hidden = !twice; msg.textContent = note; box.hidden = false; a.focus();
+  return new Promise((resolve) => {
+    const done = (v) => { a.value = b.value = ''; box.hidden = true; $('#pw-form').onsubmit = box.onkeydown = $('#pw-cancel').onclick = null; resolve(v); };
+    $('#pw-form').onsubmit = (e) => {
+      e.preventDefault();
+      if (!a.value) return;
+      if (twice && a.value.length < PASS_MIN) { msg.textContent = `암호는 ${PASS_MIN}자 이상으로 정하세요`; return; }
+      if (twice && a.value !== b.value) { msg.textContent = '두 암호가 다릅니다'; return; }
+      done(a.value);
+    };
+    box.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Escape') done(null); };
+    $('#pw-cancel').onclick = () => done(null);
+  });
+}
+async function readEnc(p) { // 기억한 암호로 먼저 열어 보고, 안 되면 묻는다. 취소하면 null
+  const name = p.split('/').pop(); let pw = vault.pass;
+  for (;;) {
+    try {
+      const f = await api('GET', 'file', { path: p, pass: pw });
+      if (!f.size && !pw) { pw = await askPassword(`${name} 의 새 암호`, { confirm: true }); if (pw === null) return null; }   // 새로 만든 빈 문서
+      vault.pass = pw; return { ...f, pass: pw };
+    } catch (e) {
+      if (e.status !== 401 && e.status !== 423) throw e;
+      pw = await askPassword(`${name} 암호`, { note: e.status === 401 ? '암호가 맞지 않습니다' : '' });
+      if (pw === null) return null;
+    }
+  }
+}
+async function settleTab(t) { // 저장이 끝나지 않은 탭이면 false
+  if (t && dirty(t)) await save(t, true, true);
+  return !t || !dirty(t);
+}
+function retargetTab(t, from, r, pass) { // 경로가 바뀐 문서를 탭/트리에 반영
+  if (t) { t.path = r.path; t.mtime = r.mtime; t.pass = pass; t._savedAt = Date.now(); if (state.active === from) state.active = r.path; }
+  if (state.selected === from) state.selected = r.path;
+  childrenCache.clear(); persistTabs(); renderAll();
+}
+async function encryptEntry(p) {
+  const t = tabOf(p); if (!await settleTab(t)) return toast('저장되지 않은 변경이 있어 암호화하지 않았습니다');
+  const pass = await askPassword(`${p.split('/').pop()} 암호화`, { confirm: true, note: '암호를 잊으면 복구할 수 없습니다' }); if (pass === null) return;
+  try {
+    retargetTab(t, p, await api('POST', 'crypt/lock', { path: p, pass }), pass); vault.pass = pass;
+    toast('암호화됨 — 이미 커밋된 평문은 git 기록에 그대로 남습니다');
+  } catch (e) { toast('암호화 실패: ' + e.message); }
+}
+async function decryptEntry(p) {
+  if (!confirm(`평문으로 되돌릴까요?\n${p}\n커밋하면 내용이 git 에 그대로 올라갑니다.`)) return;
+  const t = tabOf(p); if (!await settleTab(t)) return toast('저장되지 않은 변경이 있어 해제하지 않았습니다');
+  const pass = t?.pass ?? (await readEnc(p))?.pass; if (!pass) return;
+  try { retargetTab(t, p, await api('POST', 'crypt/unlock', { path: p, pass }), undefined); toast('암호 해제됨'); }
+  catch (e) { toast('암호 해제 실패: ' + e.message); }
+}
+async function lockAll() { // 암호를 잊고 열린 암호화 문서를 닫는다
+  vault.pass = null;
+  for (const t of state.tabs.filter((x) => x.pass)) { await settleTab(t); await closeTab(t.path); }
+  toast('🔒 잠금');
+}
+setInterval(() => { if ((vault.pass || state.tabs.some((t) => t.pass)) && Date.now() - vault.used > VAULT_IDLE_MS) lockAll(); }, 60000);
+
 async function revealPath(rel, action) { // Finder / 파일 관리자 / 터미널 / 기본 앱
   try { await api('POST', 'reveal', { path: rel }, { action }); } catch (e) { toast('열 수 없음: ' + e.message); }
 }
@@ -1057,7 +1129,7 @@ function drawPalette() {
     };
     const kind = kindOf(f);
     const li = el('li', { className: i === pal.sel ? 'sel' : '', title: f },
-      el('span', { className: 'ico k-' + kind, textContent: ICON[kind] }),
+      el('span', { className: 'ico k-' + kind, textContent: iconOf(f) }),
       el('span', { className: 'pn' }, part(f.slice(b0), b0)),
       el('span', { className: 'pd' }, part(f.slice(0, b0 - 1), 0)));
     li.onclick = () => { closePalette(); openFile(f); };
@@ -3111,6 +3183,7 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
   addRecent(info.root); await loadFavs(); await loadSettings(); refreshGit(); if (state.filter) await fetchFilterDirs(); drawFilterBtn(); watchIndex();
   state.expanded = new Set(store.get(wsKey('expanded'), []));
   for (const s of store.get(wsKey('tabs'), [])) {
+    if (isEnc(s.path)) continue;   // 암호화 문서는 다시 열 때 암호를 묻는다
     if (kindOf(s.path) === 'image') { state.tabs.push({ path: s.path, content: '', orig: '', mtime: 0, kind: 'image', mode: 'view' }); continue; }
     try {
       const f = await api('GET', 'file', { path: s.path }); const kind = kindOf(s.path);
