@@ -351,6 +351,7 @@ async function openFile(p, mode, at) {
     } catch (e) { toast(`열 수 없음: ${e.message}`); return; }
   }
   state.active = p; state.selected = p;
+  if (!isMemo(p) && !isExt(p)) rememberOpen(p);
   if (at && MODES[t.kind].some((m) => m[0] === 'edit')) t.mode = 'edit'; // 줄로 이동하려면 편집기가 필요
   persistTabs(); renderAll();
   if (at) requestAnimationFrame(() => revealAt(at));
@@ -956,11 +957,36 @@ $('#btn-new-file').onclick = () => createEntry(state.selected && !tabOf(state.se
 $('#btn-new-dir').onclick = () => createEntry(dirOf(state.selected || ''), true);
 
 // ───────── 빠른 열기 (⌘P) ─────────
-const pal = { files: null, items: [], sel: 0, dir: '', inDir: false };
-async function openPalette() {
+const pal = { files: null, ts: 0, loading: null, items: [], sel: 0, dir: '', inDir: false };
+function openPalette() {
   $('#palette').hidden = false; const inp = $('#pal-input'); inp.value = ''; inp.focus();
   pal.dir = dirOfSel(); setPalScope(store.get('palInDir', false));
-  pal.files = await api('GET', 'files'); filterPalette(inp.value);
+  loadPalFiles();
+}
+// 받아 둔 파일 목록으로 바로 보여 주고, 서버 인덱스가 바뀌었을 때만 뒤에서 다시 받는다 (감시 불가면 항상: /api/files 가 재스캔을 일으킴)
+function loadPalFiles() {
+  return pal.loading ||= (async () => {
+    const s = await api('GET', 'index');
+    if (pal.files && s.ts === pal.ts && s.watching) return;
+    pal.files = await api('GET', 'files'); pal.ts = s.ts;
+    if (!$('#palette').hidden) filterPalette($('#pal-input').value, true);
+  })().catch(() => {}).finally(() => { pal.loading = null; });
+}
+// 최근에 연 파일 (최신순, 폴더별 저장). 검색 순위에 쓴다
+const PAL_HISTORY_MAX = 100;
+const palHistory = () => store.get(wsKey('palHistory'), []);
+const rememberOpen = (p) => store.set(wsKey('palHistory'), [p, ...palHistory().filter((x) => x !== p)].slice(0, PAL_HISTORY_MAX));
+// 가까운 순위 (작을수록 위): 최근 연 파일 / 열린 탭 > 선택한 폴더 안 > 최근 연 파일의 폴더 > 트리에서 펼친 폴더 > 나머지
+const PAL_HERE = 1e3, PAL_DIR = 2e3, PAL_EXPANDED = 3e3, PAL_OTHER = 4e3;
+function palRanker(recent) {
+  const files = new Map(recent.map((p, i) => [p, i])), dirs = new Map(), here = pal.dir && !pal.inDir ? pal.dir + '/' : '';
+  recent.forEach((p, i) => { const d = dirOf(p); if (!dirs.has(d)) dirs.set(d, i); });
+  return (f) => {
+    const i = files.get(f); if (i !== undefined) return i;
+    if (here && f.startsWith(here)) return PAL_HERE;
+    const d = dirOf(f), k = dirs.get(d);
+    return k !== undefined ? PAL_DIR + k : state.expanded.has(d) ? PAL_EXPANDED : PAL_OTHER;
+  };
 }
 // 검색 범위: 전체 | 트리에서 선택한 폴더 (폴더가 없으면 전체). 내용 검색의 범위 버튼과 같은 동작
 function setPalScope(inDir) {
@@ -968,7 +994,7 @@ function setPalScope(inDir) {
   $('#pal-all').classList.toggle('on', !pal.inDir); $('#pal-dir').classList.toggle('on', pal.inDir);
   $('#pal-dir').textContent = '📁 ' + (pal.dir ? pal.dir.split('/').pop() : '선택한 폴더'); $('#pal-dir').title = pal.dir || '트리에서 폴더를 선택하세요';
   $('#pal-dir').disabled = !pal.dir; $('#pal-input').placeholder = pal.inDir ? pal.dir + ' 안에서 파일 이름 검색…' : '파일 이름 검색…';
-  if (pal.files) filterPalette($('#pal-input').value);
+  filterPalette($('#pal-input').value);
 }
 const pickPalScope = (inDir) => { store.set('palInDir', inDir); setPalScope(inDir); $('#pal-input').focus(); };
 $('#pal-all').onclick = () => pickPalScope(false); $('#pal-dir').onclick = () => pickPalScope(true);
@@ -996,19 +1022,29 @@ function matchFile(q, f) {
   const k = fl.indexOf(ql);
   return k >= 0 ? { tier: 4, pos: range(k, ql.length) } : null;
 }
-function filterPalette(q) {
+function filterPalette(q, keepSel) {
   const pre = pal.inDir ? pal.dir + '/' : '', inScope = (f) => f.startsWith(pre);
-  const recent = state.tabs.map((t) => t.path).filter((p) => !isMemo(p) && inScope(p));
-  const files = pal.files.filter(inScope);
+  const tabs = state.tabs.map((t) => t.path).filter((p) => !isMemo(p) && inScope(p));
+  const rank = palRanker([...new Set([...palHistory(), ...tabs])]);
+  const files = (pal.files || []).filter(inScope);
   const match = (f) => { // 범위 폴더 이름 자체가 경로 일치로 잡히지 않도록 범위 아래 경로로만 비교
     const m = matchFile(q, f.slice(pre.length));
     return m && { ...m, pos: m.pos.map((p) => p + pre.length) };
   };
-  const res = q
-    ? files.map((f) => ({ f, m: match(f) })).filter((x) => x.m)
-        .sort((a, b) => a.m.tier - b.m.tier || a.f.length - b.f.length || a.f.localeCompare(b.f)).slice(0, 80)
-    : [...recent, ...files.filter((f) => !recent.includes(f))].slice(0, 80).map((f) => ({ f, m: { pos: [] } }));
-  pal.items = res; pal.sel = 0; drawPalette();
+  const byName = (a, b) => a.f.length - b.f.length || (a.f < b.f ? -1 : 1);
+  let res;
+  if (q) { // 단어 시작에 맞은 이름(tier 0·1)끼리는 가까운 파일을 먼저, 그보다 약한 일치는 tier 를 앞세운다
+    const group = (t) => (t <= 1 ? 0 : t);
+    res = files.map((f) => ({ f, m: match(f) })).filter((x) => x.m).map((x) => ({ ...x, r: rank(x.f) }))
+      .sort((a, b) => group(a.m.tier) - group(b.m.tier) || a.r - b.r || a.m.tier - b.m.tier || byName(a, b)).slice(0, 80);
+  } else { // 검색어가 없으면 가까운 파일부터, 남는 자리는 나머지 파일로
+    const near = [...new Set([...tabs, ...files.filter((f) => rank(f) < PAL_OTHER)])].map((f) => ({ f, r: rank(f), m: { pos: [] } }))
+      .sort((a, b) => a.r - b.r || byName(a, b)).slice(0, 80);
+    const seen = new Set(near.map((x) => x.f));
+    res = [...near, ...files.filter((f) => !seen.has(f)).slice(0, 80 - near.length).map((f) => ({ f, m: { pos: [] } }))];
+  }
+  const cur = keepSel && pal.items[pal.sel]?.f;   // 목록이 뒤에서 갱신돼도 고르던 파일은 유지
+  pal.items = res; pal.sel = cur ? Math.max(0, res.findIndex((x) => x.f === cur)) : 0; drawPalette();
 }
 function drawPalette() {
   $('#pal-list').replaceChildren(...pal.items.map(({ f, m }, i) => {
@@ -1136,6 +1172,7 @@ async function watchIndex() {
     try {
       const s = await api('GET', 'index');
       if (s.ts !== lastTs) { lastTs = s.ts; if (state.filter && s.ready) fetchFilterDirs().then(renderTree); } // 파일이 생기거나 사라지면 필터 갱신
+      if (s.ready && !pal.files) loadPalFiles();   // 첫 검색도 기다리지 않도록 미리 받아 둔다
       box.textContent = s.ready && !s.building ? `⚡ ${s.count.toLocaleString()} files indexed${s.truncated ? '+' : ''}` : `⏳ indexing… ${s.count ? s.count.toLocaleString() : ''}`;
       box.title = s.watching ? '파일 변경을 실시간으로 감시 중' : '변경 감시 불가: 10초 간격으로 갱신';
     } catch { return; }
