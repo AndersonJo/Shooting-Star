@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const YAML = require('./public/vendor/js-yaml.umd.min.js');   // UI 와 같은 사본 (외부 의존성 없음)
+const SECRET = require('./secret');
 
 const HOME = os.homedir();
 const DIR = path.join(HOME, '.shooting-star', 'run');
@@ -46,6 +47,8 @@ function normalizeManifest(m) {
   if (m.cwd) out.cwd = String(m.cwd);
   if (m.danger) out.danger = true;
   out.params = (m.params || []).map(normalizeParam);
+  const secrets = SECRET.normalize(m.secrets);   // 세션키/토큰: env SS_SECRET_<NAME> 로 주입
+  if (secrets.length) out.secrets = secrets;
   const seen = new Set();
   for (const p of out.params) { if (seen.has(p.name)) throw err(`파라미터 이름 중복: ${p.name}`); seen.add(p.name); }
   if (m.presets != null) {   // 자주 쓰는 옵션 조합: { 이름: { 파라미터: 값 } } → `ss run <name> @이름`
@@ -89,7 +92,7 @@ function get(name) {
 }
 function toYaml(m, extra) {   // 사람이 읽고 고치기 좋은 순서로
   const o = {};
-  for (const k of ['name', 'description', 'script', 'interpreter', 'cwd', 'danger', 'params', 'presets']) if (m[k] !== undefined && !(k === 'params' && !m[k].length)) o[k] = m[k];
+  for (const k of ['name', 'description', 'script', 'interpreter', 'cwd', 'danger', 'secrets', 'params', 'presets']) if (m[k] !== undefined && !(k === 'params' && !m[k].length)) o[k] = m[k];
   if (o.params) o.params = o.params.map(({ as, ...p }) => (as === 'flag' ? p : { ...p, as }));   // 기본값은 생략
   Object.assign(o, extra);
   return YAML.dump(o, { lineWidth: -1, noRefs: true });
@@ -237,6 +240,7 @@ const MAX_BUF = 256 * 1024;
 function start(m, given, { cwd, source = 'cli', stdio, preset } = {}) {
   const vals = resolveParams(m, given || {}, preset || null);
   const { cmd, args, env } = buildCommand(m, vals);
+  Object.assign(env, SECRET.injectEnv(m.secrets));   // 저장된 세션키를 env 로 주입 (required 인데 없으면 여기서 에러)
   const id = Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
   const workdir = m.cwd ? m.cwd.replace(/^~(?=$|\/)/, HOME) : (cwd || process.cwd());
   const job = Object.assign(new EventEmitter(), { id, name: m.name, params: vals, preset: preset || undefined, source, startedAt: Date.now(), endedAt: 0, code: null, signal: null, buf: '', cwd: workdir, cmdline: [cmd, ...args].join(' ') });
@@ -276,13 +280,19 @@ function readLog(id) { if (!/^[a-z0-9]+$/.test(id)) throw err('bad id'); try { r
 function usageLine(m) {
   const ps = m.params.map((p) => `--${p.name}${p.type === 'bool' ? '' : ' <' + (p.type === 'choice' ? p.choices.join('|') : p.type) + '>'}${p.required ? '*' : ''}`).join(' ');
   const pr = Object.keys(m.presets || {});
-  return `ss run ${m.name}${pr.length ? ' [' + pr.map((k) => '@' + k).join('|') + ']' : ''}${ps ? ' ' + ps : ''}`;
+  const sec = (m.secrets || []).map((x) => x.name);
+  return `ss run ${m.name}${sec.length ? ' {secret: ' + sec.join(', ') + '}' : ''}${pr.length ? ' [' + pr.map((k) => '@' + k).join('|') + ']' : ''}${ps ? ' ' + ps : ''}`;
 }
 function contextText() {
   const ms = list().filter((m) => !m.broken);
   const lines = ['[shooting-star] 등록된 실행 스크립트 (ss run). 사용자가 실행을 요청하면 직접 짜지 말고 아래를 먼저 `ss run <name>` 으로 실행한다. 등록/상세는 ss-run skill 참고.'];
   if (!ms.length) lines.push('(아직 등록된 스크립트 없음 — 반복 작업은 `ss run add` 로 등록할 수 있다)');
   for (const m of ms) lines.push(`- ${usageLine(m)}${m.danger ? '  [danger: --yes 필요]' : ''}${m.description ? ' — ' + m.description : ''}`);
+  try {
+    const ss = SECRET.list();
+    lines.push('[shooting-star] 세션키 저장소: `ss secret set <이름>`(값은 가려서 입력) · 스크립트는 secrets: [이름] 으로 선언하면 env SS_SECRET_<이름> 로 받음. 값은 chat 에 붙여넣게 하지 말 것.');
+    if (ss.length) lines.push('- 저장된 키: ' + ss.map((x) => x.name).join(', '));
+  } catch {}
   try {
     const dbs = require('./db').listConnections();
     if (dbs.length) { lines.push('[shooting-star] DB 연결: `ss db query <이름> "<SQL>" [--json]` / `ss db schema <이름> [스키마 [테이블]]` (비밀번호는 ss 가 관리, 읽기 전용 연결은 SELECT 류만)'); for (const d of dbs) lines.push(`- ${d.name} [${d.kind}${d.readOnly ? ', 읽기 전용' : ''}]`); }
@@ -369,6 +379,17 @@ ss run add scripts.yaml --force                    # on the other machine (code 
 If the user pastes such a YAML into the chat, pipe it to \`ss run add -\` (or save it to a temp file) and register it.
 If \`ss\` itself is missing on a machine, shooting-star must be installed first (\`./install.sh\` in its repo); \`ss run install\` sets up this skill and the hook.
 
+## Session keys / tokens (ss secret)
+Short-lived secrets (session cookies, bearer tokens) are stored once and injected into scripts as env, never written into the manifest, logs, argv or git.
+\`\`\`bash
+ss secret set <name>     # paste the value when prompted (hidden); or: ss secret set <name> <value>
+ss secret list           # names only, never values
+ss secret rm <name>
+\`\`\`
+- Declare what a script needs in its manifest: \`secrets: [airflow]\` (or \`[{name: airflow, env: AIRFLOW_TOKEN}]\`). At run time each saved value is injected as \`SS_SECRET_<NAME>\` (bool-cap uppercase; custom \`env:\` overrides). A declared-but-missing secret stops the run with \`ss secret set <name>\`.
+- Never ask the user to paste a secret into the chat and never put one in a manifest or script file. Tell them to run \`ss secret set <name>\` (it reads hidden). The user grabs the value themselves (e.g. from their browser DevTools) — do not try to extract it.
+- The value survives until overwritten; when a session key expires the user just runs \`ss secret set <name>\` again.
+
 ## DB connections (same registry, same CLI)
 \`\`\`bash
 ss db list                              # connections (passwords are managed by ss, never ask for them)
@@ -395,7 +416,7 @@ function install() {
   let hook = false;
   if (!ss.some((g) => (g.hooks || []).some((h) => h.command === HOOK_CMD))) { ss.push({ hooks: [{ type: 'command', command: HOOK_CMD }] }); hook = true; }
   s.permissions = s.permissions || {}; const allow = (s.permissions.allow = s.permissions.allow || []);
-  const rules = ['Bash(ss run:*)']; const addedRules = rules.filter((r) => !allow.includes(r)); allow.push(...addedRules);
+  const rules = ['Bash(ss run:*)', 'Bash(ss secret:*)']; const addedRules = rules.filter((r) => !allow.includes(r)); allow.push(...addedRules);
   if (hook || addedRules.length) { if (fs.existsSync(sf)) fs.copyFileSync(sf, sf + '.bak-ss'); fs.writeFileSync(sf, JSON.stringify(s, null, 2) + '\n'); }
   return { skill: path.join(skillDir, 'SKILL.md'), settings: sf, hookAdded: hook, rulesAdded: addedRules };
 }

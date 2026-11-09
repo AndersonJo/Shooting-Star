@@ -1801,11 +1801,11 @@ $('#btn-git-refresh').onclick = loadGit;
 
 
 // ───────── Run: ~/.shooting-star/run 에 등록된 스크립트 (CLI `ss run`, Claude 와 공유) ─────────
-const runUi = { scripts: [], history: [], dir: '', running: new Set() };
+const runUi = { scripts: [], history: [], dir: '', running: new Set(), secrets: new Set() };
 const ANSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07/g;
 async function loadRun() {
   const box = $('#run-list');
-  try { const r = await api('GET', 'run/list'); runUi.scripts = r.scripts; runUi.history = r.history; runUi.dir = r.dir; runUi.running = new Set(r.running.map((j) => j.name)); }
+  try { const r = await api('GET', 'run/list'); runUi.scripts = r.scripts; runUi.history = r.history; runUi.dir = r.dir; runUi.running = new Set(r.running.map((j) => j.name)); runUi.secrets = new Set(r.secrets || []); }
   catch (e) { box.replaceChildren(el('div', { className: 'git-empty', textContent: 'Run 목록을 읽지 못했습니다: ' + e.message })); return; }
   drawRun();
 }
@@ -1867,6 +1867,18 @@ function runView(t) {
     sel.value = t.preset || '';
     form.append(el('label', { htmlFor: sel.id, textContent: '프리셋' }), sel);
   }
+  for (const sdef of m.secrets || []) {   // 세션키: 저장돼 있으면 재사용, 새로 붙여넣으면 갱신. 값은 서버에만 저장됨
+    const saved = runUi.secrets.has(sdef.name);
+    const inp = el('input', { type: 'password', autocomplete: 'off', placeholder: saved ? '저장됨 — 바꾸려면 붙여넣기' : '세션키 붙여넣기' });
+    const save = el('button', { textContent: '저장', title: '이 세션키를 저장 (다음부터 재사용)', async onclick() {
+      const v = inp.value.trim(); if (!v) return toast('값을 붙여넣으세요');
+      try { await api('PUT', 'secret', {}, { name: sdef.name, value: v }); } catch (e) { return toast(e.message); }
+      runUi.secrets.add(sdef.name); inp.value = ''; toast(sdef.name + ' 세션키 저장됨'); t.dom = null; renderContent();
+    } });
+    const wrap = el('div', { className: 'rv-secret' }, inp, save, el('span', { className: 'ss-badge ' + (saved ? 'on' : 'off'), textContent: saved ? '● 저장됨' : '미저장' }));
+    form.append(el('label', { htmlFor: '', title: 'SS_SECRET_' + sdef.name.toUpperCase().replace(/[^A-Z0-9]/g, '_') }, '🔑 ' + sdef.name), wrap);
+    if (sdef.description) form.append(el('div', { className: 'pd', textContent: sdef.description }));
+  }
   for (const p of m.params) {
     let inp;
     if (p.type === 'bool') inp = el('input', { type: 'checkbox', checked: !!t.vals[p.name], onchange() { t.vals[p.name] = this.checked; upd(); } });
@@ -1886,6 +1898,8 @@ function runView(t) {
     if (t.job) return;
     const missing = m.params.find((p) => p.required && (t.vals[p.name] === '' || t.vals[p.name] === undefined));
     if (missing) { toast(`필수: ${missing.name}`); document.getElementById(`rp-${missing.name}`)?.focus(); return; }
+    const needSecret = (m.secrets || []).find((x) => x.required !== false && !runUi.secrets.has(x.name));
+    if (needSecret) { toast(`세션키를 먼저 저장하세요: ${needSecret.name}`); return; }
     if (m.danger && !confirm(`'${m.name}' 은(는) danger 스크립트입니다. 실행할까요?\n\n${runCmdline(t)}`)) return;
     t.out = ''; out.textContent = ''; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; paint();
     const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }

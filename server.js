@@ -11,7 +11,9 @@ const crypto = require('crypto');
 // `ss run …`: 서버를 띄우지 않고 스크립트 레지스트리 CLI 로 동작 (run.js)
 if (process.argv[2] === 'run') { require('./run').cli(process.argv.slice(3)).then((c) => process.exit(c)); return; }
 if (process.argv[2] === 'db') { require('./db').cli(process.argv.slice(3)).then((c) => process.exit(c)); return; }
+if (process.argv[2] === 'secret') { require('./secret').cli(process.argv.slice(3)).then((c) => process.exit(c)); return; }
 const RUN = require('./run');
+const SECRET = require('./secret');
 const DB = require('./db');
 
 const args = process.argv.slice(2);
@@ -632,7 +634,7 @@ async function api(req, res, url, root) {
       return send(res, 200, { ok: true });
     }
     case 'GET /api/run/list':
-      return send(res, 200, { scripts: RUN.list().map(({ scriptPath, ...m }) => ({ ...m, scriptPath })), dir: RUN.DIR, running: [...RUN.jobs.values()].filter((j) => !j.endedAt).map((j) => ({ id: j.id, name: j.name })), history: RUN.history(30) });
+      return send(res, 200, { scripts: RUN.list().map(({ scriptPath, ...m }) => ({ ...m, scriptPath })), dir: RUN.DIR, running: [...RUN.jobs.values()].filter((j) => !j.endedAt).map((j) => ({ id: j.id, name: j.name })), history: RUN.history(30), secrets: SECRET.list().map((x) => x.name) });
     case 'POST /api/run/exec': { // 등록된 이름만 실행한다 (임의 명령 실행 아님)
       const { name, params, preset } = JSON.parse(await readBody(req));
       const job = RUN.start(RUN.get(name), params && typeof params === 'object' ? params : {}, { cwd: root, source: 'ui', preset: typeof preset === 'string' && preset ? preset : null });
@@ -668,6 +670,16 @@ async function api(req, res, url, root) {
     }
     case 'GET /api/run/export': // 본문까지 담은 YAML (다른 컴퓨터에서 `ss run add -` 로 등록)
       return send(res, 200, { yaml: RUN.exportYaml([url.searchParams.get('name') || '']) });
+    case 'GET /api/secret/list':   // 이름/저장여부만 (값은 절대 안 보냄)
+      return send(res, 200, { secrets: SECRET.list() });
+    case 'PUT /api/secret': {
+      const { name, value } = JSON.parse(await readBody(req));
+      return send(res, 200, SECRET.set(String(name || ''), String(value ?? '')));
+    }
+    case 'DELETE /api/secret':
+      SECRET.remove(url.searchParams.get('name') || '');
+      return send(res, 200, { ok: true });
+
     case 'POST /api/run/install': // Claude 연동: skill + SessionStart hook + 실행 권한 (~/.claude)
       return send(res, 200, RUN.install());
     case 'DELETE /api/run/script': {
