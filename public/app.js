@@ -183,17 +183,26 @@ async function loadDir(p) {
   childrenCache.set(p, list); return list;
 }
 let treeSeq = 0;
+// 트리 필터가 켜져 있어도 지금 보고 있는 것은 보인다: 활성 탭의 파일 / 갤러리로 보는 폴더와 그 이미지 (워크스페이스 안일 때)
+function treePins() {
+  const t = cur(); if (!t) return null;
+  if (t.kind === 'gallery') { const d = t.dir; return d === state.root ? { dir: '' } : d.startsWith(state.root + '/') ? { dir: d.slice(state.root.length + 1) } : null; }
+  if (['diff', 'run', 'sql'].includes(t.kind) || isMemo(t.path) || isExt(t.path) || isDrop(t.path)) return null;
+  return { file: t.path };
+}
 async function renderTree() {
   const seq = ++treeSeq;   // 연달아 호출되면 마지막 호출의 결과만 화면에 반영한다
   const root = $('#tree'); const scroll = root.scrollTop;
-  const frag = document.createDocumentFragment();
+  const frag = document.createDocumentFragment(), pins = state.filter ? treePins() : null;
   async function walk(dir, depth) {
     let list = childrenCache.get(dir);
     if (!list) { try { list = await loadDir(dir); } catch { return; } }
     for (const e of list) {
       const p = dir ? dir + '/' + e.name : e.name;
-      if (state.filter && state.filterDirs) { // 필터: 설정된 형식의 파일이 있는 폴더 / 그 형식의 파일만
-        if (e.dir ? !state.filterDirs.has(p) : !fileMatchesFilter(e.name)) continue;
+      if (state.filter && state.filterDirs) { // 필터: 설정된 형식의 파일이 있는 폴더 / 그 형식의 파일만 (지금 보고 있는 것은 예외)
+        const pinned = e.dir ? (pins?.dir != null && (pins.dir === p || pins.dir.startsWith(p + '/'))) || !!pins?.file?.startsWith(p + '/')
+          : p === pins?.file || (pins?.dir === dir && IMG_EXT.has(extOf(e.name)));
+        if (!pinned && (e.dir ? !state.filterDirs.has(p) : !fileMatchesFilter(e.name))) continue;
       }
       const open = e.dir && state.expanded.has(p);
       const tab = !e.dir && tabOf(p);
@@ -3330,6 +3339,20 @@ function smartEditor(t) {
 }
 
 // ───────── 하단 상태바의 전체 경로 (조각을 클릭하면 왼쪽 트리에서 그 위치로 이동) ─────────
+// 갤러리 하단 경로 클릭: 갤러리를 그 폴더로 옮기고 왼쪽 트리에서 펼쳐 선택한다.
+// 워크스페이스 밖 폴더면 (파일 경로와 마찬가지로) 그 폴더를 워크스페이스로 열고, 새 화면에서 갤러리를 이어서 연다.
+function galPathClick(t, abs) {
+  const inside = abs === state.root || abs.startsWith(state.root + '/');
+  if (!inside) { try { sessionStorage.setItem('ss:gallery', abs); } catch {} return go(abs); }
+  if (abs !== t.dir) galGo(t, abs);
+  revealDirInTree(abs);
+}
+function revealDirInTree(abs) {
+  const rel = abs === state.root ? '' : abs.slice(state.root.length + 1);
+  if (rel) return revealInTree(rel, true);
+  if (document.body.classList.contains('no-side') || ['memo', 'git', 'run', 'db'].includes(state.view)) setView('files', true);
+  state.selected = ''; renderTree().then(() => { $('#tree').scrollTop = 0; });
+}
 async function revealInTree(rel, isDir) { // 해당 항목까지 폴더를 펼치고 선택한 뒤 화면 가운데로 스크롤
   if (document.body.classList.contains('no-side') || ['memo', 'git', 'run', 'db'].includes(state.view)) setView('files', true);
   const parts = rel ? rel.split('/') : []; let acc = '';
@@ -3349,8 +3372,9 @@ function drawPath(t) {
     const hi = state.home ? segs.findIndex((s) => s.abs === state.home) : -1;
     const view = hi >= 0 ? [{ label: '~', abs: state.home }, ...segs.slice(hi + 1)] : segs;
     view.forEach((s, i) => {
-      const seg = el('span', { className: 'seg', textContent: s.label, title: s.abs === t.dir ? t.dir : '이 폴더의 이미지 보기' });
-      seg.onclick = () => s.abs !== t.dir && galGo(t, s.abs);
+      const inside = s.abs === state.root || s.abs.startsWith(state.root + '/');
+      const seg = el('span', { className: 'seg', textContent: s.label, title: inside ? '트리에서 이 폴더 보기' + (s.abs === t.dir ? '' : ' (갤러리도 이동)') : '이 폴더를 워크스페이스로 열어 트리에 보기' });
+      seg.onclick = () => galPathClick(t, s.abs);
       inner.append(seg); if (i < view.length - 1 && s.label !== '/') inner.append(el('span', { className: 'sep', textContent: '/' }));
     });
     return;
@@ -3603,4 +3627,6 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
   state.active = tabOf(a) ? a : state.tabs[0]?.path || null; state.selected = state.active || '';
   renderAll(); setView(state.view);
   connectEvents();   // 파일 변경 실시간 동기화
+  let pendGal = null; try { pendGal = sessionStorage.getItem('ss:gallery'); sessionStorage.removeItem('ss:gallery'); } catch {}
+  if (pendGal) { openGallery(pendGal); revealDirInTree(pendGal.replace(/\/+$/, '') || '/'); }   // 갤러리 하단 경로로 워크스페이스를 바꾼 경우: 갤러리를 이어서 열고 트리에 표시
 })();
