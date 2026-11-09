@@ -3517,6 +3517,11 @@ function galTile(t, it) {
   tile.onclick = () => galSelect(t, tile._i);
   tile.onmousedown = (e) => { if (e.button === 0) loadImg('@ext' + abs, false); };   // 더블클릭보다 먼저 전체화면용 이미지를 디코딩해 둔다
   tile.ondblclick = () => galView(t, tile._i);
+  const dragOut = window.webkit?.messageHandlers?.dragFile;
+  if (dragOut) { // 앱(macOS): 끌면 실제 파일로 나간다 → Chrome 의 업로드 칸, Finder, 메신저 등에 Finder 에서 끈 것처럼 놓인다 (복사만)
+    tile.draggable = true;
+    tile.ondragstart = (e) => { e.preventDefault(); galSelect(t, tile._i, false); dragOut.postMessage([tile._abs]); };   // 웹의 끌기는 막고 네이티브 셸이 이어서 끈다
+  }
   tile.oncontextmenu = (e) => {
     e.preventDefault(); galSelect(t, tile._i);
     const FM = state.platform === 'darwin' ? 'Finder' : '파일 관리자';
