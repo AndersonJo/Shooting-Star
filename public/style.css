@@ -561,7 +561,7 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 .gal-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 12px 24px; scrollbar-gutter: stable; }
 .gal-grid { display: flex; flex-direction: column; gap: 6px; }
 .gal-row { display: flex; gap: 6px; position: relative; }
-.gal-tile { flex: 0 0 auto; position: relative; overflow: hidden; border-radius: 4px; background: var(--bg3); cursor: zoom-in; }
+.gal-tile { flex: 0 0 auto; position: relative; overflow: hidden; border-radius: 4px; background: var(--bg3); cursor: zoom-in; user-select: none; -webkit-user-select: none; }
 .gal-tile img { display: block; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .18s; user-select: none; -webkit-user-drag: none; }
 .gal-tile.ok img { opacity: 1; }
 .gal-tile.bad::after { content: "⚠"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--fg2); }

@@ -28,23 +28,34 @@ final class DropWebView: WKWebView {
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { isOwnDrag(sender) ? [] : super.draggingUpdated(sender) }
     override func draggingExited(_ sender: NSDraggingInfo?) { if let s = sender, isOwnDrag(s) { return }; super.draggingExited(sender) }
 
-    // 웹 UI 가 dragstart 를 막고 경로를 보내 오면 (버튼을 누른 채 끌고 있는 중) 그 자리에서 네이티브 끌기를 시작한다
-    func dragFiles(_ paths: [String]) {
-        guard NSEvent.pressedMouseButtons & 1 != 0, let w = window else { return }   // 메시지가 오기 전에 이미 놓았으면 끌지 않는다
+    // 끌어 나가기: 웹 UI 가 mousedown 때 그 자리의 파일(갤러리 이미지)을 알려 두면(arm), 실제로 끌기 시작하는 mouseDragged 안에서
+    // 그 이벤트로 바로 네이티브 끌기를 시작한다. (웹 dragstart → 메시지 → 나중에 시작하면 macOS 가 끌기를 반쯤만 만들어서
+    // Chrome 등 어떤 앱도 놓기를 받지 않는다 — 시험으로 확인함)
+    var armed: [String] = []
+    var downAt: NSPoint?
+    var draggingOut = false
+    func arm(_ paths: [String]) { if downAt != nil, NSEvent.pressedMouseButtons & 1 != 0 { armed = paths } }
+    override func mouseDown(with e: NSEvent) { armed = []; draggingOut = false; downAt = e.locationInWindow; super.mouseDown(with: e) }
+    override func mouseUp(with e: NSEvent) { armed = []; downAt = nil; draggingOut = false; super.mouseUp(with: e) }
+    override func mouseDragged(with e: NSEvent) {
+        if draggingOut { return }
+        if !armed.isEmpty, let p = downAt, hypot(e.locationInWindow.x - p.x, e.locationInWindow.y - p.y) >= 4, startFileDrag(armed, e) { draggingOut = true; return }
+        super.mouseDragged(with: e)
+    }
+    func startFileDrag(_ paths: [String], _ e: NSEvent) -> Bool {
         let urls = paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
-        guard !urls.isEmpty else { return }
-        let loc = w.mouseLocationOutsideOfEventStream, at = convert(loc, from: nil)
+        guard !urls.isEmpty else { return false }
+        let at = convert(e.locationInWindow, from: nil)
         let items = urls.enumerated().map { i, u -> NSDraggingItem in
             let item = NSDraggingItem(pasteboardWriter: u as NSURL)
             let img = dragThumb(u.path), o = CGFloat(i) * 6
             item.setDraggingFrame(NSRect(x: at.x - img.size.width / 2 + o, y: at.y - img.size.height / 2 + o, width: img.size.width, height: img.size.height), contents: img)
             return item
         }
-        guard let ev = NSEvent.mouseEvent(with: .leftMouseDragged, location: loc, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                          windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { return }
         fileDrag.view = self
-        let s = beginDraggingSession(with: items, event: ev, source: fileDrag)
+        let s = beginDraggingSession(with: items, event: e, source: fileDrag)
         s.animatesToStartingPositionsOnCancelOrFail = true
+        return true
     }
     // 끌기가 끝나면 마우스 놓기는 끌기 세션이 가져가서 WebKit 은 버튼이 계속 눌린 줄 안다 → 놓기를 대신 알려 준다
     func releaseMouse() {
@@ -196,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         conf.userContentController.add(self, name: "theme")        // 웹 UI 의 테마 변경 알림
         conf.userContentController.add(self, name: "fullscreen")   // 이미지 뷰어의 전체화면 요청
         conf.userContentController.add(self, name: "edit")         // 웹 UI 의 우클릭 메뉴: 잘라내기/복사/붙여넣기/전체 선택
-        conf.userContentController.add(self, name: "dragFile")     // 갤러리 이미지를 실제 파일로 끌어 나가기 (경로 배열)
+        conf.userContentController.add(self, name: "dragArm")      // 갤러리 이미지 mousedown: 끌면 실제 파일로 나갈 경로 (배열)
         let wv = DropWebView(frame: .zero, configuration: conf)
         wv.uiDelegate = self
         wv.navigationDelegate = self
@@ -233,7 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     // MARK: 테마 — 웹이 "dark|light,#rrggbb" 를 보내면 창의 밝기와 배경색을 맞춘다 (제목 표시줄/깜빡임 방지)
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
         if m.name == "fullscreen" { (m.webView?.window)?.toggleFullScreen(nil); return }   // 이미지 뷰어: 창 전체화면 토글
-        if m.name == "dragFile" { (m.webView as? DropWebView)?.dragFiles(m.body as? [String] ?? []); return }
+        if m.name == "dragArm" { (m.webView as? DropWebView)?.arm(m.body as? [String] ?? []); return }
         if m.name == "edit", let cmd = m.body as? String {   // 편집 메뉴와 같은 명령을 보낸다 (붙여넣기는 웹 API 로는 권한 팝업이 뜬다)
             let sel: [String: Selector] = ["paste": #selector(NSText.paste(_:)), "copy": #selector(NSText.copy(_:)), "cut": #selector(NSText.cut(_:)), "selectAll": #selector(NSText.selectAll(_:))]
             if let s = sel[cmd] { NSApp.sendAction(s, to: nil, from: nil) }
