@@ -827,7 +827,8 @@ function renderMarkdown(t, htmlOverride) { // htmlOverride: 이미 변환/정화
   doc.querySelectorAll('pre').forEach((pre) => {
     const b = el('button', { className: 'cp', textContent: '복사' });
     b.onclick = () => copy(pre.querySelector('code')?.textContent ?? pre.textContent, '코드 복사됨');
-    pre.append(b);
+    // 가로 스크롤해도 버튼이 따라 움직이지 않도록 스크롤 안 되는 래퍼에 붙인다
+    const w = el('div', { className: 'pre-wrap' }); pre.replaceWith(w); w.append(pre, b);
   });
   // heading id (anchor 링크용)
   doc.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach((h) => {
