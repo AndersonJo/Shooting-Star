@@ -634,6 +634,296 @@ async function gitStatus(repo) {
   return parseStatus(out);
 }
 
+// ───────── Git 히스토리: 저장소 전체 / 파일 / 폴더 / 선택한 줄, blame, PR·브랜치, 원격 웹 주소 ─────────
+// 요청 경로(워크스페이스 기준) → 그 파일이 들어 있는 repo 와 repo 기준 경로
+async function gitTarget(root, p) {
+  const abs0 = resolveSafe(root, p);
+  let abs = abs0; try { abs = fs.realpathSync(abs0); } catch {}
+  const isDir = isDirSafe(abs), dir = isDir ? abs : path.dirname(abs);
+  let repo;
+  try { repo = fs.realpathSync((await git(dir, ['rev-parse', '--show-toplevel'])).trim()); } catch { throw httpError(400, 'git 저장소 안의 파일이 아닙니다'); }
+  const rel = path.relative(repo, abs).split(path.sep).join('/');
+  return { repo, rel: rel.startsWith('..') ? '' : rel, isDir, abs };
+}
+// 원격 주소 → 웹 주소. git@host:o/r.git · ssh://git@host:22/o/r · https://user:tok@host/o/r.git (자격 증명은 버린다)
+async function parseRemote(u) {
+  u = String(u || '').trim(); let host, rest, m;
+  if ((m = /^([a-z][a-z0-9+.-]*):\/\/(?:[^@/]*@)?([^/:]+)(?::\d+)?\/(.+)$/i.exec(u))) {
+    if (!/^(https?|ssh|git|git\+ssh|ssh\+git)$/i.test(m[1])) return null;
+    host = m[2]; rest = m[3];
+  } else if ((m = /^(?:[^@/\s]+@)?([^/:\s]+):(?!\/)(.+)$/.exec(u))) { host = m[1]; rest = m[2]; }   // scp 형식
+  else return null;
+  rest = rest.replace(/\/+$/, '').replace(/\.git$/, '');
+  if (!/^[^/]+\/.+/.test(rest)) return null;
+  if (!host.includes('.')) {   // ~/.ssh/config 의 별칭 (예: github-work) → 실제 호스트
+    try { const h = /^hostname\s+(\S+)/m.exec(await execP('ssh', ['-G', host], { timeout: 3000 })); if (h) host = h[1]; } catch {}
+  }
+  host = host.toLowerCase();
+  const kind = host.includes('gitlab') ? 'gitlab' : host === 'bitbucket.org' ? 'bitbucket' : 'github';
+  return { base: `https://${host}/${rest}`, host, path: rest, kind };
+}
+const webCache = new Map();   // repo → { t, web, remote }
+async function gitWeb(repo) {
+  const c = webCache.get(repo); if (c && Date.now() - c.t < 60000) return c;
+  let remote = '', web = null;
+  try {
+    const remotes = (await git(repo, ['remote'])).split('\n').filter(Boolean);
+    try { remote = (await git(repo, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])).trim().split('/')[0]; } catch {}
+    if (!remotes.includes(remote)) remote = remotes.includes('origin') ? 'origin' : remotes[0] || '';
+    if (remote) web = await parseRemote(await git(repo, ['remote', 'get-url', remote]));
+  } catch {}
+  const v = { t: Date.now(), web, remote }; webCache.set(repo, v); return v;
+}
+async function gitRepoInfo(repo) {
+  const out = { abs: repo, name: path.basename(repo), branch: '', head: '', web: null };
+  try { out.branch = (await git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim(); } catch {}
+  try { out.head = (await git(repo, ['rev-parse', 'HEAD'])).trim(); } catch {}
+  out.web = (await gitWeb(repo)).web;
+  return out;
+}
+// 편집 중인 내용(content)의 줄 범위 → HEAD 버전의 줄 범위. 커밋 안 된 새 줄뿐이면 null
+async function mapLinesToHead(repo, rel, a, b, content) {
+  let head;
+  try { head = await git(repo, ['show', `HEAD:${rel}`], { maxBuffer: 64 << 20 }); } catch { return null; }   // HEAD 에 없는 파일
+  if (content == null) { try { content = await fsp.readFile(path.join(repo, rel), 'utf8'); } catch { return { a, b }; } }
+  if (content === head) return { a, b };
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'ss-l-'));
+  try {
+    await fsp.writeFile(path.join(tmp, 'a'), head); await fsp.writeFile(path.join(tmp, 'b'), content);
+    const r = spawnSync('git', ['diff', '--no-index', '--no-color', '-U0', '--', path.join(tmp, 'a'), path.join(tmp, 'b')], { env: GIT_VIEW_ENV, maxBuffer: 64 << 20 });
+    const hunks = [];
+    for (const m of String(r.stdout || '').matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)) hunks.push({ os: +m[1], oc: m[2] == null ? 1 : +m[2], ns: +m[3], nc: m[4] == null ? 1 : +m[4] });
+    const lo = [], push = (x, y) => { lo.push(x, y); };
+    for (let L = a; L <= b; L++) {
+      let delta = 0, inside = null;
+      for (const h of hunks) {
+        if (h.nc && L >= h.ns && L < h.ns + h.nc) { inside = h; break; }
+        if ((h.nc ? h.ns + h.nc - 1 : h.ns) < L) delta += h.oc - h.nc; else break;
+      }
+      if (!inside) push(L + delta, L + delta);
+      else if (inside.oc) { push(inside.os, inside.os + inside.oc - 1); L = inside.ns + inside.nc - 1; }   // 고친 줄 → 원래 있던 줄들
+    }
+    if (!lo.length) return null;
+    return { a: Math.min(...lo), b: Math.max(...lo) };
+  } finally { fsp.rm(tmp, { recursive: true, force: true }).catch(() => {}); }
+}
+const LOG_FMT = '%x1e%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%P%x1f%D%x1f%s';
+function parseLog(out, { names, patch } = {}) {
+  const list = [];
+  for (const rec of out.split('\x1e')) {
+    if (!rec.trim()) continue;
+    const nl = rec.indexOf('\n'), head = nl < 0 ? rec : rec.slice(0, nl), rest = nl < 0 ? '' : rec.slice(nl + 1);
+    const [h, s, an, ae, at, p, refs, subj] = head.split('\x1f');
+    const c = { h, s, an, ae, at: +at, p: p ? p.split(' ') : [], refs: refs || '', subj: subj || '' };
+    if (names) {   // --name-status: 이 커밋에서의 파일 경로 (이름이 바뀌었으면 이전 경로도)
+      const ln = rest.split('\n').find((l) => /^[A-Z]\d*\t/.test(l));
+      if (ln) { const f = ln.split('\t'); c.st = f[0][0]; if (f.length > 2) { c.from = f[1]; c.path = f[2]; } else c.path = f[1]; }
+    }
+    if (patch) c.patch = rest.replace(/^\n+/, '').slice(0, 60000);
+    list.push(c);
+  }
+  return list;
+}
+async function gitLog(root, p, o) {
+  const { repo, rel, isDir } = await gitTarget(root, p);
+  const info = await gitRepoInfo(repo);
+  if (!info.head) return { repo: info, rel, commits: [], more: false, note: '아직 커밋이 없습니다' };
+  const n = Math.min(Math.max(+o.n || 100, 1), 300), skip = Math.max(+o.skip || 0, 0), q = String(o.q || '').trim();
+  const scope = ['repo', 'file', 'dir', 'lines'].includes(o.scope) ? o.scope : 'repo';
+  const out = { repo: info, rel: scope === 'repo' ? '' : rel, scope, commits: [], more: false };
+  const fmt = ['--no-color', `--format=${LOG_FMT}`];
+  if (scope === 'lines') {
+    if (isDir || !rel) throw httpError(400, '파일이 아닙니다');
+    let { ha, hb, head } = o;
+    if (!ha || !hb || !head) {
+      const a = Math.max(1, +o.a | 0), b = Math.max(a, +o.b | 0);
+      const m = await mapLinesToHead(repo, rel, a, b, typeof o.content === 'string' ? o.content : null);
+      if (!m) throw httpError(400, '선택한 줄은 아직 커밋되지 않았습니다');
+      ha = m.a; hb = m.b; head = info.head;
+    }
+    if (!/^[0-9a-f]{7,64}$/i.test(head)) throw httpError(400, 'bad head');
+    let raw;
+    try { raw = await git(repo, ['log', ...fmt, `-L${+ha},${+hb}:${rel}`, `--skip=${skip}`, `-n${n + 1}`, head], { maxBuffer: 64 << 20, timeout: 60000 }); }
+    catch (e) { throw httpError(400, gitMsg(e)); }
+    out.commits = parseLog(raw, { patch: true }); out.range = { a: +o.a || +ha, b: +o.b || +hb, ha: +ha, hb: +hb, head };
+  } else {
+    const args = ['log', ...fmt];
+    if (scope === 'file') args.push('--follow', '--name-status');
+    if (q) {   // 메시지 · 작성자 · 해시 앞부분으로 찾기 (작성자/메시지 조건은 git 에서 AND 라 따로 돌려 합친다)
+      const lim = ['-n300', '--regexp-ignore-case', '--fixed-strings'], tail = scope === 'repo' ? [] : ['--', rel || '.'];
+      const runs = [git(repo, [...args, ...lim, `--grep=${q}`, ...tail]), git(repo, [...args, ...lim, `--author=${q}`, ...tail])];
+      if (/^[0-9a-f]{4,40}$/i.test(q)) runs.push(git(repo, [...args, '-n1', q, ...tail]).catch(() => ''));
+      const seen = new Set();
+      out.commits = (await Promise.all(runs.map((r) => r.catch(() => '')))).flatMap((x) => parseLog(x, { names: scope === 'file' }))
+        .filter((c) => !seen.has(c.h) && seen.add(c.h)).sort((x, y) => y.at - x.at).slice(0, 300);
+      out.q = q; return out;
+    }
+    args.push(`--skip=${skip}`, `-n${n + 1}`);
+    if (scope !== 'repo') args.push('--', rel || '.');
+    out.commits = parseLog(await git(repo, args, { maxBuffer: 64 << 20 }), { names: scope === 'file' });
+  }
+  if (out.commits.length > n) { out.commits.length = n; out.more = true; }
+  return out;
+}
+// 커밋 하나: 메타 + 바뀐 파일 + diff (only: 파일/폴더로 제한, 이름이 바뀐 파일은 old 도)
+async function gitShow(root, p, o) {
+  const { repo } = await gitTarget(root, p);
+  const sha = String(o.sha || ''); if (!/^[0-9a-f]{4,64}$/i.test(sha)) throw httpError(400, 'bad sha');
+  let meta;
+  try { meta = await git(repo, ['show', '-s', '--no-color', '--format=%H%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%P%x1f%D%x1f%s%x1f%b', sha]); } catch (e) { throw httpError(404, gitMsg(e)); }
+  const [h, an, ae, at, cn, ct, ps, refs, subj, ...body] = meta.replace(/\n$/, '').split('\x1f');
+  const parents = ps ? ps.split(' ') : [];
+  const range = parents.length ? [`${h}^1`, h] : [h];   // 병합 커밋은 첫 부모와 비교 (병합으로 들어온 변경 전체)
+  const diffArgs = parents.length ? ['diff', '--no-color', '-M', ...range] : ['show', '--no-color', '-M', '--format=', h];
+  const files = new Map();
+  const ns = await git(repo, [...diffArgs, '--name-status', '-z'], { maxBuffer: 32 << 20 }).catch(() => '');
+  const z = ns.split('\0'); for (let i = 0; i < z.length - 1;) { const st = z[i++]; if (!st) continue; const f = { st: st[0] }; if (/^[RC]/.test(st)) { f.from = z[i++]; } f.path = z[i++]; files.set(f.path, f); }
+  const num = await git(repo, [...diffArgs, '--numstat', '-z'], { maxBuffer: 32 << 20 }).catch(() => '');
+  const nz = num.split('\0'); for (let i = 0; i < nz.length;) {
+    const rec = nz[i++]; if (!rec) continue; const [ad, dl, pth] = rec.split('\t'); let to = pth;
+    if (pth === '') { i++; to = nz[i++]; }   // 이름 바뀜: 빈 경로 뒤에 이전/새 경로
+    const f = files.get(to); if (f) { f.add = ad === '-' ? null : +ad; f.del = dl === '-' ? null : +dl; }
+  }
+  const out = { commit: { h, an, ae, at: +at, cn, ct: +ct, p: parents, refs, subj, body: body.join('\x1f').trim() }, files: [...files.values()].slice(0, 3000), nfiles: files.size };
+  if (!o.nodiff) {
+    const only = [o.only, o.old].filter((x) => typeof x === 'string' && x);
+    const MAX = 400000;
+    let diff = await git(repo, [...diffArgs, '--no-ext-diff', ...(only.length ? ['--', ...only] : [])], { maxBuffer: 64 << 20 }).catch((e) => { throw httpError(500, gitMsg(e)); });
+    if (diff.length > MAX) { diff = diff.slice(0, diff.lastIndexOf('\n', MAX)); out.truncated = true; }
+    out.diff = diff;
+  }
+  return out;
+}
+// PR 찾기: gh 가 있으면 GitHub API (정확), 없거나 실패하면 커밋 메시지/병합 커밋으로 추정
+const GH = (() => {
+  const dirs = (process.env.PATH || '').split(path.delimiter).concat(['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', path.join(HOME, '.local/bin')]);
+  for (const d of dirs) { const p = path.join(d, 'gh'); try { fs.accessSync(p, fs.constants.X_OK); return p; } catch {} }
+  return null;
+})();
+const refsCache = new Map();   // repo:sha → { t, v }
+async function ghPulls(repo, web, sha) {
+  if (!GH || !web || web.kind !== 'github') return null;
+  const args = ['api', '-H', 'Accept: application/vnd.github+json', `repos/${web.path}/commits/${sha}/pulls`];
+  if (web.host !== 'github.com') args.push('--hostname', web.host);
+  try {
+    const list = JSON.parse(await execP(GH, args, { cwd: repo, timeout: 12000, env: { ...process.env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1', NO_COLOR: '1' } }));
+    if (!Array.isArray(list)) return null;
+    return list.map((x) => ({ n: x.number, title: x.title, url: x.html_url, state: x.merged_at ? 'merged' : x.draft ? 'draft' : x.state, head: x.head?.ref || '', base: x.base?.ref || '', by: x.user?.login || '' }));
+  } catch { return null; }
+}
+const PR_RE = [/^Merge pull request #(\d+) from ([^\s]+)/, /\(#(\d+)\)\s*$/, /^Merged in ([^\s]+) \(pull request #(\d+)\)/, /^Merge branch '([^']+)' into [^\s]+/];
+function prFromSubject(subj, web) {
+  let m;
+  if ((m = PR_RE[0].exec(subj))) return { n: +m[1], head: m[2].replace(/^[^/]+\//, ''), guess: true };   // owner/branch
+  if ((m = PR_RE[2].exec(subj))) return { n: +m[2], head: m[1], guess: true };
+  if ((m = PR_RE[1].exec(subj))) return { n: +m[1], guess: true };
+  if ((m = /See merge request [^!]*!(\d+)/.exec(subj))) return { n: +m[1], guess: true };
+  return null;
+}
+async function gitRefs(root, p, o) {
+  const { repo } = await gitTarget(root, p);
+  const sha = String(o.sha || ''); if (!/^[0-9a-f]{7,64}$/i.test(sha)) throw httpError(400, 'bad sha');
+  const key = repo + ':' + sha, c = refsCache.get(key); if (c && Date.now() - c.t < 5 * 60000) return c.v;
+  const { web } = await gitWeb(repo);
+  const v = { branches: [], nbranches: 0, tags: [], pr: [], prSource: null, merge: null, web };
+  const [br, tg] = await Promise.all([
+    git(repo, ['branch', '-a', '--contains', sha, '--format=%(refname)'], { timeout: 20000 }).catch(() => ''),
+    git(repo, ['tag', '--contains', sha, '--sort=creatordate'], { timeout: 20000 }).catch(() => ''),
+  ]);
+  // 로컬 main 과 origin/main 은 하나로: { name, local, remote(웹 주소가 있는 원격에 있음) }
+  const { remote } = await gitWeb(repo), byName = new Map();
+  for (const s of br.split('\n').map((x) => x.trim())) {
+    let m, name, isRemote = false;
+    if ((m = /^refs\/heads\/(.+)$/.exec(s))) name = m[1];
+    else if ((m = /^refs\/remotes\/([^/]+)\/(.+)$/.exec(s)) && m[2] !== 'HEAD') { name = m[1] === remote ? m[2] : `${m[1]}/${m[2]}`; isRemote = m[1] === remote; }
+    else continue;
+    const e = byName.get(name) || { name, local: false, remote: false }; if (isRemote) e.remote = true; else if (!m[0].startsWith('refs/remotes/')) e.local = true; byName.set(name, e);
+  }
+  const prio = (b) => (/^(main|master|develop|trunk)$/.test(b.name) ? 0 : 1);
+  const all = [...byName.values()].sort((a, b) => prio(a) - prio(b) || a.name.localeCompare(b.name));
+  v.nbranches = all.length; v.branches = all.slice(0, 40);
+  v.tags = tg.split('\n').filter(Boolean).slice(0, 5);   // 처음 들어간 태그부터
+  const gh = await ghPulls(repo, web, sha);   // 배열(비어 있을 수 있음) = GitHub 의 답, null = gh 없음/실패
+  v.prSource = gh ? 'gh' : 'git'; v.ghFailed = !gh && !!GH && web?.kind === 'github';
+  if (gh) v.pr = gh;
+  if (!gh || !gh.length) {
+    // 이 커밋 자체가 병합/squash 커밋이거나, 이 커밋을 들여온 병합 커밋의 메시지에서 PR 번호·브랜치를 찾는다
+    const subj = (await git(repo, ['show', '-s', '--format=%s', sha]).catch(() => '')).trim();
+    let pr = prFromSubject(subj, web);
+    if (!pr) {
+      const tip = (await git(repo, ['rev-parse', '--verify', '-q', 'origin/HEAD']).catch(() => '')).trim() || 'HEAD';
+      const merges = await git(repo, ['log', '--no-color', '--ancestry-path', '--merges', '--reverse', '--format=%H%x1f%s', `${sha}..${tip}`], { timeout: 20000, maxBuffer: 32 << 20 }).catch(() => '');
+      for (const ln of merges.split('\n').slice(0, 400)) {
+        const [mh, ms = ''] = ln.split('\x1f'); if (!mh) continue;
+        const g = prFromSubject(ms, web), mb = PR_RE[3].exec(ms);
+        if (g || mb) { pr = g; v.merge = { h: mh, subj: ms, branch: g?.head || mb?.[1] || '' }; break; }
+      }
+    }
+    if (pr && !gh) v.pr = [{ n: pr.n, head: pr.head || v.merge?.branch || '', title: '', url: '', state: '', guess: true }];
+  }
+  refsCache.set(key, { t: Date.now(), v });
+  if (refsCache.size > 500) refsCache.delete(refsCache.keys().next().value);
+  return v;
+}
+// git blame (편집 중인 내용 그대로: --contents -). 줄마다 커밋 번호, 커밋 목록은 따로
+function gitBlame(repo, rel, content) {
+  return new Promise((resolve, reject) => {
+    const args = ['-c', 'core.quotepath=off', '-C', repo, 'blame', '--porcelain', ...(typeof content === 'string' ? ['--contents', '-'] : []), '--', rel];
+    const ch = spawn('git', args, { env: GIT_VIEW_ENV });
+    let out = '', err = '';
+    ch.stdout.setEncoding('utf8'); ch.stdout.on('data', (d) => { out += d; if (out.length > 128 << 20) ch.kill(); });
+    ch.stderr.on('data', (d) => { err += d; });
+    ch.on('error', reject);
+    ch.on('close', (code) => {
+      if (code !== 0) return reject(httpError(400, /no such path|no such ref|not in HEAD|fatal: no such path/i.test(err) ? 'git 에 커밋된 적이 없는 파일입니다' : err.trim().split('\n').slice(-3).join('\n') || 'blame 실패'));
+      const commits = [], idx = new Map(), lines = []; let curC = null;
+      for (const ln of out.split('\n')) {
+        if (ln.startsWith('\t')) continue;
+        const m = /^([0-9a-f]{40,64}) (\d+) (\d+)/.exec(ln);
+        if (m) {
+          if (!idx.has(m[1])) { idx.set(m[1], commits.length); commits.push({ h: m[1], an: '', at: 0, subj: '', fn: '' }); }
+          curC = commits[idx.get(m[1])]; lines.push(idx.get(m[1])); continue;
+        }
+        if (!curC) continue;
+        if (ln.startsWith('author ')) curC.an = ln.slice(7);
+        else if (ln.startsWith('author-time ')) curC.at = +ln.slice(12);
+        else if (ln.startsWith('summary ')) curC.subj = ln.slice(8);
+        else if (ln.startsWith('filename ')) curC.fn = ln.slice(9);
+      }
+      for (const c of commits) if (/^0+$/.test(c.h)) { c.wip = true; c.an = ''; c.subj = '커밋 안 된 변경'; }
+      resolve({ commits, lines });
+    });
+    if (typeof content === 'string') ch.stdin.end(content); else ch.stdin.end();
+    ch.stdin.on('error', () => {});
+  });
+}
+// 원격 웹에서 파일/폴더/줄을 여는 고정 주소: HEAD 가 원격에 올라가 있으면 커밋 해시, 아니면 원격 브랜치 이름
+async function gitPermalink(root, p, o) {
+  const { repo, rel, isDir } = await gitTarget(root, p);
+  const { web, remote } = await gitWeb(repo);
+  if (!web) throw httpError(400, '원격 저장소(remote) 웹 주소를 알 수 없습니다');
+  const notes = [];
+  let ref = '';
+  const head = (await git(repo, ['rev-parse', 'HEAD']).catch(() => '')).trim();
+  if (head) {
+    const remoteHas = (await git(repo, ['branch', '-r', '--contains', head], { timeout: 15000 }).catch(() => '')).trim();
+    if (remoteHas) ref = head;
+  }
+  if (!ref) {
+    let up = (await git(repo, ['rev-parse', '--abbrev-ref', '@{u}']).catch(() => '')).trim();
+    if (!up) up = (await git(repo, ['rev-parse', '--abbrev-ref', `${remote}/HEAD`]).catch(() => '')).trim();
+    ref = up ? up.slice(up.indexOf('/') + 1) : 'HEAD';
+    notes.push(head ? `푸시하지 않은 커밋이 있어 원격 브랜치(${ref}) 기준으로 엽니다` : '');
+  }
+  let a = +o.a || 0, b = +o.b || 0;
+  if (a && !isDir) {
+    const m = await mapLinesToHead(repo, rel, a, Math.max(a, b), typeof o.content === 'string' ? o.content : null);
+    if (!m) { notes.push('선택한 줄은 아직 커밋되지 않아 파일만 엽니다'); a = b = 0; }
+    else { if (m.a !== a || m.b !== Math.max(a, b)) notes.push(`커밋되지 않은 변경이 있어 줄 번호를 ${m.a}–${m.b} 로 맞췄습니다`); a = m.a; b = m.b; }
+  }
+  return { web, ref, rel, isDir, a, b, note: notes.filter(Boolean).join(' · ') };
+}
+
 async function api(req, res, url, root) {
   const p = url.searchParams.get('path') || '';
   const route = `${req.method} ${url.pathname}`;
@@ -817,6 +1107,24 @@ async function api(req, res, url, root) {
     case 'POST /api/git/pull': { // fast-forward 만 허용 (병합 커밋/충돌을 만들지 않는다)
       const { repo: r } = JSON.parse(await readBody(req));
       try { await git(await gitRepoOf(root, r), ['pull', '--ff-only'], { timeout: 120000 }); } catch (e) { throw httpError(500, gitMsg(e)); }
+      return send(res, 200, { ok: true });
+    }
+    case 'POST /api/git/log': return send(res, 200, await gitLog(root, p, JSON.parse((await readBody(req)) || '{}')));
+    case 'POST /api/git/show': return send(res, 200, await gitShow(root, p, JSON.parse((await readBody(req)) || '{}')));
+    case 'GET /api/git/refs': return send(res, 200, await gitRefs(root, p, { sha: url.searchParams.get('sha') }));
+    case 'POST /api/git/permalink': return send(res, 200, await gitPermalink(root, p, JSON.parse((await readBody(req)) || '{}')));
+    case 'POST /api/git/blame': {
+      const { content } = JSON.parse((await readBody(req)) || '{}');
+      const { repo, rel, isDir } = await gitTarget(root, p);
+      if (isDir || !rel) throw httpError(400, '파일이 아닙니다');
+      const r = await gitBlame(repo, rel, content);
+      return send(res, 200, { ...r, repo: await gitRepoInfo(repo), rel });
+    }
+    case 'POST /api/open-url': { // 기본 브라우저로 웹 주소 열기 (응답을 기다린 뒤 여는 링크는 창 열기가 막힐 수 있어 서버가 연다)
+      const { url: u } = JSON.parse((await readBody(req)) || '{}');
+      if (typeof u !== 'string' || !/^https?:\/\/[^\s]+$/i.test(u) || u.length > 4000) throw httpError(400, 'bad url');
+      const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
+      const c = spawn(cmd, [u], { detached: true, stdio: 'ignore' }); c.on('error', () => {}); c.unref();
       return send(res, 200, { ok: true });
     }
     case 'POST /api/reveal': { // Finder / 파일 관리자 / 터미널 / 기본 앱으로 열기

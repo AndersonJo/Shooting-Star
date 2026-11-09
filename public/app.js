@@ -171,7 +171,7 @@ $('#filter-info').onclick = () => openSettings();
 const wsKey = (k) => `ws:${state.root}:${k}`; // 폴더(워크스페이스)별 탭/펼침 상태
 const persistTabs = () => {
   if (!state.root) return;
-  store.set(wsKey('tabs'), state.tabs.filter((t) => t.kind !== 'diff' && t.kind !== 'run' && t.kind !== 'sql' && !isDrop(t.path)).map((t) => ({ path: t.path, mode: t.mode })));
+  store.set(wsKey('tabs'), state.tabs.filter((t) => t.kind !== 'diff' && t.kind !== 'history' && t.kind !== 'run' && t.kind !== 'sql' && !isDrop(t.path)).map((t) => ({ path: t.path, mode: t.mode })));
   store.set(wsKey('active'), state.active);
   store.set(wsKey('expanded'), [...state.expanded]);
 };
@@ -187,7 +187,7 @@ let treeSeq = 0;
 function treePins() {
   const t = cur(); if (!t) return null;
   if (t.kind === 'gallery') { const d = t.dir; return d === state.root ? { dir: '' } : d.startsWith(state.root + '/') ? { dir: d.slice(state.root.length + 1) } : null; }
-  if (['diff', 'run', 'sql'].includes(t.kind) || isMemo(t.path) || isExt(t.path) || isDrop(t.path)) return null;
+  if (['diff', 'history', 'run', 'sql'].includes(t.kind) || isMemo(t.path) || isExt(t.path) || isDrop(t.path)) return null;
   return { file: t.path };
 }
 async function renderTree() {
@@ -476,7 +476,7 @@ async function reload(t = cur()) {
 //  · 트리: 바뀐 폴더만 다시 읽기   · 열린 탭: 저장 안 한 변경이 없으면 자동 반영, 있으면 ⚠ 충돌 표시(저장 시 덮어쓰기 확인)
 let pendingPvScroll = null;
 async function syncTab(t) {
-  if (!t || t.kind === 'image' || t.kind === 'diff' || t.kind === 'run' || t.kind === 'sql' || t.kind === 'gallery' || (isMemo(t.path) || isExt(t.path)) && t.path !== state.active) return;
+  if (!t || t.kind === 'image' || t.kind === 'diff' || t.kind === 'history' || t.kind === 'run' || t.kind === 'sql' || t.kind === 'gallery' || (isMemo(t.path) || isExt(t.path)) && t.path !== state.active) return;
   if (Date.now() - (t._savedAt || 0) < 1500) return;   // 방금 우리가 저장한 파일의 변경 이벤트는 무시
   try {
     const f = await api('GET', 'file', { path: t.path });
@@ -520,7 +520,7 @@ function onFsEvent(d) { // d: { paths, all }
     renderTree();
     const set = d.all ? null : new Set(d.paths);
     for (const t of state.tabs) {
-      if (t.kind === 'run' || t.kind === 'sql') continue;
+      if (t.kind === 'run' || t.kind === 'sql' || t.kind === 'history') continue;
       if (t.kind === 'gallery') { if (d.all && t.path === state.active) galRefresh(t); continue; }   // 갤러리는 따로 감시한다 (창으로 돌아오면 다시 읽기)
       if (t.kind === 'diff') { t.stale = true; if (t.path === state.active) renderContent(); continue; }   // 열려 있는 diff 는 다시 계산
       if (t.kind === 'image') { if (set) { if (set.has(t.path)) imgReload(t); } else imgCheck(t); continue; }   // 이미지가 바뀌면 다시 불러온다 (창으로 돌아올 때는 정말 바뀌었을 때만)
@@ -556,8 +556,8 @@ function renderTabs() {
   box.replaceChildren(...state.tabs.map((t) => {
     const x = el('span', { className: 'x', title: '닫기 (⌘W)' });
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.path); };
-    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : ''), title: (t.kind === 'gallery' ? `이미지: ${t.dir}` : t.kind === 'diff' ? `${t.repoName}: ${t.file} — 변경 내용` : t.kind === 'run' ? `Run: ${t.name}` : t.kind === 'sql' ? `SQL: ${t.connName}` : t.path) + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
-      el('span', { textContent: t.kind === 'gallery' ? '🖼 ' + (t.dir.split('/').pop() || '/') : isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.kind === 'diff' ? t.file.split('/').pop() + ' (diff)' : t.kind === 'run' ? '▶ ' + t.name : t.kind === 'sql' ? '🗄 ' + t.connName + (t.n > 1 ? ' #' + t.n : '') : t.path.split('/').pop() }), x);
+    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : ''), title: (t.kind === 'gallery' ? `이미지: ${t.dir}` : t.kind === 'diff' ? `${t.repoName}: ${t.file} — 변경 내용` : t.kind === 'history' ? histTitle(t) : t.kind === 'run' ? `Run: ${t.name}` : t.kind === 'sql' ? `SQL: ${t.connName}` : t.path) + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
+      el('span', { textContent: t.kind === 'gallery' ? '🖼 ' + (t.dir.split('/').pop() || '/') : isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.kind === 'diff' ? t.file.split('/').pop() + ' (diff)' : t.kind === 'history' ? histLabel(t) : t.kind === 'run' ? '▶ ' + t.name : t.kind === 'sql' ? '🗄 ' + t.connName + (t.n > 1 ? ' #' + t.n : '') : t.path.split('/').pop() }), x);
     tab.onclick = () => { flushAll(); state.active = t.path; state.selected = t.kind === 'gallery' ? '' : t.path; persistTabs(); renderAll(); };
     tab.onauxclick = (e) => e.button === 1 && closeTab(t.path);
     tab.oncontextmenu = (e) => { // 탭 우클릭: 닫기 / 다른 탭 모두 닫기 / 오른쪽 탭 모두 닫기 / 모두 닫기
@@ -572,13 +572,14 @@ function renderTabs() {
         '-',
         ...(isDrop(t.path) ? [] : [['경로 복사', () => copy(absOf(t.path), '전체 경로 복사됨')]]),
         ...(isMemo(t.path) || isExt(t.path) || isDrop(t.path) ? [] : isGal(t.path) ? [[`${FM}에서 열기`, () => revealPath('@ext' + t.dir, 'reveal')]] : [[`${FM}에서 보기`, () => revealPath(t.path, 'reveal')]]),
+        ...(gitable(t) ? ['-', ['Git', null, '', gitMenu({ path: t.path, isDir: false })]] : t.kind === 'history' ? ['-', ['Git 히스토리 새로고침', () => histReload(t)]] : []),
       ].map((it) => (it === '-' ? ['-'] : it)));
     };
     return tab;
   }));
   box.querySelector('.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   navSync();   // 뒤로/앞으로 기록
-  document.title = (cur() ? cur().path.split('/').pop() + (dirty(cur()) ? ' ●' : '') + ' — ' : '') + 'shooting-star';
+  document.title = (cur() ? (cur().kind === 'history' ? histLabel(cur()) : cur().kind === 'diff' ? cur().file.split('/').pop() + ' (diff)' : cur().path.split('/').pop()) + (dirty(cur()) ? ' ●' : '') + ' — ' : '') + 'shooting-star';
 }
 
 function btn(label, title, onclick, cls = '') {
@@ -604,6 +605,7 @@ function renderToolbar() {
       btn('↻', '다시 불러오기', () => galLoad(t)));
     return;
   }
+  if (t.kind === 'history') return histToolbar(t, bar);
   if (t.kind === 'diff') {
     const seg = el('span', { className: 'seg' }, ...MODES.diff.map(([m, label]) => btn(label, '', () => { t.mode = m; store.set('diffMode', m); renderToolbar(); renderContent(); }, t.mode === m ? 'on' : '')));
     bar.replaceChildren(el('span', { className: 'path' }), seg, el('span', { className: 'sep' }),
@@ -621,9 +623,10 @@ function renderToolbar() {
   const modes = MODES[t.kind];
   if (modes.length > 1) {
     const seg = el('span', { className: 'seg' }, ...modes.map(([m, label]) =>
-      btn(label, '', () => { t.mode = m; persistTabs(); renderToolbar(); renderContent(); }, t.mode === m ? 'on' : '')));
+      btn(label, '', () => { t.mode = m; t.blame = null; persistTabs(); renderToolbar(); renderContent(); }, t.mode === m && !t.blame ? 'on' : '')));
     items.push(seg, el('span', { className: 'sep' }));
   }
+  if (t.blame) items.push(btn('Blame ✕', 'Blame 끄기 (Esc) — 줄마다 마지막으로 바꾼 커밋', () => toggleBlame(t.path), 'on'), el('span', { className: 'sep' }));
   items.push(
     btn('복사', '전체 내용 복사', () => copy(t.content, '전체 복사됨')),
     btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) || isExt(t.path) || e.shiftKey ? absOf(t.path) : t.path, '경로 복사됨')),
@@ -674,6 +677,7 @@ function validate() {
     return setStatus(d ? [`이미지 ${d.total.toLocaleString()}장`, d.dirs.length ? `폴더 ${d.dirs.length}` : '', d.others ? `기타 파일 ${d.others}` : '', s ? `${s.name}${s.w ? `  ${s.w}×${s.h}` : ''}  ${fmtSize(s.size)}` : ''].filter(Boolean).join(' · ') : '');
   }
   if (t && t.kind === 'diff') return setStatus(t.stat || '');
+  if (t && t.kind === 'history') return setStatus(histStatus(t));
   if (!t || t.kind === 'image') return setStatus('');
   let msg = '', cls = 'ok';
   try {
@@ -698,6 +702,8 @@ function renderContent() {
   if (t.kind === 'image') { box.replaceChildren(imageViewer(t)); validate(); return; }
   if (t.kind === 'run') { box.replaceChildren(runView(t)); validate(); return; }
   if (t.kind === 'sql') { box.replaceChildren(sqlView(t)); validate(); return; }
+  if (t.kind === 'history') { const v = historyView(t); if (box.firstChild !== v || box.childNodes.length !== 1) { box.replaceChildren(v); histRestoreScroll(t); } validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
+  if (t.blame) { box.replaceChildren(blameView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.kind === 'diff') { box.replaceChildren(diffView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   const panes = [];
   const editor = () => {
@@ -933,18 +939,36 @@ function renderObjTree(t) {
 }
 
 // ───────── 컨텍스트 메뉴 / CRUD ─────────
-function showMenu(x, y, items) {
-  const m = $('#menu');
-  m.replaceChildren(...items.map(([label, fn, cls]) => {
+// items: [label, fn, cls, sub] — sub(배열)가 있으면 '▸' 하위 메뉴. '-' 는 구분선
+const subMenu = el('div', { id: 'menu-sub', hidden: true }); document.body.append(subMenu);
+const closeMenus = () => { $('#menu').hidden = true; subMenu.hidden = true; };
+function fillMenu(m, items, isSub) {
+  m.replaceChildren(...items.map(([label, fn, cls, sub]) => {
     if (label === '-') return el('hr');   // 구분선
-    const d = el('div', { textContent: label, className: cls || '' });
-    d.onclick = () => { m.hidden = true; fn(); }; return d;
+    const d = el('div', { textContent: label, className: (cls || '') + (sub ? ' has-sub' : '') });
+    if (sub) { const open = () => showSubMenu(d, sub); d.onmouseenter = open; d.onclick = (e) => { e.stopPropagation(); open(); }; }
+    else { if (!isSub) d.onmouseenter = () => { subMenu.hidden = true; $('#menu').querySelector('.sub-open')?.classList.remove('sub-open'); }; d.onclick = () => { closeMenus(); fn(); }; }
+    return d;
   }));
+}
+function showSubMenu(item, items) {
+  $('#menu').querySelector('.sub-open')?.classList.remove('sub-open'); item.classList.add('sub-open');
+  fillMenu(subMenu, items, true); subMenu.hidden = false;
+  const r = item.getBoundingClientRect(), w = subMenu.offsetWidth, h = subMenu.offsetHeight;
+  subMenu.style.left = (r.right + w + 4 > innerWidth ? Math.max(4, r.left - w + 2) : r.right - 2) + 'px';
+  subMenu.style.top = Math.max(4, Math.min(r.top - 5, innerHeight - h - 4)) + 'px';
+}
+function showMenu(x, y, items) {
+  const m = $('#menu'); subMenu.hidden = true;
+  fillMenu(m, items, false);
   m.hidden = false;
   m.style.left = Math.min(x, innerWidth - m.offsetWidth - 4) + 'px';
   m.style.top = Math.min(y, innerHeight - m.offsetHeight - 4) + 'px';
 }
-document.addEventListener('click', () => ($('#menu').hidden = true));
+document.addEventListener('click', closeMenus);
+for (const m of [$('#menu'), subMenu]) m.addEventListener('mousedown', (e) => e.preventDefault());   // 메뉴를 눌러도 편집기의 포커스·선택이 그대로 남게
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#menu').hidden) { e.preventDefault(); e.stopPropagation(); closeMenus(); } }, true);
+window.addEventListener('blur', closeMenus);
 $('#tree').addEventListener('contextmenu', (ev) => {
   ev.preventDefault();
   const row = ev.target.closest('.row');
@@ -962,6 +986,7 @@ $('#tree').addEventListener('contextmenu', (ev) => {
   if (state.platform === 'darwin') items.push(['터미널에서 열기', () => revealPath(p, 'terminal')]);
   if (row && !isDir && isEnc(p)) items.push(['🔓 암호 해제 (평문으로 되돌리기)…', () => decryptEntry(p)], ['지금 잠그기', lockAll]);
   else if (row && !isDir && kindOf(p) !== 'image') items.push(['🔒 암호화…', () => encryptEntry(p)]);
+  items.push(['Git', null, '', gitMenu({ path: p, isDir })]);
   if (row) items.push(
     ['이름 변경…', () => renameEntry(p)],
     ['경로 복사', () => copy(p, '경로 복사됨')],
@@ -1283,6 +1308,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.code === 'KeyL' && e.altKey) { e.preventDefault(); prettify(); }
   else if (k === 'e' && cur() && MODES[cur().kind]) { // 보기 ↔ 편집
     e.preventDefault(); const t = cur(); const ms = MODES[t.kind].map((m) => m[0]);
+    if (t.blame) { t.blame = null; renderToolbar(); renderContent(); return; }   // Blame 화면 → 원래 보기로
     t.mode = ms[(ms.indexOf(t.mode) + 1) % ms.length]; persistTabs(); renderToolbar(); renderContent();
   }
 });
@@ -1323,7 +1349,7 @@ async function navOpen(p) { // 기록의 항목을 다시 보여 준다 (닫힌 
   if (tabOf(p)) { flushAll(); state.active = p; state.selected = tabOf(p).kind === 'gallery' ? '' : p; persistTabs(); renderAll(); return true; }
   if (isGal(p)) { const t = cur(), abs = p.slice(4) || '/'; if (t?.kind === 'gallery') galGo(t, abs); else openGallery(abs); return true; }   // 갤러리는 같은 탭에서 폴더를 옮긴다
   if (isDrop(p)) { if (!dropped.has(p)) return false; openImageList([p]); return true; }
-  if (/^@(run|sql|diff)\//.test(p)) return false;   // 닫은 실행/SQL/diff 탭은 다시 열 수 없다
+  if (/^@(run|sql|diff|hist)\//.test(p)) return false;   // 닫은 실행/SQL/diff 탭은 다시 열 수 없다
   await openFile(p); return state.active === p;
 }
 let navBusy = false;
@@ -1923,7 +1949,10 @@ function diffView(t) {
   if (t.err) { box.append(el('div', { className: 'dv-msg err', textContent: t.err })); return box; }
   const d = parseDiff(t.diff); t.stat = d.add || d.del ? `+${d.add} −${d.del}` : '';
   if (!d.hunks.length) { box.append(el('div', { className: 'dv-msg', textContent: d.bin ? '바이너리 파일이라 변경 내용을 표시할 수 없습니다.' : '변경 내용이 없습니다. (이미 커밋되었거나 되돌려졌을 수 있습니다)' })); return box; }
-  const split = t.mode === 'split', td = (cls, text) => el('td', { className: cls, textContent: text ?? '' });
+  box.append(diffTable(d, t.mode)); return box;
+}
+function diffTable(d, mode) {   // parseDiff 결과 → 표 (통합 / 나란히)
+  const split = mode === 'split', td = (cls, text) => el('td', { className: cls, textContent: text ?? '' });
   const tbl = el('table', { className: 'dv ' + (split ? 'sp' : 'un') });
   tbl.append(el('colgroup', {}, ...(split ? ['ln', 'cd', 'ln', 'cd'] : ['ln', 'ln', 'sg', 'cd']).map((c) => el('col', { className: c }))));
   for (const h of d.hunks) {
@@ -1944,9 +1973,517 @@ function diffView(t) {
       }
     }
   }
-  box.append(tbl); return box;
+  return tbl;
 }
 $('#btn-git-refresh').onclick = loadGit;
+
+// ───────── Git 히스토리 · Blame · 원격(GitHub) 링크 ─────────
+// 우클릭 → Git ▸ : 저장소 전체 / 이 파일·폴더 / 선택한 줄 히스토리, Blame, GitHub 에서 열기·링크 복사
+const HIST_PAGE = 100;
+const TEXT_KINDS = ['md', 'json', 'yaml', 'csv', 'jsonl', 'text'];
+const gitable = (t) => !!t && (TEXT_KINDS.includes(t.kind) || t.kind === 'image') && !isMemo(t.path) && !isDrop(t.path) && !isGal(t.path);
+const webByRepo = new Map();   // repo 절대경로 → 원격 웹 정보 (메뉴에 GitHub/GitLab 이름 표시용)
+const rememberWeb = (repo) => { if (repo?.abs) webByRepo.set(repo.abs, repo.web || null); };
+function webOfPath(p) {
+  const abs = p ? absOf(p) : state.root; let best = null, len = -1;
+  for (const [r, w] of webByRepo) if ((abs === r || abs.startsWith(r + '/')) && r.length > len) { best = w; len = r.length; }
+  return best;
+}
+const webName = (w) => ({ gitlab: 'GitLab', bitbucket: 'Bitbucket' })[w?.kind] || 'GitHub';
+function webUrl(w, what, o = {}) { // 원격 웹 주소 (GitHub 기본, GitLab · Bitbucket)
+  if (!w) return '';
+  const b = w.base, gl = w.kind === 'gitlab', bb = w.kind === 'bitbucket', enc = (s) => String(s).split('/').map(encodeURIComponent).join('/');
+  const ref = o.ref ? enc(o.ref) : '';
+  switch (what) {
+    case 'commit': return gl ? `${b}/-/commit/${o.sha}` : bb ? `${b}/commits/${o.sha}` : `${b}/commit/${o.sha}`;
+    case 'pr': return gl ? `${b}/-/merge_requests/${o.n}` : bb ? `${b}/pull-requests/${o.n}` : `${b}/pull/${o.n}`;
+    case 'branch': return gl ? `${b}/-/tree/${enc(o.name)}` : bb ? `${b}/branch/${enc(o.name)}` : `${b}/tree/${enc(o.name)}`;
+    case 'tag': return gl ? `${b}/-/tags/${enc(o.name)}` : bb ? `${b}/src/${enc(o.name)}` : `${b}/releases/tag/${enc(o.name)}`;
+    case 'history': return gl ? `${b}/-/commits/${ref}${o.path ? '/' + enc(o.path) : ''}` : bb ? `${b}/commits/branch/${ref}` : `${b}/commits/${ref}${o.path ? '/' + enc(o.path) : ''}`;
+    case 'tree': return (gl ? `${b}/-/tree/${ref}` : bb ? `${b}/src/${ref}` : `${b}/tree/${ref}`) + (o.path ? '/' + enc(o.path) : '');
+    case 'blob': {
+      let u = (gl ? `${b}/-/blob/${ref}/` : bb ? `${b}/src/${ref}/` : `${b}/blob/${ref}/`) + enc(o.path);
+      if (o.a) {
+        const two = o.b && o.b !== o.a;
+        if (!bb && /\.(md|markdown|mdx|rst|adoc|org|ipynb|csv|tsv|svg|geojson)$/i.test(o.path)) u += '?plain=1';   // 렌더링되는 파일은 원문 보기여야 줄 위치로 간다
+        u += gl ? `#L${o.a}${two ? '-' + o.b : ''}` : bb ? `#lines-${o.a}${two ? ':' + o.b : ''}` : `#L${o.a}${two ? '-L' + o.b : ''}`;
+      }
+      return u;
+    }
+  }
+  return b;
+}
+const openUrl = (url) => api('POST', 'open-url', {}, { url }).catch(() => window.open(url, '_blank'));   // 응답을 기다린 뒤 여는 경우 (팝업 차단을 피해 서버가 기본 브라우저로 연다)
+const aLink = (label, url, cls = '') => el('a', { className: 'hv-a ' + cls, href: url, target: '_blank', rel: 'noopener noreferrer', textContent: label, title: url });
+const chipBtn = (label, title, fn, cls = '') => Object.assign(el('button', { className: 'hv-chip ' + cls, textContent: label, title }), { onclick: fn });
+async function copyLater(job, label) { // 클릭 직후 클립보드 쓰기를 예약한다 (Safari/WKWebView 는 await 뒤의 복사를 막는다)
+  try {
+    if (window.ClipboardItem && navigator.clipboard?.write) {
+      await navigator.clipboard.write([new ClipboardItem({ 'text/plain': job.then((s) => new Blob([s], { type: 'text/plain' })) })]);
+      toast(label); return;
+    }
+  } catch {}
+  try { copy(await job, label); } catch (e) { toast(e.message); }
+}
+function ago(sec) {
+  const d = Date.now() / 1000 - sec;
+  if (d < 60) return '방금'; if (d < 3600) return `${Math.floor(d / 60)}분 전`; if (d < 86400) return `${Math.floor(d / 3600)}시간 전`;
+  if (d < 172800) return '어제'; if (d < 86400 * 30) return `${Math.floor(d / 86400)}일 전`;
+  if (d < 86400 * 365) return `${Math.floor(d / 86400 / 30)}달 전`; return `${Math.floor(d / 86400 / 365)}년 전`;
+}
+const fmtDate = (sec) => new Date(sec * 1000).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+// ── 우클릭 메뉴 ──
+function gitMenu({ path: p, isDir, range: r }) {
+  const file = !isDir, w = webName(webOfPath(p)), t = tabOf(p), text = file && kindOf(p) !== 'image' && !isEnc(p);
+  if (!text) r = null;
+  const lr = r && (r.a === r.b ? `${r.a}줄` : `${r.a}–${r.b}줄`);
+  const items = [
+    ['저장소 전체 히스토리', () => openHistory({ path: p, scope: 'repo' })],
+    file ? ['이 파일 히스토리', () => openHistory({ path: p, scope: 'file' })] : p ? ['이 폴더 히스토리', () => openHistory({ path: p, scope: 'dir' })] : null,
+    r ? [`${r.sel ? '선택한 부분' : r.a === r.b ? '이 줄' : '이 블록'} 히스토리 (${lr})`, () => openHistory({ path: p, scope: 'lines', a: r.a, b: r.b })] : null,
+  ];
+  if (text) items.push('-', [t?.blame ? 'Blame 끄기' : 'Blame 보기 (줄마다 마지막 커밋)', () => toggleBlame(p)]);
+  items.push('-', [`${w}에서 ${file ? '파일' : '폴더'} 열기`, () => openRemote(p, { isDir })]);
+  if (r) items.push([`${w}에서 이 줄 열기 (${lr})`, () => openRemote(p, { a: r.a, b: r.b })]);
+  items.push([`${w} 링크 복사${r ? ` (${lr})` : ''}`, () => openRemote(p, { isDir, a: r?.a, b: r?.b, copy: true })]);
+  return items.filter(Boolean).map((x) => (x === '-' ? ['-'] : x));
+}
+async function openRemote(p, { isDir, a, b, copy: cp } = {}) { // 원격 웹에서 파일/폴더/줄 열기 (HEAD 가 올라가 있으면 커밋 고정 주소)
+  const t = tabOf(p), content = a && t && TEXT_KINDS.includes(t.kind) ? t.content : undefined;
+  const job = api('POST', 'git/permalink', { path: p }, { a, b, content })
+    .then((r) => ({ url: webUrl(r.web, r.isDir ? 'tree' : 'blob', { ref: r.ref, path: r.rel, a: r.a, b: r.b }), note: r.note }));
+  if (cp) return copyLater(job.then((x) => { if (x.note) setTimeout(() => toast(x.note), 1600); return x.url; }), '링크 복사됨');
+  try { const x = await job; openUrl(x.url); toast(x.note || `${webName(webOfPath(p))} 에서 엽니다`); } catch (e) { toast(e.message); }
+}
+// 편집기에서 실행할 잘라내기/복사/붙여넣기/전체 선택 (앱에서는 네이티브 편집 명령으로)
+function editCmd(ta, cmd) {
+  ta.focus();
+  const native = window.webkit?.messageHandlers?.edit;
+  if (cmd === 'selectAll') { ta.select(); return; }
+  if (cmd === 'paste') {
+    if (native) { native.postMessage('paste'); return; }
+    navigator.clipboard?.readText?.().then((s) => { if (s) { ta.focus(); document.execCommand('insertText', false, s); } }, () => toast('붙여넣기는 ⌘/Ctrl+V 를 쓰세요 (클립보드 읽기가 막혀 있음)'));
+    return;
+  }
+  if (!document.execCommand(cmd) && native) native.postMessage(cmd);
+}
+// 줄 범위 (1부터): 편집기 선택 / 마크다운 보기의 블록·선택 / 스마트 편집 블록 / Blame 화면
+function taRange(ta) {
+  const v = ta.value, a = ta.selectionStart, b = ta.selectionEnd, line = (i) => v.slice(0, i).split('\n').length;
+  const la = line(a); let lb = line(b);
+  if (b > a && v[b - 1] === '\n') lb--;   // 줄 전체를 선택하면 다음 줄 첫 칸까지 잡힌다
+  return { a: la, b: Math.max(la, lb), sel: b > a && v.slice(a, b).includes('\n') };
+}
+function mdBlockLines(text) { // 마크다운 최상위 블록(공백 제외) → 원문 줄 범위. 미리보기의 최상위 요소와 순서가 같다
+  let line = 1; const out = [];
+  for (const tk of marked.lexer(text.replace(/\r\n/g, '\n'))) {
+    if (tk.type !== 'space') out.push({ a: line, b: line + tk.raw.replace(/\s+$/, '').split('\n').length - 1 });
+    line += tk.raw.split('\n').length - 1;
+  }
+  return out;
+}
+const selNodes = (root, target) => { const s = getSelection(); return s.rangeCount && !s.isCollapsed && root.contains(s.anchorNode) && root.contains(s.focusNode) ? { nodes: [s.anchorNode, s.focusNode], sel: true } : { nodes: [target], sel: false }; };
+function previewRange(pv, t, target) {
+  const root = pv.querySelector(':scope > .md'); if (!root || t.kind !== 'md') return null;
+  const blocks = mdBlockLines(t.content), kids = [...root.children]; if (blocks.length !== kids.length) return null;   // 원시 HTML 등으로 블록과 요소가 맞지 않음
+  const { nodes, sel } = selNodes(root, target);
+  const ix = nodes.map((n) => { while (n && n.parentNode !== root) n = n.parentNode; return kids.indexOf(n); }).filter((i) => i >= 0);
+  if (!ix.length) return null;
+  const a = blocks[Math.min(...ix)].a, b = blocks[Math.max(...ix)].b;
+  return { a, b, sel };
+}
+function smartRange(doc, target) {
+  const L = doc?._blockLines?.(); if (!L) return null;
+  const ta = target.closest?.('.sb-ta');
+  if (ta) { const base = L[+ta.closest('.sb')?.dataset.i]; if (!base) return null; const r = taRange(ta); return { a: base.a + r.a - 1, b: base.a + r.b - 1, sel: r.sel }; }
+  const { nodes, sel } = selNodes(doc, target);
+  const ix = nodes.map((n) => (n.nodeType === 1 ? n : n.parentElement)?.closest('.sb')).filter(Boolean).map((e) => +e.dataset.i).filter((i) => L[i]);
+  if (!ix.length) return null;
+  return { a: L[Math.min(...ix)].a, b: L[Math.max(...ix)].b, sel };
+}
+function preLine(pre, node, off) { const r = document.createRange(); r.setStart(pre, 0); r.setEnd(node, off); return r.toString().split('\n').length; }
+function blameRange(box, e) {
+  const pre = box.querySelector('.bl-code'); if (!pre) return null;
+  const s = getSelection();
+  if (s.rangeCount && !s.isCollapsed && pre.contains(s.anchorNode) && pre.contains(s.focusNode)) {
+    const x = preLine(pre, s.anchorNode, s.anchorOffset), y = preLine(pre, s.focusNode, s.focusOffset);
+    return { a: Math.min(x, y), b: Math.max(x, y), sel: x !== y };
+  }
+  const L = blameLineAt(pre, e.clientY); return L ? { a: L, b: L, sel: false } : null;
+}
+$('#content').addEventListener('contextmenu', (e) => {
+  const t = cur(); if (!t || !TEXT_KINDS.includes(t.kind)) return;   // 이미지·diff·히스토리·갤러리·실행·SQL 은 각자 처리
+  const g = (range) => (gitable(t) ? [['-'], ['Git', null, '', gitMenu({ path: t.path, isDir: false, range })]] : []);
+  const ta = e.target.closest('textarea');
+  if (ta) {
+    e.preventDefault();
+    const has = ta.selectionEnd > ta.selectionStart, r = ta.classList.contains('sb-ta') ? smartRange(ta.closest('.smart-doc'), e.target) : taRange(ta);
+    showMenu(e.clientX, e.clientY, [
+      ['잘라내기', () => editCmd(ta, 'cut'), has ? '' : 'disabled'],
+      ['복사', () => editCmd(ta, 'copy'), has ? '' : 'disabled'],
+      ['붙여넣기', () => editCmd(ta, 'paste')],
+      ['전체 선택', () => editCmd(ta, 'selectAll')],
+      ...g(r),
+    ]);
+    return;
+  }
+  if (e.target.closest('.bl-gut')) return;   // Blame 줄 정보는 따로
+  const blv = e.target.closest('.blv'), smart = e.target.closest('.smart-doc'), pv = e.target.closest('#preview');
+  if (!blv && !smart && !pv) return;
+  e.preventDefault();
+  const r = blv ? blameRange(blv, e) : smart ? smartRange(smart, e.target) : previewRange(pv, t, e.target);
+  const sel = String(getSelection()), a = e.target.closest('a[href]');
+  showMenu(e.clientX, e.clientY, [
+    ...(sel ? [['복사', () => { if (!document.execCommand('copy')) copy(sel); }]] : []),
+    ...(a ? [['링크 주소 복사', () => copy(a.href, '링크 복사됨')]] : []),
+    ['경로 복사', () => copy(isMemo(t.path) || isExt(t.path) ? absOf(t.path) : t.path, '경로 복사됨')],
+    ...(blv ? [['Blame 끄기', () => toggleBlame(t.path)]] : []),
+    ...g(r),
+  ]);
+});
+
+// ── 히스토리 탭 ──
+const scopeDesc = (t) => (t.scope === 'repo' ? '저장소 전체' : t.scope === 'dir' ? (t.rel || '.') + '/' : t.scope === 'lines' ? `${t.rel}:${t.range.a}–${t.range.b}` : t.rel);
+const histTitle = (t) => `${t.repo.name}: ${scopeDesc(t)} — Git 히스토리`;
+const histLabel = (t) => '⏱ ' + (t.scope === 'repo' ? t.repo.name : t.scope === 'dir' ? (t.rel.split('/').pop() || t.repo.name) + '/' : t.rel.split('/').pop() + (t.scope === 'lines' ? `:${t.range.a}–${t.range.b}` : ''));
+const histStatus = (t) => `${t.h.q ? `검색 결과 ${t.h.commits.length}개` : `커밋 ${t.h.commits.length}${t.h.more ? '+' : ''}개`} · ${scopeDesc(t)}${t.range && (t.range.ha !== t.range.a || t.range.hb !== t.range.b) ? ` (HEAD 기준 ${t.range.ha}–${t.range.hb}줄)` : ''}`;
+async function openHistory(o) { // o: { path, scope: repo|file|dir|lines, a, b, focus }
+  const src = tabOf(o.path), content = o.scope === 'lines' && src && TEXT_KINDS.includes(src.kind) ? src.content : undefined;
+  setStatus('Git 히스토리 불러오는 중…');
+  let r;
+  try { r = await api('POST', 'git/log', { path: o.path }, { scope: o.scope, a: o.a, b: o.b, content, n: HIST_PAGE }); }
+  catch (e) { setStatus(''); toast(e.message); return; }
+  rememberWeb(r.repo);
+  const key = `@hist/${r.repo.abs}|${r.scope}|${r.rel}` + (r.range ? `|${r.range.ha}-${r.range.hb}@${r.range.head.slice(0, 12)}` : '');
+  let t = tabOf(key);
+  if (!t) {
+    t = { path: key, kind: 'history', content: '', orig: '', mtime: 0, mode: store.get('diffMode', 'unified'), src: o.path, scope: r.scope, repo: r.repo, rel: r.rel, range: r.range || null,
+      h: { commits: r.commits, more: r.more, note: r.note || '', sel: null, q: '', filter: '', base: null, full: false, details: new Map() } };
+    state.tabs.push(t);
+  } else Object.assign(t.h, { commits: r.commits, more: r.more, q: '', base: null, details: new Map() });
+  t.h.sel = o.focus || r.commits[0]?.h || null;
+  flushAll(); state.active = key; persistTabs(); renderAll(); setStatus(histStatus(t));
+  if (o.focus && !t.h.commits.some((c) => c.h === o.focus)) {   // blame 에서 고른 커밋이 첫 쪽에 없으면 몇 쪽 더 읽어 목록에서도 보이게
+    for (let i = 0; i < 8 && t.h.more && !t.h.commits.some((c) => c.h === o.focus); i++) await histMore(t);
+    histSelect(t, o.focus);
+  }
+}
+async function histReload(t) {
+  const H = t.h, src = tabOf(t.src);
+  try {
+    const r = await api('POST', 'git/log', { path: t.src }, { scope: t.scope, n: HIST_PAGE, ...(t.range ? { a: t.range.a, b: t.range.b, content: src && TEXT_KINDS.includes(src.kind) ? src.content : undefined } : {}) });
+    t.repo = r.repo; rememberWeb(r.repo); if (r.range) t.range = r.range;
+    Object.assign(H, { commits: r.commits, more: r.more, q: '', base: null, details: new Map() });
+    for (const k of [...refsMemo.keys()]) if (k.startsWith(t.repo.abs + ':')) refsMemo.delete(k);
+    if (!H.commits.some((c) => c.h === H.sel)) H.sel = H.commits[0]?.h || null;
+    toast('다시 불러옴');
+  } catch (e) { toast(e.message); }
+  if (H.filterEl) H.filterEl.value = H.filter;
+  drawHistList(t); drawHistDetail(t); if (state.active === t.path) { renderTabs(); renderToolbar(); validate(); }
+}
+async function histMore(t) {
+  const H = t.h; if (H.loading || !H.more || H.q) return; H.loading = true; drawHistInfo(t);
+  try {
+    const r = await api('POST', 'git/log', { path: t.src }, { scope: t.scope, skip: H.commits.length, n: HIST_PAGE, ...(t.range ? { a: t.range.a, b: t.range.b, ha: t.range.ha, hb: t.range.hb, head: t.range.head } : {}) });
+    const seen = new Set(H.commits.map((c) => c.h)); H.commits.push(...r.commits.filter((c) => !seen.has(c.h))); H.more = r.more;
+  } catch (e) { toast(e.message); H.more = false; }
+  H.loading = false; drawHistList(t); if (state.active === t.path) validate();
+}
+async function histSearch(t, q) { // 전체 기록에서 메시지·작성자·해시로 찾기
+  const H = t.h; q = q.trim();
+  if (!q) { if (H.q) { Object.assign(H, { commits: H.base.commits, more: H.base.more, q: '', base: null }); drawHistList(t); validate(); } return; }
+  H.info.textContent = `"${q}" 찾는 중…`;
+  try {
+    const r = await api('POST', 'git/log', { path: t.src }, { scope: t.scope === 'lines' ? 'file' : t.scope, q });
+    if (!H.q) H.base = { commits: H.commits, more: H.more };
+    Object.assign(H, { commits: r.commits, more: false, q });
+    if (r.commits[0] && !r.commits.some((c) => c.h === H.sel)) { H.sel = r.commits[0].h; drawHistDetail(t); }
+  } catch (e) { toast(e.message); }
+  drawHistList(t); validate();
+}
+function historyView(t) {
+  const H = t.h; if (H.dom) return H.dom;
+  const filter = el('input', { className: 'hv-filter', placeholder: '필터 · Enter: 전체 기록에서 메시지/작성자/해시 찾기', value: H.filter });
+  const info = el('div', { className: 'hv-info' }), list = el('div', { className: 'hv-items', tabIndex: 0 });
+  const left = el('div', { className: 'hv-list' }, filter, info, list), detail = el('div', { className: 'hv-detail' });
+  const split = el('div', { className: 'hv-split', title: '끌어서 너비 조절' });
+  left.style.width = store.get('histW', 360) + 'px';
+  Object.assign(H, { dom: el('div', { className: 'hv' }, left, split, detail), list, detail, info, filterEl: filter });
+  filter.oninput = () => { H.filter = filter.value; if (H.q) histSearch(t, ''); else drawHistList(t); };
+  filter.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); histSearch(t, filter.value); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (filter.value || H.q) { filter.value = H.filter = ''; histSearch(t, ''); drawHistList(t); } else list.focus(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); list.focus(); }
+  };
+  list.onkeydown = (e) => {
+    const k = e.key, d = k === 'ArrowDown' || k === 'j' ? 1 : k === 'ArrowUp' || k === 'k' ? -1 : k === 'PageDown' ? 10 : k === 'PageUp' ? -10 : 0; if (!d) return;
+    e.preventDefault(); e.stopPropagation();
+    const i = H.vis.findIndex((c) => c.h === H.sel), j = Math.max(0, Math.min(H.vis.length - 1, i < 0 ? 0 : i + d));
+    if (H.vis[j]) histSelect(t, H.vis[j].h);
+  };
+  list.onscroll = () => { H.scroll = list.scrollTop; if (list.scrollTop + list.clientHeight > list.scrollHeight - 200 && H.more && !H.q && !H.filter.trim()) histMore(t); };
+  detail.onscroll = () => { H.dscroll = detail.scrollTop; };
+  split.onpointerdown = (e) => {
+    e.preventDefault(); split.setPointerCapture(e.pointerId); const x0 = e.clientX, w0 = left.offsetWidth;
+    split.onpointermove = (m) => { left.style.width = Math.max(220, Math.min(H.dom.clientWidth - 260, w0 + m.clientX - x0)) + 'px'; };
+    split.onpointerup = () => { split.onpointermove = split.onpointerup = null; store.set('histW', left.offsetWidth); };
+  };
+  drawHistList(t); drawHistDetail(t);
+  return H.dom;
+}
+function histRestoreScroll(t) { const H = t.h; requestAnimationFrame(() => { if (H.list) H.list.scrollTop = H.scroll || 0; if (H.detail) H.detail.scrollTop = H.dscroll || 0; }); }
+function drawHistInfo(t) {
+  const H = t.h; if (!H.info) return; const f = !H.q && H.filter.trim();
+  H.info.textContent = H.q ? `"${H.q}" 검색 결과 ${H.commits.length}개${H.commits.length >= 300 ? '+' : ''}  ·  Esc: 해제`
+    : `${f ? `${H.vis.length} / ` : ''}커밋 ${H.commits.length}${H.more ? '+' : ''}개${H.loading ? ' · 불러오는 중…' : ''}${t.scope === 'file' ? ' · 이름 변경 포함' : ''}`;
+}
+function refChips(refs) { // %D 장식 → 칩 (HEAD, 브랜치, 태그)
+  const out = [];
+  for (let r of (refs || '').split(', ').filter(Boolean)) {
+    if (/\/HEAD$/.test(r)) continue;
+    if (r === 'HEAD' || r.startsWith('HEAD -> ')) { out.push(el('span', { className: 'ref head', textContent: 'HEAD' })); if (r === 'HEAD') continue; r = r.slice(8); }
+    const tag = r.startsWith('tag: '); if (tag) r = r.slice(5);
+    out.push(el('span', { className: 'ref ' + (tag ? 'tag' : 'br'), textContent: (tag ? '🏷 ' : '') + r }));
+  }
+  return out;
+}
+function drawHistList(t) {
+  const H = t.h, list = H.list; if (!list) return;
+  const f = !H.q && H.filter.trim().toLowerCase(), st = list.scrollTop;
+  H.vis = f ? H.commits.filter((c) => `${c.subj}\n${c.an}\n${c.ae}\n${c.h}\n${c.refs}\n${c.path || ''}`.toLowerCase().includes(f)) : H.commits;
+  const rows = H.vis.map((c) => {
+    const meta = el('div', { className: 'hv-meta' }, el('span', { className: 'hv-sha', textContent: c.s || c.h.slice(0, 7) }), el('span', { className: 'hv-an', textContent: c.an }), el('span', { textContent: ago(c.at) }), ...refChips(c.refs));
+    if (t.scope === 'file' && c.path && c.path !== t.rel) meta.append(el('span', { className: 'hv-ren', textContent: (c.st === 'R' ? '↳ ' : '') + c.path, title: '이 커밋에서의 경로 (이름 변경 전)' }));
+    const row = el('div', { className: 'hv-row' + (c.h === H.sel ? ' on' : '') + (c.p.length > 1 ? ' merge' : ''), title: `${c.subj}\n${c.an} · ${fmtDate(c.at)}` }, el('div', { className: 'hv-subj', textContent: c.subj || '(메시지 없음)' }), meta);
+    row.dataset.h = c.h;
+    row.onclick = () => { histSelect(t, c.h); list.focus({ preventScroll: true }); };
+    row.oncontextmenu = (e) => { e.preventDefault(); histSelect(t, c.h); showMenu(e.clientX, e.clientY, commitMenu(t, c)); };
+    return row;
+  });
+  if (!H.vis.length) rows.push(el('div', { className: 'hv-empty', textContent: H.commits.length ? '일치하는 커밋이 없습니다 — Enter 로 전체 기록에서 찾기' : H.q ? '찾은 커밋이 없습니다' : H.note || '커밋이 없습니다' }));
+  if (H.more && !H.q) rows.push(Object.assign(el('button', { className: 'hv-more', textContent: H.loading ? '불러오는 중…' : '더 불러오기' }), { onclick: () => histMore(t) }));
+  list.replaceChildren(...rows); list.scrollTop = st;
+  drawHistInfo(t);
+}
+function histSelect(t, sha) {
+  const H = t.h; if (!sha) return;
+  H.sel = sha;
+  H.list?.querySelectorAll('.hv-row.on').forEach((r) => r.classList.remove('on'));
+  const row = H.list?.querySelector(`.hv-row[data-h="${sha}"]`); if (row) { row.classList.add('on'); row.scrollIntoView({ block: 'nearest' }); }
+  drawHistDetail(t);
+}
+function commitMenu(t, c) {
+  const w = t.repo.web, r = refsMemo.get(t.repo.abs + ':' + c.h), n = webName(w), pth = c.path || t.rel;
+  return [
+    ['커밋 해시 복사', () => copy(c.h, '커밋 해시 복사됨')],
+    ['짧은 해시 복사', () => copy(c.s || c.h.slice(0, 7), '복사됨')],
+    ['메시지 복사', () => copy(c.subj, '메시지 복사됨')],
+    ...(w ? [['-'], [`${n}에서 커밋 열기`, () => window.open(webUrl(w, 'commit', { sha: c.h }), '_blank')],
+      ...(r?.pr?.length ? [[`${n}에서 PR #${r.pr[0].n} 열기`, () => window.open(r.pr[0].url || webUrl(w, 'pr', { n: r.pr[0].n }), '_blank')]] : []),
+      ...(t.scope !== 'repo' && pth ? [[`이 시점의 ${t.scope === 'dir' ? '폴더' : '파일'} ${n}에서 보기`, () => window.open(webUrl(w, t.scope === 'dir' ? 'tree' : 'blob', { ref: c.h, path: pth }), '_blank')]] : [])] : []),
+  ];
+}
+function repoFileOpen(t, file, line) { // repo 기준 경로 → 워크스페이스에서 열기 (밖이면 외부 파일로)
+  const abs = t.repo.abs + '/' + file;
+  openFile(abs.startsWith(state.root + '/') ? abs.slice(state.root.length + 1) : '@ext' + abs, undefined, line ? { line } : undefined);
+}
+async function drawHistDetail(t) {
+  const H = t.h, box = H.detail, sha = H.sel; if (!box) return;
+  if (!sha) { box.replaceChildren(el('div', { className: 'dv-msg', textContent: H.commits.length ? '왼쪽에서 커밋을 고르세요' : '' })); return; }
+  const c = H.commits.find((x) => x.h === sha) || (H.base?.commits || []).find((x) => x.h === sha) || { h: sha, p: [] }, full = H.full, key = sha + (full ? ':full' : '');
+  let d = H.details.get(key);
+  if (!d) {
+    box.replaceChildren(el('div', { className: 'dv-msg', textContent: '불러오는 중…' }));
+    const body = { sha };
+    if (!full) {
+      if (t.scope === 'file') { body.only = c.path || t.rel; if (c.from) body.old = c.from; }
+      else if (t.scope === 'dir' && t.rel) body.only = t.rel;
+      else if (t.scope === 'lines') { if (c.patch != null) body.nodiff = true; else body.only = t.rel; }
+    }
+    try { d = await api('POST', 'git/show', { path: t.src }, body); } catch (e) { d = { err: e.message }; }
+    H.details.set(key, d);
+    if (H.sel !== sha || H.full !== full || !state.tabs.includes(t)) return;   // 그 사이에 다른 커밋을 골랐다
+  }
+  renderHistDetail(t, c, d);
+}
+function parseDiffFiles(text) { // 여러 파일의 diff → 파일별 { path, from, hunks, add, del, bin }
+  const out = [];
+  for (const chunk of (text || '').split(/^(?=diff --git )/m)) {
+    if (!chunk.startsWith('diff --git ')) continue;
+    const hd = /^diff --git a\/(.*) b\/(.*)$/m.exec(chunk), from = /^rename from (.*)$/m.exec(chunk)?.[1], to = /^rename to (.*)$/m.exec(chunk)?.[1];
+    const plus = /^\+\+\+ b\/(.*)$/m.exec(chunk)?.[1], minus = /^--- a\/(.*)$/m.exec(chunk)?.[1];
+    out.push({ path: to || plus || hd?.[2] || minus || '?', from: from || null, isNew: /^new file mode/m.test(chunk), isDel: /^deleted file mode/m.test(chunk), ...parseDiff(chunk) });
+  }
+  return out;
+}
+const ST_LABEL = { A: '추가', M: '수정', D: '삭제', R: '이름 변경', C: '복사', T: '형식 변경' };
+function renderHistDetail(t, c, d) {
+  const H = t.h, box = H.detail, w = t.repo.web, n = webName(w);
+  if (d.err) { box.replaceChildren(el('div', { className: 'dv-msg err', textContent: d.err })); return; }
+  const m = d.commit, pth = c.path || t.rel;
+  const head = el('div', { className: 'hv-head' }, el('div', { className: 'hv-title', textContent: m.subj || '(메시지 없음)' }));
+  if (m.body) head.append(el('div', { className: 'hv-body', textContent: m.body }));
+  const meta = el('div', { className: 'hv-m' },
+    chipBtn(m.h.slice(0, 10), '눌러서 전체 해시 복사\n' + m.h, () => copy(m.h, '커밋 해시 복사됨'), 'sha'),
+    el('span', { className: 'hv-an', textContent: m.an, title: m.ae }),
+    el('span', { textContent: `${fmtDate(m.at)} · ${ago(m.at)}` }),
+    ...(m.cn && m.cn !== m.an ? [el('span', { className: 'dim', textContent: `커밋한 사람 ${m.cn}` })] : []));
+  if (m.p.length) meta.append(el('span', { className: 'dim', textContent: m.p.length > 1 ? '병합 · 부모' : '부모' }), ...m.p.map((x) => chipBtn(x.slice(0, 7), '이 커밋 보기', () => histSelect(t, x), 'sha')));
+  head.append(meta);
+  // 이 커밋 범위(-L)에서 이 시점의 줄 위치
+  let la = 0, lb = 0;
+  if (t.scope === 'lines' && c.patch) { const hk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/m.exec(c.patch); if (hk) { la = +hk[1]; lb = la + Math.max(1, hk[2] == null ? 1 : +hk[2]) - 1; } }
+  const links = el('div', { className: 'hv-links' });
+  if (w) {
+    links.append(aLink(`↗ ${n}에서 커밋 보기`, webUrl(w, 'commit', { sha: m.h })));
+    if (t.scope !== 'repo' && pth && !(c.st === 'D')) links.append(aLink(t.scope === 'dir' ? '↗ 이 시점의 폴더' : la ? `↗ 이 시점의 ${la}–${lb}줄` : '↗ 이 시점의 파일', webUrl(w, t.scope === 'dir' ? 'tree' : 'blob', { ref: m.h, path: pth, a: la, b: lb })));
+  }
+  links.append(chipBtn('메시지 복사', '', () => copy(m.subj + (m.body ? '\n\n' + m.body : ''), '메시지 복사됨')));
+  head.append(links);
+  const refBox = el('div', { className: 'hv-refs' }, el('div', { className: 'hv-ref-row' }, el('span', { className: 'k', textContent: 'PR' }), el('span', { className: 'dim', textContent: 'PR · 브랜치 찾는 중…' })));
+  head.append(refBox);
+  // 바뀐 파일
+  const parts = [head], partial = !H.full && t.scope !== 'repo';
+  const fileRows = d.files.map((f) => {
+    const row = el('div', { className: 'hv-f' + (f.path === pth && t.scope !== 'repo' ? ' cur' : ''), title: (ST_LABEL[f.st] || f.st) + (f.from ? `: ${f.from} → ${f.path}` : '') },
+      el('span', { className: 'hv-st hs-' + f.st, textContent: f.st }), el('span', { className: 'p', textContent: f.from ? `${f.from} → ${f.path}` : f.path }),
+      el('span', { className: 'n', textContent: f.add == null ? 'bin' : `+${f.add} −${f.del}` }));
+    row.onclick = () => { const s = box.querySelector(`.hv-fd[data-p="${CSS.escape(f.path)}"]`); if (s) s.scrollIntoView({ block: 'start' }); else { H.full = true; H.jump = f.path; drawHistDetail(t); } };
+    return row;
+  });
+  if (fileRows.length) {
+    const fl = el('div', { className: 'hv-files' }, el('div', { className: 'hv-sec' }, el('span', { textContent: `바뀐 파일 ${d.nfiles}개` }),
+      ...(t.scope !== 'repo' ? [chipBtn(H.full ? (t.scope === 'lines' ? '선택한 줄만 보기' : t.scope === 'dir' ? '이 폴더만 보기' : '이 파일만 보기') : '커밋 전체 diff 보기', '', () => { H.full = !H.full; H.dscroll = 0; drawHistDetail(t); })] : [])));
+    const LIM = 15; fl.append(...fileRows.slice(0, LIM));
+    if (fileRows.length > LIM) fl.append(chipBtn(`나머지 ${fileRows.length - LIM}개 보기`, '', (e) => { e.target.replaceWith(...fileRows.slice(LIM)); }));
+    parts.push(fl);
+  }
+  // diff
+  const text = t.scope === 'lines' && !H.full && c.patch != null ? c.patch : d.diff || '';
+  const files = parseDiffFiles(text), dv = el('div', { className: 'hv-diffs' });
+  if (!files.length) dv.append(el('div', { className: 'dv-msg', textContent: partial ? '이 범위에는 바뀐 내용이 없습니다 (병합 커밋일 수 있습니다)' : '바뀐 내용이 없습니다' }));
+  for (const f of files) {
+    const hdr = el('div', { className: 'hv-fh' }, el('span', { className: 'p', textContent: f.from ? `${f.from} → ${f.path}` : f.path }), el('span', { className: 'n', textContent: f.bin ? '바이너리' : `+${f.add} −${f.del}` }));
+    if (!f.isDel) hdr.append(chipBtn('파일 열기', '지금 버전을 편집기로 열기', () => repoFileOpen(t, f.path, f.hunks[0]?.rows.find((r) => r.n)?.n)));
+    if (w && !f.isDel) hdr.append(aLink('↗ 이 시점', webUrl(w, 'blob', { ref: m.h, path: f.path }), 'small'));
+    const sec = el('div', { className: 'hv-fd' }, hdr);
+    sec.dataset.p = f.path;
+    sec.append(f.hunks.length ? diffTable(f, t.mode) : el('div', { className: 'dv-msg', textContent: f.bin ? '바이너리 파일' : f.isNew ? '빈 파일 추가' : f.isDel ? '파일 삭제' : f.from ? '내용 변경 없이 이름만 바뀜' : '내용 변경 없음 (모드 변경 등)' }));
+    dv.append(sec);
+  }
+  if (d.truncated && (H.full || t.scope === 'repo' || t.scope === 'dir')) dv.append(el('div', { className: 'dv-msg', textContent: '변경이 너무 커서 일부만 표시합니다 — 전체는 원격 웹이나 git show 로 보세요' }));
+  parts.push(dv);
+  box.replaceChildren(...parts); loadRefs(t, m.h, refBox);   // 화면에 붙인 뒤에 (이미 받아 둔 정보면 바로 채운다)
+  if (H.jump) { const s = box.querySelector(`.hv-fd[data-p="${CSS.escape(H.jump)}"]`); H.jump = null; if (s) requestAnimationFrame(() => s.scrollIntoView({ block: 'start' })); }
+  else box.scrollTop = 0;
+}
+const refsMemo = new Map();   // repo:sha → PR/브랜치/태그
+async function loadRefs(t, sha, box) {
+  const key = t.repo.abs + ':' + sha; let r = refsMemo.get(key);
+  if (!r) {
+    try { r = await api('GET', 'git/refs', { path: t.src, sha }); refsMemo.set(key, r); }
+    catch (e) { box.replaceChildren(el('div', { className: 'hv-ref-row' }, el('span', { className: 'dim', textContent: 'PR/브랜치 정보를 읽지 못했습니다: ' + e.message }))); return; }
+  }
+  if (!box.isConnected || t.h.sel !== sha) return;   // 그 사이에 다른 커밋을 골랐다
+  const w = r.web || t.repo.web, rows = [], row = (k, ...kids) => el('div', { className: 'hv-ref-row' }, el('span', { className: 'k', textContent: k }), ...kids);
+  const brChip = (name, remote, extra = '') => (remote && w ? aLink('⎇ ' + name, webUrl(w, 'branch', { name }), 'br ' + extra) : el('span', { className: 'hv-a br local ' + extra, textContent: '⎇ ' + name, title: name.includes('/') ? '다른 원격의 브랜치' : '로컬 브랜치 (원격에 없음)' }));
+  if (r.pr.length) {
+    for (const p of r.pr.slice(0, 3)) {
+      const kids = [aLink(`#${p.n}${p.title ? ' ' + p.title : ''}`, p.url || webUrl(w, 'pr', { n: p.n }), 'pr')];
+      if (p.state) kids.push(el('span', { className: 'pr-st ' + p.state, textContent: { merged: '병합됨', open: '열림', closed: '닫힘', draft: '초안' }[p.state] || p.state }));
+      if (p.head) kids.push(brChip(p.head, true), ...(p.base ? [el('span', { className: 'dim', textContent: '→' }), brChip(p.base, true)] : []));
+      if (p.by) kids.push(el('span', { className: 'dim', textContent: '@' + p.by }));
+      if (p.guess) kids.push(el('span', { className: 'dim', textContent: '(커밋 메시지로 추정)', title: 'gh CLI 로 GitHub 에 물어보지 못해서 병합/squash 커밋 메시지에서 찾았습니다' }));
+      rows.push(row('PR', ...kids));
+    }
+  } else rows.push(row('PR', el('span', { className: 'dim', textContent: r.prSource === 'gh' ? '연결된 PR 없음' : r.ghFailed ? 'PR 을 찾지 못했습니다 (gh 조회 실패 — 아직 push 하지 않은 커밋일 수 있습니다)' : w?.kind === 'github' ? 'PR 을 찾지 못했습니다 (gh CLI 를 설치하고 로그인하면 정확히 찾습니다)' : 'PR 을 찾지 못했습니다' })));
+  if (r.merge) rows.push(row('병합', chipBtn(r.merge.h.slice(0, 7), '이 병합 커밋 보기', () => histSelect(t, r.merge.h), 'sha'), el('span', { className: 'dim ell', textContent: r.merge.subj })));
+  const brs = r.branches.map((b) => brChip(b.name, b.remote));
+  rows.push(row('브랜치', ...(brs.length ? brs.slice(0, 8) : [el('span', { className: 'dim', textContent: '이 커밋을 포함한 브랜치가 없습니다' })]),
+    ...(r.nbranches > 8 ? [chipBtn(`외 ${r.nbranches - 8}개`, r.branches.slice(8).map((b) => b.name).join('\n'), (e) => e.target.replaceWith(...brs.slice(8)))] : [])));
+  if (r.tags.length) rows.push(row('태그', ...r.tags.map((x) => (w ? aLink('🏷 ' + x, webUrl(w, 'tag', { name: x }), 'tag') : el('span', { className: 'hv-a tag', textContent: '🏷 ' + x }))), el('span', { className: 'dim', textContent: '처음 포함된 태그부터' })));
+  box.replaceChildren(...rows);
+}
+function histToolbar(t, bar) {
+  const w = t.repo.web, ref = t.repo.branch && t.repo.branch !== 'HEAD' ? t.repo.branch : t.repo.head;
+  const seg = el('span', { className: 'seg' }, ...MODES.diff.map(([m, label]) => btn(label, '', () => { t.mode = m; store.set('diffMode', m); renderToolbar(); drawHistDetail(t); }, t.mode === m ? 'on' : '')));
+  const items = [el('span', { className: 'path' }), seg, el('span', { className: 'sep' })];
+  if (t.scope === 'file' || t.scope === 'lines') items.push(btn('파일 열기', '이 파일을 편집기로 열기', () => openFile(t.src, undefined, t.range ? { line: t.range.a } : undefined)));
+  if (w && ref) items.push(btn(`↗ ${webName(w)}`, `${webName(w)}의 커밋 기록 페이지 열기`, () => window.open(webUrl(w, 'history', { ref, path: t.scope === 'repo' ? '' : t.rel }), '_blank')));
+  items.push(btn('↻', '다시 불러오기', () => histReload(t)));
+  bar.replaceChildren(...items);
+}
+
+// ── Blame: 줄마다 마지막으로 바꾼 커밋 (읽기 전용 화면, 편집 중인 내용 그대로 계산) ──
+function toggleBlame(p) {
+  const go = () => {
+    const t = tabOf(p); if (!t || !TEXT_KINDS.includes(t.kind)) return;
+    if (t.blame) { t.blame = null; renderToolbar(); renderContent(); return; }
+    const ta = $('textarea.editor');
+    t.blame = { data: null, src: null, err: '', line: ta ? ta.value.slice(0, ta.selectionStart).split('\n').length : 1 };
+    renderToolbar(); renderContent();
+  };
+  if (state.active !== p) openFile(p).then(go); else go();
+}
+async function loadBlame(t) {
+  const B = t.blame; if (!B || B.loading) return;
+  B.loading = true; const src = t.content;
+  try { const r = await api('POST', 'git/blame', { path: t.path }, { content: src }); Object.assign(B, { data: r, err: '' }); rememberWeb(r.repo); }
+  catch (e) { Object.assign(B, { data: null, err: e.message }); }
+  Object.assign(B, { src, at: Date.now(), loading: false });
+  if (state.active === t.path && t.blame === B) renderContent();
+}
+function blameLineAt(pre, y) { const r = pre.getBoundingClientRect(), lh = parseFloat(getComputedStyle(pre).lineHeight) || 20; const L = Math.floor((y - r.top) / lh) + 1; return L >= 1 ? L : null; }
+function blameView(t) {
+  const B = t.blame, box = el('div', { className: 'blv', tabIndex: 0 });
+  box.onkeydown = (e) => { if (e.key === 'Escape' && !fb.open) { e.preventDefault(); toggleBlame(t.path); } };
+  if (!B.loading && (B.src !== t.content || Date.now() - (B.at || 0) > 60000)) loadBlame(t);
+  if (!B.data) { box.append(el('div', { className: 'dv-msg' + (B.err ? ' err' : ''), textContent: B.err ? 'Blame: ' + B.err : 'Blame 계산 중…' })); return box; }
+  const { commits, lines } = B.data, n = lines.length, src = B.src.replace(/\r\n/g, '\n').split('\n').slice(0, n);
+  const ats = commits.filter((c) => !c.wip).map((c) => c.at), lo = Math.min(...ats), hi = Math.max(...ats);
+  const gut = el('div', { className: 'bl-gut' }), bands = el('div', { className: 'bl-bands' });
+  for (let i = 0, g = 0; i < n; i++) {
+    const ci = lines[i], c = commits[ci], start = i === 0 || lines[i - 1] !== ci;
+    if (start) { g++; let j = i; while (j + 1 < n && lines[j + 1] === ci) j++; const band = el('div', { className: 'bl-band' + (g % 2 ? '' : ' alt') }); band.style.cssText = `top:calc(var(--blh) * ${i});height:calc(var(--blh) * ${j - i + 1})`; bands.append(band); }
+    const row = el('div', { className: 'bl-row' + (start ? ' gs' : '') + (g % 2 ? '' : ' alt') + (c.wip ? ' wip' : '') });
+    row.dataset.c = ci; row.style.setProperty('--age', c.wip ? 1 : hi > lo ? ((c.at - lo) / (hi - lo)).toFixed(2) : 1);
+    if (start) row.append(el('span', { className: 'bl-sha', textContent: c.wip ? '•••••••' : c.h.slice(0, 7) }), el('span', { className: 'bl-an', textContent: c.wip ? '커밋 안 됨' : c.an }), el('span', { className: 'bl-ago', textContent: c.wip ? '' : ago(c.at) }), el('span', { className: 'bl-subj', textContent: c.wip ? '' : c.subj }));
+    else row.append(el('span', { className: 'bl-fill' }));
+    row.append(el('span', { className: 'bl-ln', textContent: i + 1 }));
+    gut.append(row);
+  }
+  let hl = -1;
+  gut.onmouseover = (e) => {
+    const r = e.target.closest('.bl-row'); if (!r) return; const ci = +r.dataset.c, c = commits[ci];
+    if (!r.title) r.title = c.wip ? '아직 커밋하지 않은 줄' : `${c.h}\n${c.an} · ${fmtDate(c.at)} (${ago(c.at)})\n\n${c.subj}\n\n클릭: 이 커밋을 히스토리에서 보기`;
+    if (ci === hl) return; gut.querySelectorAll('.bl-row.hl').forEach((x) => x.classList.remove('hl')); hl = ci; gut.querySelectorAll(`.bl-row[data-c="${ci}"]`).forEach((x) => x.classList.add('hl'));
+  };
+  gut.onmouseleave = () => { hl = -1; gut.querySelectorAll('.bl-row.hl').forEach((x) => x.classList.remove('hl')); };
+  gut.onclick = (e) => { const r = e.target.closest('.bl-row'); if (!r) return; const c = commits[+r.dataset.c]; if (c.wip) return toast('아직 커밋하지 않은 줄입니다'); openHistory({ path: t.path, scope: 'file', focus: c.h }); };
+  gut.oncontextmenu = (e) => {
+    const r = e.target.closest('.bl-row'); if (!r) return; e.preventDefault(); e.stopPropagation();
+    const c = commits[+r.dataset.c], L = +r.querySelector('.bl-ln').textContent, w = B.data.repo?.web;
+    showMenu(e.clientX, e.clientY, [
+      ...(c.wip ? [] : [['이 커밋을 히스토리에서 보기', () => openHistory({ path: t.path, scope: 'file', focus: c.h })], ['커밋 해시 복사', () => copy(c.h, '커밋 해시 복사됨')],
+        ...(w ? [[`${webName(w)}에서 커밋 열기`, () => window.open(webUrl(w, 'commit', { sha: c.h }), '_blank')]] : [])]),
+      [`이 줄 히스토리 (${L}줄)`, () => openHistory({ path: t.path, scope: 'lines', a: L, b: L })],
+      ['-'], ['Blame 끄기', () => toggleBlame(t.path)],
+    ]);
+  };
+  const lang = langOf(t.path), body = src.join('\n'), code = el('pre', { className: 'bl-code' });
+  if (lang && body.length < 300000) code.innerHTML = highlight(lang, body) + '\n'; else code.textContent = body + '\n';
+  code.ondblclick = (e) => { const L = blameLineAt(code, e.clientY); t.blame = null; openFile(t.path, undefined, L ? { line: L } : undefined); };
+  code.title = '더블클릭: 이 줄로 편집기 열기';
+  box.append(el('div', { className: 'bl-wrap' }, gut, el('div', { className: 'bl-cw' }, bands, code)));
+  box.onscroll = () => { B.st = box.scrollTop; };
+  requestAnimationFrame(() => {
+    if (B.st != null) box.scrollTop = B.st;
+    else { const lh = parseFloat(getComputedStyle(code).lineHeight) || 20; box.scrollTop = Math.max(0, (B.line - 1) * lh - box.clientHeight / 3); B.st = box.scrollTop; }
+    if (!document.activeElement?.closest('input, textarea, #fbar')) box.focus({ preventScroll: true });
+  });
+  return box;
+}
 
 
 // ───────── Run: ~/.shooting-star/run 에 등록된 스크립트 (CLI `ss run`, Claude 와 공유) ─────────
@@ -2612,7 +3149,7 @@ document.querySelectorAll('#activity .act').forEach((b) => {
 // ───────── 문서 안에서 찾기 (⌘/Ctrl+F) ─────────
 // 편집기: 원문에서 찾아 입력창 뒤의 표시 레이어(pre.fm)에 모든 일치를 칠한다. 보기 모드(마크다운/CSV/트리): 화면 텍스트에서 직접 찾아 <mark> 로 감싼다.
 const fb = { open: false, q: '', matches: [], idx: -1, dom: false, built: false, timer: 0, opts: store.get('fbopts', { case: false, word: false, regex: false }) };
-const FIND_ROOTS = '#preview, .smart-doc, .dvbox';   // 보기 모드에서 화면 텍스트를 찾는 영역 (diff 포함)
+const FIND_ROOTS = '#preview, .smart-doc, .dvbox, .hv-detail, .blv';   // 보기 모드에서 화면 텍스트를 찾는 영역 (diff 포함)
 const escHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function fbRegex() {
   if (!fb.q) return null;
@@ -3295,6 +3832,7 @@ function smartEditor(t) {
   const eol = t.content.includes('\r\n') ? '\r\n' : '\n';
   const lexFrag = (raw) => marked.lexer(raw).map((tok) => ({ type: tok.type, raw: tok.raw, tok }));
   let blocks = lexFrag(t.content.replace(/\r\n/g, '\n')), editIdx = -1, lastIdx = -1;
+  doc._blockLines = () => { let line = 1; return blocks.map((b) => { const a = line, n = b.raw.replace(/\s+$/, '').split('\n').length; line += b.raw.split('\n').length - 1; return { a, b: a + n - 1 }; }); };   // 블록 i → 원문 줄 범위 (Git 히스토리용)
   const src = () => blocks.map((b) => b.raw).join('');
   const toContent = (s) => (eol === '\r\n' ? s.replace(/\n/g, '\r\n') : s);
   const hist = [src()]; let hpos = 0;
@@ -3496,6 +4034,7 @@ function drawPath(t) {
     return;
   }
   if (t.kind === 'run') { inner.textContent = (t.scriptPath || t.name).replace(state.home || '\u0000', '~'); inner.title = '등록된 스크립트'; return; }
+  if (t.kind === 'history') { inner.textContent = (t.repo.abs + (t.rel ? '/' + t.rel : '')).replace(state.home || '\u0000', '~') + (t.range ? `  ${t.range.a}–${t.range.b}줄` : ''); inner.title = 'Git 히스토리'; return; }
   if (t.kind === 'diff') { inner.textContent = (t.repo + '/' + t.file).replace(state.home || '\u0000', '~'); inner.title = '변경 내용 (diff)'; return; }
   if (isMemo(t.path)) { inner.textContent = ((state.memoDir || '') + '/' + t.path.slice(6)).replace(state.home || '\u0000', '~'); inner.title = '메모 파일 위치'; return; }
   if (isExt(t.path)) { inner.textContent = absOf(t.path).replace(state.home || '\u0000', '~'); inner.title = '워크스페이스 밖의 파일'; return; }

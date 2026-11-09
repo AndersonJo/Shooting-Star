@@ -138,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let conf = WKWebViewConfiguration()
         conf.userContentController.add(self, name: "theme")        // 웹 UI 의 테마 변경 알림
         conf.userContentController.add(self, name: "fullscreen")   // 이미지 뷰어의 전체화면 요청
+        conf.userContentController.add(self, name: "edit")         // 웹 UI 의 우클릭 메뉴: 잘라내기/복사/붙여넣기/전체 선택
         let wv = DropWebView(frame: .zero, configuration: conf)
         wv.uiDelegate = self
         wv.navigationDelegate = self
@@ -174,6 +175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     // MARK: 테마 — 웹이 "dark|light,#rrggbb" 를 보내면 창의 밝기와 배경색을 맞춘다 (제목 표시줄/깜빡임 방지)
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
         if m.name == "fullscreen" { (m.webView?.window)?.toggleFullScreen(nil); return }   // 이미지 뷰어: 창 전체화면 토글
+        if m.name == "edit", let cmd = m.body as? String {   // 편집 메뉴와 같은 명령을 보낸다 (붙여넣기는 웹 API 로는 권한 팝업이 뜬다)
+            let sel: [String: Selector] = ["paste": #selector(NSText.paste(_:)), "copy": #selector(NSText.copy(_:)), "cut": #selector(NSText.cut(_:)), "selectAll": #selector(NSText.selectAll(_:))]
+            if let s = sel[cmd] { NSApp.sendAction(s, to: nil, from: nil) }
+            return
+        }
         guard m.name == "theme", let s = m.body as? String else { return }
         let parts = s.split(separator: ",").map(String.init)
         guard parts.count == 2 else { return }
