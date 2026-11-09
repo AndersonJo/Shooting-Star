@@ -243,7 +243,7 @@
   --tk-h: #bd93f9;
 }
 * { box-sizing: border-box; }
-html, body { height: 100%; margin: 0; }
+html, body { height: 100%; margin: 0; overscroll-behavior-x: none; }   /* 브라우저 자체의 좌우 스와이프 뒤로가기를 끄고 앱의 뒤로/앞으로를 쓴다 */
 body { display: flex; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); overflow: hidden; }
 button { font: inherit; color: var(--fg); background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 3px 9px; cursor: pointer; }
 button:hover { background: var(--bg3); }
@@ -1064,3 +1064,9 @@ table.grid td.ed input { font: inherit; width: 100%; min-width: 120px; box-sizin
 #drop-hint { position: fixed; inset: 6px; z-index: 300; pointer-events: none; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--accent); border-radius: 12px; background: color-mix(in srgb, var(--bg) 45%, transparent); }
 #drop-hint[hidden] { display: none; }
 .dh-box { padding: 12px 22px; border-radius: 10px; background: var(--accent-bg); color: var(--fg); font-size: 15px; box-shadow: 0 6px 24px #0006; }
+
+/* 뒤로/앞으로 스와이프 표시 */
+#swipe-hint { position: fixed; top: 50%; z-index: 260; width: 46px; height: 46px; margin-top: -23px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--bg3); color: var(--fg); font-size: 22px; box-shadow: 0 4px 18px #0006; pointer-events: none; }
+#swipe-hint[hidden] { display: none; }
+#swipe-hint.l { left: 14px; } #swipe-hint.r { right: 14px; }
+#swipe-hint.go { background: var(--accent); color: #fff; }

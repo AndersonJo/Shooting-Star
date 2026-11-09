@@ -456,7 +456,7 @@ async function closeTab(p, saved) { // 닫았으면 true, 취소(저장 안 한 
   const i = state.tabs.indexOf(t); state.tabs.splice(i, 1);
   if (t.kind === 'gallery') galDispose(t);
   if (isMemo(p) && !t.content.replace(/#/g, '').trim()) api('DELETE', 'file', { path: p }).then(refreshMemos).catch(() => {}); // 비어 있는 메모는 닫을 때 삭제
-  if (state.active === p) state.active = (state.tabs[i] || state.tabs[i - 1])?.path || null;
+  if (state.active === p) { state.active = (state.tabs[i] || state.tabs[i - 1])?.path || null; nav.replaceNext = true; }   // 닫아서 옆 탭으로 가는 것은 뒤로/앞으로 기록을 늘리지 않는다
   persistTabs(); renderAll(); return true;
 }
 async function closeTabs(paths) { // 여러 탭을 순서대로 닫는다. 저장 안 한 탭에서 취소하면 거기서 멈춘다
@@ -577,6 +577,7 @@ function renderTabs() {
     return tab;
   }));
   box.querySelector('.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  navSync();   // 뒤로/앞으로 기록
   document.title = (cur() ? cur().path.split('/').pop() + (dirty(cur()) ? ' ●' : '') + ' — ' : '') + 'shooting-star';
 }
 
@@ -1271,6 +1272,7 @@ document.addEventListener('keydown', (e) => {
   if (k === 's') { e.preventDefault(); save(); }
   else if (k === 'p' && !e.shiftKey) { e.preventDefault(); openPalette(); }
   else if (k === 'o' && !e.altKey) { e.preventDefault(); openPicker(e.shiftKey ? 'dir' : 'file'); }   // ⌘/Ctrl+O: 파일 열기, +Shift: 폴더(워크스페이스) 전환
+  else if ((e.code === 'BracketLeft' || e.code === 'BracketRight') && !e.shiftKey && !e.altKey) { e.preventDefault(); navStep(e.code === 'BracketLeft' ? -1 : 1); }   // ⌘[ 뒤로 / ⌘] 앞으로
   else if (k === 'b') { e.preventDefault(); document.body.classList.toggle('no-side'); store.set('noSide', document.body.classList.contains('no-side')); }
   else if (k === 'w' && cur()) { e.preventDefault(); closeTab(state.active); }
   else if (e.code === 'KeyN' && e.altKey) { e.preventDefault(); newMemo(); }
@@ -1283,6 +1285,105 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault(); const t = cur(); const ms = MODES[t.kind].map((m) => m[0]);
     t.mode = ms[(ms.indexOf(t.mode) + 1) % ms.length]; persistTabs(); renderToolbar(); renderContent();
   }
+});
+
+// ───────── 뒤로/앞으로 (트랙패드 두 손가락 좌우 스와이프 · ⌘[ ⌘] · 마우스 뒤로/앞으로 버튼) ─────────
+// 보던 탭(파일·갤러리 폴더·이미지 등)을 기록한다. 이미지 뷰어에서 ←/→ 로 넘기는 것과 탭을 닫아 옆 탭으로 가는 것은 기록을 늘리지 않고 지금 항목만 바꾼다.
+// 기록 맨 앞에서 더 뒤로 가면, 다른 워크스페이스에서 넘어온 경우(go) 그 화면으로 돌아간다 (브라우저 기록 사용, 앞으로도 마찬가지).
+const nav = { stack: [], i: -1, ready: false, restoring: false, replaceNext: false, from: null, fwd: null };
+const NAV_MAX = 100;
+function navSave() { try { sessionStorage.setItem('ss:nav:' + state.root, JSON.stringify({ s: nav.stack, i: nav.i, from: nav.from, fwd: nav.fwd })); } catch {} }
+function navLoad() { // 워크스페이스별로 이 창(세션)에 기록을 둔다
+  try {
+    const r = JSON.parse(sessionStorage.getItem('ss:nav:' + state.root) || 'null');
+    if (r && Array.isArray(r.s)) Object.assign(nav, { stack: r.s.filter((x) => typeof x === 'string'), i: Math.min(r.i, r.s.length - 1), from: r.from || null, fwd: r.fwd || null });
+    const from = sessionStorage.getItem('ss:navFrom'), fwd = sessionStorage.getItem('ss:navFwd');
+    sessionStorage.removeItem('ss:navFrom'); sessionStorage.removeItem('ss:navFwd');
+    if (from && from !== state.root) { nav.from = from; nav.fwd = null; nav.i = nav.stack.length - 1; }   // 다른 워크스페이스에서 넘어옴 (새 기록은 끝에 이어 붙인다)
+    if (fwd && fwd !== state.root) nav.fwd = fwd;   // 뒤로 가기로 돌아옴 → 기록 끝에서 앞으로 가면 그 워크스페이스
+  } catch {}
+  nav.ready = true;
+}
+function navSync() { // 화면을 그릴 때마다: 활성 탭이 바뀌었으면 기록
+  const p = state.active; if (!nav.ready || nav.restoring || !p) return;
+  const prev = nav.stack[nav.i]; if (p === prev) return;
+  const step = prev && !isGal(prev) && !tabOf(prev) && kindOf(prev) === 'image' && tabOf(p)?.kind === 'image';   // 이미지 뷰어에서 넘김 (같은 탭의 경로가 바뀜)
+  if ((nav.replaceNext || step) && nav.i >= 0) {
+    nav.stack[nav.i] = p;
+    if (nav.i > 0 && nav.stack[nav.i - 1] === p) { nav.stack.splice(nav.i, 1); nav.i--; }
+  } else {
+    nav.stack = nav.stack.slice(0, nav.i + 1); nav.stack.push(p);
+    if (nav.stack.length > NAV_MAX) nav.stack.shift();
+    nav.i = nav.stack.length - 1; nav.fwd = null;
+  }
+  nav.replaceNext = false; navSave();
+}
+const navCan = (d) => (d < 0 ? nav.i > 0 || !!nav.from : nav.i < nav.stack.length - 1 || !!nav.fwd);
+async function navOpen(p) { // 기록의 항목을 다시 보여 준다 (닫힌 탭이면 다시 연다). 못 열면 false
+  if (tabOf(p)) { flushAll(); state.active = p; state.selected = tabOf(p).kind === 'gallery' ? '' : p; persistTabs(); renderAll(); return true; }
+  if (isGal(p)) { const t = cur(), abs = p.slice(4) || '/'; if (t?.kind === 'gallery') galGo(t, abs); else openGallery(abs); return true; }   // 갤러리는 같은 탭에서 폴더를 옮긴다
+  if (isDrop(p)) { if (!dropped.has(p)) return false; openImageList([p]); return true; }
+  if (/^@(run|sql|diff)\//.test(p)) return false;   // 닫은 실행/SQL/diff 탭은 다시 열 수 없다
+  await openFile(p); return state.active === p;
+}
+let navBusy = false;
+async function navStep(d) { // d: -1 뒤로, +1 앞으로
+  if (navBusy) return; navBusy = true;
+  try {
+    for (;;) {
+      const j = nav.i + d; if (j < 0 || j >= nav.stack.length) break;
+      nav.restoring = true; let ok = false;
+      try { ok = await navOpen(nav.stack[j]); } catch {} finally { nav.restoring = false; }
+      if (ok) { nav.i = j; if (state.active) nav.stack[j] = state.active; navSave(); return; }
+      nav.stack.splice(j, 1); if (d < 0) nav.i--;   // 지워진 파일 등 열 수 없는 항목은 빼고 계속
+      navSave();
+    }
+    if (d < 0 && nav.from) { try { sessionStorage.setItem('ss:navFwd', state.root); } catch {} history.back(); }   // 기록 맨 앞: 넘어오기 전 워크스페이스로
+    else if (d > 0 && nav.fwd) history.forward();
+  } finally { navBusy = false; }
+}
+// 트랙패드: 두 손가락을 오른쪽으로 쓸면 뒤로, 왼쪽으로 쓸면 앞으로 (Safari/Chrome 과 같은 방향).
+// 휠 이벤트의 가로 이동을 모아 일정 거리를 넘으면 한 번만 넘긴다. 가로로 스크롤할 수 있는 곳(넓은 표·코드)에서 시작한 제스처와
+// 이미 처리된 휠(이미지 뷰어의 좌우 스와이프 = 이전/다음 이미지, 핀치 확대)은 건드리지 않는다.
+const SWIPE_DIST = 150;
+const swipe = { dx: 0, dy: 0, t: 0, lock: null, done: false, hideT: 0 };
+const swipeHint = el('div', { id: 'swipe-hint', hidden: true });
+document.body.append(swipeHint);
+function canScrollX(node, dir) {
+  for (let n = node; n && n.nodeType === 1 && n !== document.body; n = n.parentElement) {
+    if (n.scrollWidth <= n.clientWidth + 1) continue;
+    const ox = getComputedStyle(n).overflowX; if (ox !== 'auto' && ox !== 'scroll' && n.tagName !== 'TEXTAREA') continue;
+    if (dir > 0 ? n.scrollLeft + n.clientWidth < n.scrollWidth - 1 : n.scrollLeft > 0) return true;
+  }
+  return false;
+}
+function drawSwipe(d, k) {
+  swipeHint.hidden = false; swipeHint.className = (d < 0 ? 'l' : 'r') + (k >= 1 ? ' go' : '');
+  swipeHint.textContent = d < 0 ? '←' : '→';
+  swipeHint.style.opacity = String(0.2 + k * 0.8);
+  swipeHint.style.transform = `translateX(${d * (1 - k) * 48}px)`;
+  clearTimeout(swipe.hideT); swipe.hideT = setTimeout(() => { swipeHint.hidden = true; }, k >= 1 ? 380 : 220);
+}
+window.addEventListener('wheel', (e) => {
+  if (e.ctrlKey || e.defaultPrevented) return;
+  const now = performance.now();
+  if (now - swipe.t > 250) Object.assign(swipe, { dx: 0, dy: 0, lock: null, done: false });   // 잠깐 끊기면 새 제스처
+  swipe.t = now;
+  if (swipe.done || swipe.lock === 'no') return;   // 이미 넘긴 제스처의 관성 이벤트 / 세로 스크롤
+  swipe.dx += e.deltaX; swipe.dy += e.deltaY;
+  if (!swipe.lock) {
+    if (Math.abs(swipe.dx) + Math.abs(swipe.dy) < 10) return;
+    swipe.lock = Math.abs(swipe.dx) > Math.abs(swipe.dy) * 2 && !canScrollX(e.target, Math.sign(swipe.dx)) ? 'x' : 'no';
+    if (swipe.lock === 'no') return;
+  }
+  const d = swipe.dx < 0 ? -1 : 1;
+  if (!navCan(d)) { swipeHint.hidden = true; return; }
+  const k = Math.min(1, Math.abs(swipe.dx) / SWIPE_DIST);
+  drawSwipe(d, k);
+  if (k >= 1) { swipe.done = true; navStep(d); }
+}, { passive: true });
+window.addEventListener('mouseup', (e) => { // 마우스 옆 버튼 (뒤로 3 / 앞으로 4)
+  if (e.button === 3 || e.button === 4) { e.preventDefault(); navStep(e.button === 3 ? -1 : 1); }
 });
 
 // ───────── 파일 인덱스 상태 (서버가 백그라운드로 인덱싱) ─────────
@@ -2982,8 +3083,23 @@ function galVert(g, i, d) { // 위/아래 행에서 가로 위치가 가장 가�
   for (const c of next.children) { const dd = Math.abs(c.offsetLeft + c.offsetWidth / 2 - cx); if (dd < bd) { bd = dd; best = c; } }
   return best ? best._i : i;
 }
+// 선택한(전체화면에서는 보고 있는) 이미지의 경로: 전체 경로, rel=true 면 워크스페이스 기준 상대 경로(밖이면 파일 이름)
+function galSelPath(t, rel) {
+  const tile = t.g?.tileList[t.g.sel]; if (!tile) return null;
+  return !rel ? tile._abs : tile._abs.startsWith(state.root + '/') ? tile._abs.slice(state.root.length + 1) : tile._it.name;
+}
+document.addEventListener('copy', (e) => { // 메뉴(네이티브 앱의 편집 > 복사하기)로 들어온 복사: 갤러리에서는 선택한 이미지 경로
+  const t = cur(); if (t?.kind !== 'gallery' || !document.activeElement?.closest?.('.gal') || String(getSelection())) return;
+  const p = galSelPath(t); if (!p) return;
+  e.preventDefault(); e.clipboardData.setData('text/plain', p); toast('전체 경로 복사됨');
+});
 function galKey(t, e) {
-  const g = t.g; if (!g || g.viewer || e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input, textarea, [contenteditable]')) return;
+  const g = t.g; if (!g || e.target.closest?.('input, textarea, [contenteditable]')) return;
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.code === 'KeyC' || e.key.toLowerCase() === 'c') && !String(getSelection())) { // ⌘/Ctrl+C: 이미지 경로 복사 (Shift: 상대 경로)
+    const p = galSelPath(t, e.shiftKey); if (!p) return;
+    e.preventDefault(); copy(p, e.shiftKey ? '상대 경로 복사됨' : '전체 경로 복사됨'); return;
+  }
+  if (g.viewer || e.metaKey || e.ctrlKey || e.altKey) return;
   const n = g.tileList.length, k = e.key; let i = g.sel;
   if (k === 'Enter' || k === ' ') { if (i >= 0) galView(t, i); }
   else if (k === 'Backspace') { if (g.data?.parent) galGo(t, g.data.parent); }
@@ -3447,7 +3563,7 @@ async function toggleFavDir(abs) {
   await saveFavs(); toast(had ? '즐겨찾기에서 제거됨' : '즐겨찾기에 추가됨');
 }
 $('#btn-fav').onclick = () => toggleFavDir(state.root);
-const go = (p) => { addRecent(p); location.href = '/?root=' + encodeURIComponent(p); };
+const go = (p) => { addRecent(p); try { sessionStorage.setItem('ss:navFrom', state.root); } catch {} location.href = '/?root=' + encodeURIComponent(p); };   // navFrom: 거기서 끝까지 뒤로 가면 여기로
 async function pruneRecents() { // 삭제되었거나 이동된 폴더는 최근 목록에서 제거
   const alive = new Set();
   await Promise.all(recents().map(async (r) => { try { await api('GET', 'browse', { path: r }); alive.add(r); } catch {} }));
@@ -3625,6 +3741,7 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
   }
   const a = store.get(wsKey('active'), null);
   state.active = tabOf(a) ? a : state.tabs[0]?.path || null; state.selected = state.active || '';
+  navLoad();   // 뒤로/앞으로 기록 (이 창의 세션)
   renderAll(); setView(state.view);
   connectEvents();   // 파일 변경 실시간 동기화
   let pendGal = null; try { pendGal = sessionStorage.getItem('ss:gallery'); sessionStorage.removeItem('ss:gallery'); } catch {}
