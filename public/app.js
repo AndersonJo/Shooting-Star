@@ -1816,7 +1816,7 @@ function drawRun() {
     const row = el('div', { className: 'rn' + (m.broken || m.missing ? ' bad' : '') + (state.active === '@run/' + m.name ? ' sel' : ''), title: m.broken || (m.missing ? '스크립트 파일 없음' : m.scriptPath) },
       el('div', { className: 'rt', textContent: m.name }), el('div', { className: 'rd', textContent: m.broken || m.description || (m.params.length ? m.params.map((p) => p.name).join(', ') : '파라미터 없음') }));
     if (runUi.running.has(m.name)) row.append(el('span', { className: 'rp', textContent: '● 실행 중' }));
-    row.onclick = () => { if (!m.broken) openRunTab(m); };
+    row.onclick = () => { if (!m.broken) openRunTab(m, true); };
     row.oncontextmenu = (e) => {
       e.preventDefault();
       showMenu(e.clientX, e.clientY, [
@@ -1836,17 +1836,26 @@ function drawRun() {
       const r = el('div', { className: 'rh', title: `${new Date(h.startedAt).toLocaleString()} · ${h.source}\n${JSON.stringify(h.params)}\n클릭: 이 실행의 출력 보기` },
         el('span', { className: 'rc ' + (ok ? 'ok' : 'fail'), textContent: ok ? '✓' : '✗' + (h.code ?? '') }), el('span', { className: 'rn2', textContent: h.name }),
         el('span', { className: 'rw', textContent: h.source === 'cli' ? 'CLI' : new Date(h.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }));
-      r.onclick = async () => { if (!m) return toast('등록 해제된 스크립트입니다'); const t = openRunTab(m); try { t.out = (await api('GET', 'run/log', { id: h.id })).log; t.status = { cls: ok ? 'ok' : 'fail', text: `이전 실행 · exit ${h.code ?? h.signal}` }; } catch {} t.dom = null; renderContent(); };
+      r.onclick = async () => {
+        if (!m) return toast('등록 해제된 스크립트입니다');
+        const t = openRunTab(m, false);                 // 같은 탭을 재사용하되 '지난 결과 보기' 모드
+        t.vals = { ...(h.params || {}) }; t.preset = h.preset || '';   // 그때 쓴 파라미터로 폼을 채움
+        t.viewing = h.id;
+        try { t.out = (await api('GET', 'run/log', { id: h.id })).log; } catch { t.out = ''; }
+        t.status = { cls: ok ? 'ok' : 'fail', text: `이전 실행 결과 · ${new Date(h.startedAt).toLocaleString()} · exit ${h.code ?? h.signal}` };
+        t.dom = null; renderContent();
+      };
       kids.push(r);
     }
   }
   box.replaceChildren(...kids);
   $('#run-foot').replaceChildren(el('span', { textContent: runUi.dir.replace(state.home || '\u0000', '~') }), ' · ', Object.assign(el('a', { textContent: 'Claude 연동 설치', href: '#', title: '~/.claude 에 ss-run skill + SessionStart hook + `ss run` 실행 권한 추가' }), { onclick: async (e) => { e.preventDefault(); try { const r = await api('POST', 'run/install'); toast(r.hookAdded || r.rulesAdded.length ? 'Claude 연동 설치됨 (새 세션부터)' : '이미 설치되어 있습니다'); } catch (er) { toast(er.message); } } }));
 }
-function openRunTab(m) {
+function openRunTab(m, fresh = true) {
   const p = '@run/' + m.name; let t = tabOf(p);
   if (!t) { t = { path: p, kind: 'run', name: m.name, content: '', orig: '', mtime: 0, mode: 'view', vals: {}, out: '', status: null, job: null }; state.tabs.push(t); }
   t.m = m; t.scriptPath = m.scriptPath;
+  if (fresh && !t.job) { t.out = ''; t.status = null; t.viewing = null; t.vals = {}; t.preset = ''; t.dom = null; }   // 실행기: 기본값 폼 + 빈 출력 (실행 중이면 건드리지 않음)
   state.active = p; state.selected = p; renderAll(); drawRun(); return t;
 }
 const runBase = (t, p) => { const pv = t.preset && t.m.presets?.[t.preset]; return pv && pv[p.name] !== undefined ? pv[p.name] : p.default; };
@@ -1891,7 +1900,7 @@ function runView(t) {
   if (!m.params.length) form.append(el('div', { className: 'pd', style: 'grid-column:1/-1', textContent: '파라미터가 없습니다.' }));
   upd();
   const out = el('pre', { className: 'rv-out', textContent: t.out }), st = el('span', { className: 'rv-st' });
-  const go = el('button', { className: 'go', textContent: '▶ 실행', title: '실행 (⌘/Ctrl+Enter)' }), stop = el('button', { textContent: '■ 중지', hidden: true });
+  const go = el('button', { className: 'go', textContent: t.viewing ? '▶ 다시 실행' : '▶ 실행', title: '실행 (⌘/Ctrl+Enter)' }), stop = el('button', { textContent: '■ 중지', hidden: true });
   const paint = () => { const s = t.status; st.className = 'rv-st ' + (s?.cls || ''); st.textContent = s?.text || ''; go.disabled = !!t.job; stop.hidden = !t.job; };
   const append = (s) => { const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40; t.out = (t.out + s.replace(ANSI, '')).slice(-200000); out.textContent = t.out; if (stick) out.scrollTop = out.scrollHeight; };
   const run = async () => {
@@ -1901,7 +1910,7 @@ function runView(t) {
     const needSecret = (m.secrets || []).find((x) => x.required !== false && !runUi.secrets.has(x.name));
     if (needSecret) { toast(`세션키를 먼저 저장하세요: ${needSecret.name}`); return; }
     if (m.danger && !confirm(`'${m.name}' 은(는) danger 스크립트입니다. 실행할까요?\n\n${runCmdline(t)}`)) return;
-    t.out = ''; out.textContent = ''; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; paint();
+    t.out = ''; out.textContent = ''; t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; paint();
     const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }
     let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params, preset: t.preset || undefined }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
     t.job = { id: r.id }; t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
