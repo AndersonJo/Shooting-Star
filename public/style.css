@@ -556,6 +556,33 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 .tab.conflict::before { content: "⚠"; color: var(--err); font-size: 11px; }
 .tab.missing { text-decoration: line-through; opacity: .7; }
 
+/* 이미지 갤러리 (폴더의 이미지를 비율 그대로 행 단위로) — 전체화면 뷰어가 position:fixed 로 뜨므로 transform/contain 을 쓰지 않는다 */
+.gal { flex: 1; min-width: 0; display: flex; position: relative; outline: none; background: var(--bg); }
+.gal-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 12px 24px; scrollbar-gutter: stable; }
+.gal-grid { display: flex; flex-direction: column; gap: 6px; }
+.gal-row { display: flex; gap: 6px; position: relative; }
+.gal-tile { flex: 0 0 auto; position: relative; overflow: hidden; border-radius: 4px; background: var(--bg3); cursor: zoom-in; }
+.gal-tile img { display: block; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .18s; user-select: none; -webkit-user-drag: none; }
+.gal-tile.ok img { opacity: 1; }
+.gal-tile.bad::after { content: "⚠"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--fg2); }
+.gal-tile:hover { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+.gal-tile.sel { box-shadow: 0 0 0 3px var(--accent); }
+.gal-name { position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 7px 4px; font-size: 11.5px; color: #fff; background: linear-gradient(transparent, #000a); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; opacity: .92; }
+.gal.nonames .gal-name { opacity: 0; transition: opacity .15s; }
+.gal.nonames .gal-tile:hover .gal-name { opacity: .92; }
+.gal-dirs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.gal-dir { width: 150px; border-radius: 6px; overflow: hidden; background: var(--bg2); border: 1px solid var(--bg3); cursor: pointer; }
+.gal-dir:hover { border-color: var(--accent); }
+.gal-dir-cover { height: 96px; display: flex; align-items: center; justify-content: center; background: var(--bg3); }
+.gal-dir-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gal-dir-ic { font-size: 34px; opacity: .7; }
+.gal-dir-meta { display: flex; gap: 6px; align-items: baseline; padding: 5px 8px; font-size: 12px; }
+.gal-dir-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gal-dir-n { color: var(--fg2); font-size: 11px; }
+.gal-empty { color: var(--fg2); padding: 24px 4px; font-size: 13px; }
+.gal-empty:empty { display: none; }
+#toolbar .gal-size { width: 110px; vertical-align: middle; accent-color: var(--accent); }
+
 /* 이미지 뷰어 */
 .imgv { position: relative; flex: 1; min-width: 0; overflow: hidden; background: #0b0c0e; color: #e8eaed; user-select: none; }
 .imgv.fs { position: fixed; inset: 0; z-index: 100; background: #000; }

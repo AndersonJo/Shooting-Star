@@ -231,6 +231,38 @@ async function imageInfo(abs, st) {
   }
   return { w: dim?.w ?? null, h: dim?.h ?? null, size: st.size, mtime: st.mtimeMs, ext: ext.slice(1) };
 }
+// 이미지 갤러리: 폴더 하나의 이미지(픽셀 크기 포함, 이름 자연 정렬) + 하위 폴더(이미지 수, 대표 이미지). 재귀하지 않는다.
+const GALLERY_MAX = 5000;
+const isImgName = (n) => !!IMG_MIME[path.extname(n).toLowerCase()];
+const natCmp = (a, b) => a.localeCompare(b, undefined, { numeric: true });
+async function mapLimit(arr, n, fn) {
+  const out = new Array(arr.length); let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, arr.length) }, async () => { while (i < arr.length) { const k = i++; out[k] = await fn(arr[k]); } }));
+  return out;
+}
+async function galleryList(dir) {
+  const ents = (await fsp.readdir(dir, { withFileTypes: true })).filter((e) => !e.name.startsWith('.') && !IGNORE.has(e.name));
+  const dirs = [], imgs = []; let others = 0;
+  for (const e of ents) {
+    if (e.isDirectory() || (e.isSymbolicLink() && isDirSafe(path.join(dir, e.name)))) dirs.push(e.name);
+    else if (isImgName(e.name)) imgs.push(e.name); else others++;
+  }
+  dirs.sort(natCmp); imgs.sort(natCmp);
+  const images = (await mapLimit(imgs.slice(0, GALLERY_MAX), 16, async (name) => {
+    try {
+      const abs = path.join(dir, name), st = await fsp.stat(abs); if (!st.isFile()) return null;
+      let dim = imageSize(await readHead(abs, 65536));
+      if (!dim && /\.jpe?g$/i.test(name)) dim = imageSize(await readHead(abs));   // EXIF 가 큰 JPEG 는 SOF 가 뒤에 있다
+      return { name, w: dim?.w || null, h: dim?.h || null, size: st.size, mtime: Math.round(st.mtimeMs) };
+    } catch { return null; }   // 쓰는 중이거나 방금 지워진 파일
+  })).filter(Boolean);
+  const subs = await mapLimit(dirs.slice(0, 500), 16, async (name) => {
+    try { const ns = (await fsp.readdir(path.join(dir, name))).filter((n) => !n.startsWith('.') && isImgName(n)).sort(natCmp); return { name, images: ns.length, cover: ns[0] || null }; }
+    catch { return { name, images: 0, cover: null }; }
+  });
+  return { path: dir, parent: path.dirname(dir) !== dir ? path.dirname(dir) : null, dirs: subs, images, others, total: imgs.length, truncated: imgs.length > GALLERY_MAX };
+}
+const dirWatchers = new Map(); // 절대경로 → { w, clients, names, timer } : 갤러리 화면이 보고 있는 폴더 (재귀 X)
 let thumbRunning = 0; const thumbQueue = [], thumbJobs = new Map();
 const limited = (fn) => new Promise((resolve, reject) => {   // 동시에 3개까지만 변환
   const run = () => { thumbRunning++; fn().then(resolve, reject).finally(() => { thumbRunning--; thumbQueue.shift()?.(); }); };
@@ -808,6 +840,40 @@ async function api(req, res, url, root) {
       const abs = resolveSafe(root, p), st = await fsp.stat(abs);
       if (!st.isFile() || !IMG_MIME[path.extname(abs).toLowerCase()]) throw httpError(415, 'not an image');
       return send(res, 200, await imageInfo(abs, st));
+    }
+    case 'GET /api/gallery': { // 이미지 갤러리 목록
+      const dir = await fsp.realpath(resolveSafe(root, p));
+      if (!isDirSafe(dir)) throw httpError(400, 'not a directory');
+      return send(res, 200, await galleryList(dir));
+    }
+    case 'GET /api/dirwatch': { // 폴더 하나의 변경을 SSE 로 알린다 (갤러리 자동 갱신)
+      const dir = await fsp.realpath(resolveSafe(root, p));
+      if (!isDirSafe(dir)) throw httpError(400, 'not a directory');
+      res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
+      res.write('retry: 3000\n\n');
+      let dw = dirWatchers.get(dir);
+      if (!dw) {
+        dw = { w: null, clients: new Set(), names: new Set(), timer: null };
+        try {
+          dw.w = fs.watch(dir, (_ev, name) => {
+            if (name) dw.names.add(String(name));
+            clearTimeout(dw.timer);
+            dw.timer = setTimeout(() => { // 쓰는 중에는 이벤트가 여러 번 온다 → 잠잠해지면 한 번만
+              const data = `data: ${JSON.stringify({ names: [...dw.names].slice(0, 500) })}\n\n`; dw.names.clear();
+              for (const r of dw.clients) { try { r.write(data); } catch {} }
+            }, 350);
+          });
+          dw.w.on('error', () => {});
+        } catch {}
+        dirWatchers.set(dir, dw);
+      }
+      dw.clients.add(res);
+      const hb = setInterval(() => { try { res.write(': hb\n\n'); } catch {} }, 25000);
+      res.on('close', () => {
+        clearInterval(hb); dw.clients.delete(res);
+        if (!dw.clients.size) { try { dw.w?.close(); } catch {} clearTimeout(dw.timer); dirWatchers.delete(dir); }
+      });
+      return;
     }
     case 'POST /api/update/apply': {
       if (updateJob?.state === 'running') throw httpError(409, 'update already running');
