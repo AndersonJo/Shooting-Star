@@ -320,6 +320,11 @@ textarea.editor.wrap { white-space: pre-wrap; word-break: break-word; }
 .md tr:nth-child(even) td { background: var(--bg2); }
 .md hr { border: 0; border-top: 1px solid var(--bd); }
 .md li.task { list-style: none; margin-left: -1.4em; }
+/* 목록은 문단보다 촘촘하게: 항목 사이에 빈 줄이 있어 '느슨한 목록'(li > p)이 되어도 문단 여백을 쓰지 않는다 */
+.md li > p { margin: 0; }
+.md li > p + p { margin-top: .5em; }
+.md li + li { margin-top: .3em; }
+.md li > ul, .md li > ol { margin: .3em 0 0; }
 
 /* csv table */
 table.csv { border-collapse: collapse; font: 12.5px var(--mono); font-size: calc(12.5px * var(--cz)); }
@@ -582,7 +587,7 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 
 /* 스마트 편집: 블록 단위 라이브 편집 */
 .smart-doc { padding-bottom: 40vh; }
-.smart-doc .sb { position: relative; margin: 0 -10px .55em; padding: 1px 10px; border-radius: 6px; cursor: text; }
+.smart-doc .sb { position: relative; margin: 0 -10px 1em; padding: 1px 10px; border-radius: 6px; cursor: text; }
 .smart-doc .sb-gap { cursor: text; }
 .smart-doc .sb:hover { background: var(--hover); }
 .smart-doc .sb.editing { background: var(--bg2); box-shadow: inset 2px 0 var(--accent); }
