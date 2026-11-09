@@ -1138,7 +1138,10 @@ function drawPalette() {
   $('#pal-list .sel')?.scrollIntoView({ block: 'nearest' });
 }
 const closePalette = () => { $('#palette').hidden = true; };
-$('#pal-input').oninput = (e) => filterPalette(e.target.value);
+$('#pal-input').oninput = (e) => {
+  if (looksAbsPath(e.target.value)) { const v = e.target.value; closePalette(); openPicker('file', v); return; }   // 절대경로·file:// → 경로로 열기
+  filterPalette(e.target.value);
+};
 $('#pal-input').onkeydown = (e) => {
   if (e.key === 'Escape') closePalette();
   else if (e.key === 'Tab') { e.preventDefault(); if (pal.dir) pickPalScope(!pal.inDir); }
@@ -3072,10 +3075,18 @@ async function pruneRecents() { // 삭제되었거나 이동된 폴더는 최근
   await Promise.all(recents().map(async (r) => { try { await api('GET', 'browse', { path: r }); alive.add(r); } catch {} }));
   store.set('recent', recents().filter((r) => alive.has(r)));
 }
-async function openPicker(mode = 'dir') {
+// 붙여넣은 경로 정리: file:///a%20b/c.md → /a b/c.md, 앞뒤 따옴표·공백 제거
+function cleanPath(v) {
+  v = String(v || '').trim().replace(/^(['"`])(.*)\1$/, '$2');
+  if (/^file:\/\//i.test(v)) { v = v.replace(/^file:\/\/(localhost)?/i, ''); try { v = decodeURIComponent(v); } catch {} }
+  return v;
+}
+// 빠른 열기(Shift 두 번)에 절대경로/file:// 를 붙여넣었는지 — 그러면 경로 열기(⌘O)로 넘긴다
+const looksAbsPath = (v) => /^\s*['"`]?(file:\/\/|~\/|\/(Users|private|tmp|var|Volumes|home|opt|etc|Applications|Library|root|mnt|srv)\/)/i.test(v);
+async function openPicker(mode = 'dir', initial) {
   pk.mode = mode; $('#picker').hidden = false; const inp = $('#pk-input');
-  inp.placeholder = mode === 'file' ? '열 파일의 경로 (/path/to/file.md)' : '/path/to/folder';
-  inp.value = (mode === 'file' && state.active && isExt(state.active) ? dirOf(absOf(state.active)) : state.root) + '/'; inp.focus(); await pruneRecents(); await pkLoad();
+  inp.placeholder = mode === 'file' ? '열 파일의 경로 (/path/to/file.md 또는 file:///…)' : '/path/to/folder';
+  inp.value = initial != null ? cleanPath(initial) : (mode === 'file' && state.active && isExt(state.active) ? dirOf(absOf(state.active)) : state.root) + '/'; inp.focus(); await pruneRecents(); await pkLoad();
 }
 const closePicker = () => { $('#picker').hidden = true; };
 // 워크스페이스 밖의 파일을 탭으로 연다 (워크스페이스는 그대로). 워크스페이스 안의 파일이면 일반 탭으로 연다.
@@ -3084,7 +3095,9 @@ function openExternal(abs) {
   openFile(inside ? abs.slice(state.root.length + 1) : '@ext' + abs);
 }
 async function pkLoad() {
-  let v = $('#pk-input').value;
+  const inp = $('#pk-input'), raw = inp.value, cleaned = cleanPath(raw);
+  if (cleaned !== raw) inp.value = cleaned;   // file:// URL·따옴표 붙은 경로를 붙여넣으면 경로로 바꿔 보여 준다
+  let v = cleaned;
   if (v && !/^[/~]/.test(v)) v = state.root + '/' + v;   // 상대 경로 (.claude/skills/x/SKILL.md) 는 워크스페이스 기준
   const slash = v.lastIndexOf('/'); const dir = v.slice(0, slash + 1) || '/'; const part = v.slice(slash + 1).toLowerCase();
   let items = [];
