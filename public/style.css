@@ -1059,3 +1059,8 @@ table.grid td.ed input { font: inherit; width: 100%; min-width: 120px; box-sizin
 .rv-secret .ss-badge { font-size: 11px; white-space: nowrap; }
 .rv-secret .ss-badge.on { color: var(--ok); }
 .rv-secret .ss-badge.off { color: var(--fg2); }
+
+/* 끌어다 놓기: 창 어디에든 놓으면 바로 보기 */
+#drop-hint { position: fixed; inset: 6px; z-index: 300; pointer-events: none; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--accent); border-radius: 12px; background: color-mix(in srgb, var(--bg) 45%, transparent); }
+#drop-hint[hidden] { display: none; }
+.dh-box { padding: 12px 22px; border-radius: 10px; background: var(--accent-bg); color: var(--fg); font-size: 15px; box-shadow: 0 6px 24px #0006; }

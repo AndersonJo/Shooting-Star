@@ -9,6 +9,17 @@ struct Config: Decodable {
     let port: Int
 }
 
+// 파일을 끌어다 놓을 때 웹 UI 에 실제 경로를 알려 준다 (웹의 File 객체에는 경로가 없다). 놓기 처리 자체는 그대로 웹이 한다.
+final class DropWebView: WKWebView {
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        if let d = try? JSONSerialization.data(withJSONObject: urls.map { $0.path }), let j = String(data: d, encoding: .utf8) {
+            evaluateJavaScript("window.ssDragPaths = \(j)", completionHandler: nil)
+        }
+        return super.draggingEntered(sender)
+    }
+}
+
 func loadConfig() -> Config {
     let url = Bundle.main.resourceURL!.appendingPathComponent("config.json")
     return try! JSONDecoder().decode(Config.self, from: try! Data(contentsOf: url))
@@ -127,7 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let conf = WKWebViewConfiguration()
         conf.userContentController.add(self, name: "theme")        // 웹 UI 의 테마 변경 알림
         conf.userContentController.add(self, name: "fullscreen")   // 이미지 뷰어의 전체화면 요청
-        let wv = WKWebView(frame: .zero, configuration: conf)
+        let wv = DropWebView(frame: .zero, configuration: conf)
         wv.uiDelegate = self
         wv.navigationDelegate = self
         wv.setValue(false, forKey: "drawsBackground")
