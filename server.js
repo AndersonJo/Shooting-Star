@@ -634,8 +634,8 @@ async function api(req, res, url, root) {
     case 'GET /api/run/list':
       return send(res, 200, { scripts: RUN.list().map(({ scriptPath, ...m }) => ({ ...m, scriptPath })), dir: RUN.DIR, running: [...RUN.jobs.values()].filter((j) => !j.endedAt).map((j) => ({ id: j.id, name: j.name })), history: RUN.history(30) });
     case 'POST /api/run/exec': { // 등록된 이름만 실행한다 (임의 명령 실행 아님)
-      const { name, params } = JSON.parse(await readBody(req));
-      const job = RUN.start(RUN.get(name), params && typeof params === 'object' ? params : {}, { cwd: root, source: 'ui' });
+      const { name, params, preset } = JSON.parse(await readBody(req));
+      const job = RUN.start(RUN.get(name), params && typeof params === 'object' ? params : {}, { cwd: root, source: 'ui', preset: typeof preset === 'string' && preset ? preset : null });
       return send(res, 200, { id: job.id, cmdline: job.cmdline, cwd: job.cwd, startedAt: job.startedAt });
     }
     case 'GET /api/run/stream': { // 실행 출력 (SSE): 지금까지의 출력 → 이어서 실시간 → end
@@ -664,8 +664,10 @@ async function api(req, res, url, root) {
       fs.writeFileSync(tmp, body);
       try { RUN.add({ name, description: '' }, tmp, {}); } finally { fs.rmSync(tmp, { force: true }); }
       const m = RUN.get(name);
-      return send(res, 200, { name, script: m.scriptPath, manifest: path.join(RUN.DIR, name + '.json') });
+      return send(res, 200, { name, script: m.scriptPath, manifest: m.manifest });
     }
+    case 'GET /api/run/export': // 본문까지 담은 YAML (다른 컴퓨터에서 `ss run add -` 로 등록)
+      return send(res, 200, { yaml: RUN.exportYaml([url.searchParams.get('name') || '']) });
     case 'POST /api/run/install': // Claude 연동: skill + SessionStart hook + 실행 권한 (~/.claude)
       return send(res, 200, RUN.install());
     case 'DELETE /api/run/script': {

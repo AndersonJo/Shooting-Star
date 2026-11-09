@@ -1,12 +1,14 @@
 'use strict';
 // shooting-star Run: 스크립트 등록/실행 코어. CLI(`ss run …`), 서버 API(UI), Claude(skill/hook)가 모두 이걸 쓴다.
-// 등록 위치: ~/.shooting-star/run/<name>.json (매니페스트) + scripts/<파일> (스크립트 사본)
+// 등록 위치: ~/.shooting-star/run/<name>.yaml (매니페스트, 구버전 .json 도 읽음) + scripts/<파일> (스크립트 사본)
+// 이식: `ss run export` 는 스크립트 본문(code)까지 담은 YAML 을 내보내고, 다른 컴퓨터에서 `ss run add <그 파일 | ->` 로 그대로 등록한다.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
+const YAML = require('./public/vendor/js-yaml.umd.min.js');   // UI 와 같은 사본 (외부 의존성 없음)
 
 const HOME = os.homedir();
 const DIR = path.join(HOME, '.shooting-star', 'run');
@@ -15,6 +17,8 @@ const LOGS = path.join(DIR, 'logs');
 const HISTORY = path.join(DIR, 'history.jsonl');
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const TYPES = ['string', 'number', 'bool', 'choice', 'file'];
+const LANG_EXT = { bash: '.sh', sh: '.sh', zsh: '.zsh', python: '.py', py: '.py', node: '.js', js: '.js', javascript: '.js', ts: '.ts', typescript: '.ts', ruby: '.rb', perl: '.pl', php: '.php' };
+const MANIFEST_EXT = ['.yaml', '.yml', '.json'];
 const INTERP = { '.py': ['python3'], '.sh': ['bash'], '.bash': ['bash'], '.zsh': ['zsh'], '.js': ['node'], '.mjs': ['node'], '.rb': ['ruby'], '.pl': ['perl'], '.php': ['php'], '.ts': ['npx', 'tsx'] };
 const err = (msg, status = 400) => Object.assign(new Error(msg), { status });
 
@@ -44,54 +48,143 @@ function normalizeManifest(m) {
   out.params = (m.params || []).map(normalizeParam);
   const seen = new Set();
   for (const p of out.params) { if (seen.has(p.name)) throw err(`파라미터 이름 중복: ${p.name}`); seen.add(p.name); }
+  if (m.presets != null) {   // 자주 쓰는 옵션 조합: { 이름: { 파라미터: 값 } } → `ss run <name> @이름`
+    if (typeof m.presets !== 'object' || Array.isArray(m.presets)) throw err('presets 는 { 이름: { 파라미터: 값 } } 형태');
+    out.presets = {};
+    for (const [pn, pv] of Object.entries(m.presets)) {
+      if (!NAME_RE.test(pn)) throw err(`잘못된 프리셋 이름: ${pn}`);
+      if (!pv || typeof pv !== 'object' || Array.isArray(pv)) throw err(`프리셋 ${pn}: { 파라미터: 값 } 형태여야 합니다`);
+      out.presets[pn] = {};
+      for (const [k, v] of Object.entries(pv)) {
+        const p = out.params.find((x) => x.name === k);
+        if (!p) throw err(`프리셋 ${pn}: 알 수 없는 파라미터 ${k}`);
+        out.presets[pn][k] = coerce(p, v);
+      }
+    }
+    if (!Object.keys(out.presets).length) delete out.presets;
+  }
   return out;
 }
 const scriptPath = (m) => (path.isAbsolute(m.script) ? m.script : path.join(SCRIPTS, m.script));
+const manifestFile = (name) => MANIFEST_EXT.map((e) => path.join(DIR, name + e)).find((f) => fs.existsSync(f));
+const parseManifest = (f) => { const t = fs.readFileSync(f, 'utf8'); return f.endsWith('.json') ? JSON.parse(t) : YAML.load(t); };
 function list() {
-  let files = []; try { files = fs.readdirSync(DIR).filter((f) => f.endsWith('.json')); } catch {}
-  const out = [];
-  for (const f of files.sort()) {
-    try { const m = normalizeManifest(JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8'))); m.missing = !fs.existsSync(scriptPath(m)); m.scriptPath = scriptPath(m); out.push(m); } catch (e) { out.push({ name: f.replace(/\.json$/, ''), broken: e.message, params: [] }); }
+  let files = []; try { files = fs.readdirSync(DIR).filter((f) => MANIFEST_EXT.includes(path.extname(f))); } catch {}
+  const out = [], seen = new Set();
+  for (const f of files.sort((a, b) => a.localeCompare(b))) {
+    const name = f.slice(0, -path.extname(f).length); if (seen.has(name)) continue; seen.add(name);
+    const mf = manifestFile(name);   // 같은 이름이 둘이면 .yaml 우선
+    try { const m = normalizeManifest(parseManifest(mf)); m.missing = !fs.existsSync(scriptPath(m)); m.scriptPath = scriptPath(m); m.manifest = mf; out.push(m); } catch (e) { out.push({ name, broken: e.message, params: [], manifest: mf }); }
   }
   return out;
 }
 function get(name) {
   if (!NAME_RE.test(name || '')) throw err(`잘못된 이름: ${name}`);
-  const f = path.join(DIR, name + '.json');
-  if (!fs.existsSync(f)) throw err(`등록되지 않은 스크립트: ${name}  (ss run list)`, 404);
-  const m = normalizeManifest(JSON.parse(fs.readFileSync(f, 'utf8')));
-  m.scriptPath = scriptPath(m);
+  const f = manifestFile(name);
+  if (!f) throw err(`등록되지 않은 스크립트: ${name}  (ss run list)`, 404);
+  const m = normalizeManifest(parseManifest(f));
+  m.scriptPath = scriptPath(m); m.manifest = f;
   if (!fs.existsSync(m.scriptPath)) throw err(`스크립트 파일이 없습니다: ${m.scriptPath}`, 404);
   return m;
 }
-// 등록: file 이 있으면 scripts/ 로 복사(link 면 원본 경로를 그대로 참조). manifest 는 이름/설명/파라미터 등.
+function toYaml(m, extra) {   // 사람이 읽고 고치기 좋은 순서로
+  const o = {};
+  for (const k of ['name', 'description', 'script', 'interpreter', 'cwd', 'danger', 'params', 'presets']) if (m[k] !== undefined && !(k === 'params' && !m[k].length)) o[k] = m[k];
+  if (o.params) o.params = o.params.map(({ as, ...p }) => (as === 'flag' ? p : { ...p, as }));   // 기본값은 생략
+  Object.assign(o, extra);
+  return YAML.dump(o, { lineWidth: -1, noRefs: true });
+}
+// 등록. 스크립트 출처는 셋 중 하나: file(경로; link 면 원본을 그대로 참조) / manifest.code(본문 인라인) / manifest.script(이미 scripts/ 에 있거나 절대경로)
 function add(manifest, file, { link = false, force = false } = {}) {
-  const m0 = { ...manifest };
+  const { code, lang, ...m0 } = manifest || {};
+  if (code != null && file) throw err('code(인라인 스크립트)와 스크립트 파일을 동시에 줄 수 없습니다');
+  let src = null;
   if (file) {
-    const src = path.resolve(file);
+    src = path.resolve(file);
     if (!fs.existsSync(src) || !fs.statSync(src).isFile()) throw err(`파일이 없습니다: ${file}`);
     m0.name = m0.name || path.basename(src).replace(/\.[^.]*$/, '');
     m0.script = link ? src : path.basename(src);
-    if (!link) {
-      fs.mkdirSync(SCRIPTS, { recursive: true });
-      const dst = path.join(SCRIPTS, m0.script);
-      if (fs.existsSync(dst) && path.resolve(dst) !== src && !force && !fs.existsSync(path.join(DIR, m0.name + '.json'))) throw err(`scripts/${m0.script} 가 이미 있습니다 (--force 로 덮어쓰기)`);
-      if (path.resolve(dst) !== src) fs.copyFileSync(src, dst);
-      fs.chmodSync(dst, 0o755);
-    }
+  } else if (code != null) {
+    if (typeof code !== 'string') throw err('code 는 문자열(스크립트 본문)이어야 합니다');
+    const ext = lang ? LANG_EXT[String(lang).toLowerCase()] : null;
+    if (lang && !ext) throw err(`lang 은 ${Object.keys(LANG_EXT).join('/')} 중 하나`);
+    m0.script = path.basename(m0.script || (m0.name || 'script') + (ext || '.sh'));
   }
-  const m = normalizeManifest(m0);
+  const m = normalizeManifest(m0);   // 디스크를 건드리기 전에 검증
+  const existing = manifestFile(m.name);
+  if (existing && !force) throw err(`이미 등록된 이름입니다: ${m.name} (--force 로 덮어쓰기)`);
+  if (src && !link || code != null) {
+    fs.mkdirSync(SCRIPTS, { recursive: true });
+    const dst = path.join(SCRIPTS, m.script);
+    if (fs.existsSync(dst) && dst !== src && !force) throw err(`scripts/${m.script} 가 이미 있습니다 (다른 script 이름을 쓰거나 --force)`);
+    if (code != null) fs.writeFileSync(dst, code.endsWith('\n') ? code : code + '\n');
+    else if (dst !== src) fs.copyFileSync(src, dst);
+    fs.chmodSync(dst, 0o755);
+  } else if (!fs.existsSync(scriptPath(m))) throw err(`스크립트 파일이 없습니다: ${scriptPath(m)} (code: 로 본문을 넣거나 파일을 지정하세요)`);
   fs.mkdirSync(DIR, { recursive: true });
-  const f = path.join(DIR, m.name + '.json');
-  if (fs.existsSync(f) && !force) throw err(`이미 등록된 이름입니다: ${m.name} (--force 로 덮어쓰기)`);
-  fs.writeFileSync(f, JSON.stringify(m, null, 2) + '\n');
+  for (const e of MANIFEST_EXT) { const f = path.join(DIR, m.name + e); if (e !== '.yaml' && fs.existsSync(f)) fs.unlinkSync(f); }
+  fs.writeFileSync(path.join(DIR, m.name + '.yaml'), toYaml(m));
+  m.scriptPath = scriptPath(m); m.manifest = path.join(DIR, m.name + '.yaml');
   return m;
+}
+// YAML/JSON 텍스트(여러 문서 `---` 가능)로 등록. script: 상대경로는 baseDir 기준. over: CLI 플래그로 덮어쓸 값
+function addFromText(text, { baseDir = process.cwd(), link = false, force = false, over = {} } = {}) {
+  let docs; try { docs = YAML.loadAll(text).filter((d) => d != null); } catch (e) { throw err(`YAML 파싱 실패: ${e.message}`); }
+  if (!docs.length) throw err('등록할 내용이 없습니다');
+  if (docs.length > 1 && over.name) throw err('여러 문서를 등록할 때는 --name 을 쓸 수 없습니다');
+  const out = [];
+  for (const d0 of docs) {
+    if (typeof d0 !== 'object' || Array.isArray(d0)) throw err('각 문서는 name/script/params… 를 가진 매핑이어야 합니다');
+    const d = { ...d0, ...over }; if (over.params) d.params = [...(d0.params || []), ...over.params];
+    let file = null;
+    if (d.code == null && d.script && !(path.isAbsolute(d.script) && link)) {
+      const f = path.resolve(baseDir, String(d.script).replace(/^~(?=$|\/)/, HOME));
+      if (fs.existsSync(f)) { file = f; delete d.script; }
+    }
+    out.push(add(d, file, { link, force }));
+  }
+  return out;
+}
+// 다른 컴퓨터로 옮기기 위한 자급식 YAML: 스크립트 본문을 code 에 넣는다
+function exportYaml(names) {
+  return names.map((n) => { const m = get(n); const { cwd: _c, ...rest } = m; return toYaml({ ...rest, script: path.basename(m.script), ...(m.cwd ? { cwd: m.cwd } : {}) }, { code: fs.readFileSync(m.scriptPath, 'utf8') }); }).join('---\n');
 }
 function remove(name) {
   const m = get(name);
-  fs.unlinkSync(path.join(DIR, name + '.json'));
+  fs.unlinkSync(m.manifest);
   if (!path.isAbsolute(m.script)) { try { fs.unlinkSync(m.scriptPath); } catch {} }
 }
+const TEMPLATE = (lang = 'bash') => {
+  const code = {
+    python: `#!/usr/bin/env python3\nimport argparse\n\nap = argparse.ArgumentParser()\nap.add_argument('--env', default='dev')\nap.add_argument('--keep', type=int, default=7)\nap.add_argument('--verbose', action='store_true')\na = ap.parse_args()\nprint(f"env={a.env} keep={a.keep} verbose={a.verbose}")\n`,
+    node: `#!/usr/bin/env node\n// 파라미터는 env SS_PARAM_<NAME> 로도 들어온다\nconst { SS_PARAM_ENV: env, SS_PARAM_KEEP: keep, SS_PARAM_VERBOSE: verbose } = process.env;\nconsole.log({ env, keep, verbose: verbose === '1' });\n`,
+    bash: `#!/usr/bin/env bash\nset -euo pipefail\n# 파라미터는 env SS_PARAM_<NAME> 로도 들어온다 (bool 은 1/0)\necho "env=$SS_PARAM_ENV keep=$SS_PARAM_KEEP verbose=\${SS_PARAM_VERBOSE:-0}"\n`,
+  }[lang] || TEMPLATE('bash');
+  return `# ss run 등록용 YAML — 수정 후: ss run add <이 파일>   (또는 ss run add - <<'EOF' … EOF)
+name: my-task                  # 영문/숫자/._- (최대 64자)
+description: 한 줄 설명 (Claude 가 세션 시작 때 보는 문장)
+lang: ${LANG_EXT[lang] ? lang : 'bash'}                    # code 를 쓸 때 확장자 결정: bash/python/node/ts/ruby/…
+# script: ./my-task.sh         # code 대신 기존 파일 (이 YAML 기준 상대경로). 파일명만 정하려면 code 와 함께 써도 됨
+# danger: true                 # 실행 전에 확인 (CLI 는 --yes 필요)
+# cwd: ~/work                  # 작업 폴더 (기본: 실행한 곳)
+# interpreter: python3 -u      # 기본은 확장자로 추론
+params:
+  - name: env
+    type: choice               # string | number | bool | choice | file
+    choices: [dev, prod]
+    default: dev
+    description: 대상 환경
+  - name: keep
+    type: number
+    default: 7
+  - name: verbose
+    type: bool                 # flag: 켜면 --verbose 만 붙음
+  # as: flag(기본, --name 값) | env(환경변수 name=값) | positional(순서대로) · flag: '-k' 처럼 플래그 문자열 지정
+presets:                       # ss run my-task @prod-weekly [--keep 10 처럼 덮어쓰기 가능]
+  prod-weekly: { env: prod, keep: 30 }
+code: |
+${code.replace(/^/gm, '  ').replace(/^ +$/gm, '')}`;
+};
 
 // ───────── 파라미터 → 실행 인자 ─────────
 function coerce(p, raw) {
@@ -100,7 +193,12 @@ function coerce(p, raw) {
   if (p.type === 'choice') { if (!p.choices.includes(String(raw))) throw err(`${p.name}: ${p.choices.join(' | ')} 중 하나여야 합니다 (${raw})`); return String(raw); }
   return String(raw);
 }
-function resolveParams(m, given) {
+function resolveParams(m, given, preset) {
+  if (preset) {
+    const pv = (m.presets || {})[preset];
+    if (!pv) throw err(`프리셋이 없습니다: @${preset}  (사용 가능: ${Object.keys(m.presets || {}).map((k) => '@' + k).join(' ') || '없음'})`);
+    given = { ...pv, ...given };
+  }
   const vals = {};
   for (const p of m.params) {
     let v = given[p.name];
@@ -136,12 +234,12 @@ function buildCommand(m, vals) {
 // ───────── 실행 ─────────
 const jobs = new Map();   // id → job (서버 프로세스 안에서 UI 가 시작한 것)
 const MAX_BUF = 256 * 1024;
-function start(m, given, { cwd, source = 'cli', stdio } = {}) {
-  const vals = resolveParams(m, given || {});
+function start(m, given, { cwd, source = 'cli', stdio, preset } = {}) {
+  const vals = resolveParams(m, given || {}, preset || null);
   const { cmd, args, env } = buildCommand(m, vals);
   const id = Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
   const workdir = m.cwd ? m.cwd.replace(/^~(?=$|\/)/, HOME) : (cwd || process.cwd());
-  const job = Object.assign(new EventEmitter(), { id, name: m.name, params: vals, source, startedAt: Date.now(), endedAt: 0, code: null, signal: null, buf: '', cwd: workdir, cmdline: [cmd, ...args].join(' ') });
+  const job = Object.assign(new EventEmitter(), { id, name: m.name, params: vals, preset: preset || undefined, source, startedAt: Date.now(), endedAt: 0, code: null, signal: null, buf: '', cwd: workdir, cmdline: [cmd, ...args].join(' ') });
   fs.mkdirSync(LOGS, { recursive: true });
   const logf = path.join(LOGS, id + '.log'); const log = fs.createWriteStream(logf);
   const child = spawn(cmd, args, { cwd: workdir, env: { ...process.env, ...env, SS_RUN_ID: id, SS_RUN_NAME: m.name }, stdio: stdio ? ['inherit', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
@@ -156,7 +254,7 @@ function start(m, given, { cwd, source = 'cli', stdio } = {}) {
   const finish = (code, signal) => {
     if (done) return; done = true;
     job.code = code; job.signal = signal; job.endedAt = Date.now(); log.end();
-    try { fs.appendFileSync(HISTORY, JSON.stringify({ id, name: m.name, params: vals, source, startedAt: job.startedAt, endedAt: job.endedAt, code, signal, cwd: workdir }) + '\n'); } catch {}
+    try { fs.appendFileSync(HISTORY, JSON.stringify({ id, name: m.name, params: vals, ...(preset ? { preset } : {}), source, startedAt: job.startedAt, endedAt: job.endedAt, code, signal, cwd: workdir }) + '\n'); } catch {}
     job.emit('end', { code, signal });
   };
   child.on('close', finish);
@@ -177,7 +275,8 @@ function readLog(id) { if (!/^[a-z0-9]+$/.test(id)) throw err('bad id'); try { r
 // ───────── Claude 연동: 컨텍스트 요약 / skill / hook ─────────
 function usageLine(m) {
   const ps = m.params.map((p) => `--${p.name}${p.type === 'bool' ? '' : ' <' + (p.type === 'choice' ? p.choices.join('|') : p.type) + '>'}${p.required ? '*' : ''}`).join(' ');
-  return `ss run ${m.name}${ps ? ' ' + ps : ''}`;
+  const pr = Object.keys(m.presets || {});
+  return `ss run ${m.name}${pr.length ? ' [' + pr.map((k) => '@' + k).join('|') + ']' : ''}${ps ? ' ' + ps : ''}`;
 }
 function contextText() {
   const ms = list().filter((m) => !m.broken);
@@ -200,7 +299,8 @@ function toolDefs(format) {
       props[p.name] = t; if (p.required) req.push(p.name);
     }
     const schema = { type: 'object', properties: props, ...(req.length ? { required: req } : {}), additionalProperties: false };
-    const name = 'ss_run_' + m.name.replace(/[^A-Za-z0-9_-]/g, '_'), description = (m.description || m.name) + (m.danger ? ' [danger]' : '');
+    const pr = Object.entries(m.presets || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+    const name = 'ss_run_' + m.name.replace(/[^A-Za-z0-9_-]/g, '_'), description = (m.description || m.name) + (m.danger ? ' [danger]' : '') + (pr.length ? ` (presets: ${pr.join('; ')})` : '');
     return format === 'anthropic' ? { name, description, input_schema: schema } : { type: 'function', function: { name, description, parameters: schema } };
   });
 }
@@ -215,27 +315,59 @@ Scripts registered here are shared by the CLI, the shooting-star UI (Run menu) a
 
 ## Run
 \`\`\`bash
-ss run list [--json]                 # names, descriptions, parameter schema
-ss run show <name>                   # one script in detail
+ss run list [--json]                 # names, descriptions, parameter schema, presets
+ss run show <name>                   # one script in detail (YAML)
 ss run <name> --param value ...      # run; stdout/stderr stream through, exit code is the script's
+ss run <name> @preset [--k v ...]    # run with a saved option set; flags given after it override it
 \`\`\`
 - When the user asks to run something that is registered, run it right away with \`ss run <name> ...\` — no extra confirmation.
 - Scripts marked \`danger\` need \`--yes\`; pass it only when the user explicitly asked for that run.
 - Bool params are flags (\`--verbose\`); omit params that have a default unless the user specified a value.
-- Unknown params / bad values are rejected with the list of valid ones.
+- \`@preset\` must come right after the name. Unknown params / presets / bad values are rejected with the valid list.
 
-## Register
-Prefer registering a script when the user will likely repeat it. Write the script file first, then:
+## Register (one YAML, no other files needed)
+Prefer registering when the user will likely repeat the task. Pipe a self-contained YAML (script body in \`code:\`) into \`ss run add -\`:
 \`\`\`bash
-ss run add ./backup.sh --name backup-db --desc "Dump the DB to ~/backups" \\
-  --param '{"name":"env","type":"choice","choices":["dev","prod"],"default":"dev","description":"target env"}' \\
-  --param '{"name":"keep","type":"number","default":7}' [--danger] [--cwd <dir>] [--interpreter "python3 -u"] [--link] [--force]
+ss run add - <<'YAML'
+name: backup-db
+description: Dump the DB to ~/backups      # one line; this is what future sessions see
+lang: bash                                  # bash | python | node | ts | ruby | ... (picks the file extension)
+danger: false                               # true → confirmation / --yes required
+params:
+  - name: env
+    type: choice                            # string | number | bool | choice | file
+    choices: [dev, prod]
+    default: dev
+    description: target env
+  - name: keep
+    type: number
+    default: 7
+  - name: verbose
+    type: bool
+presets:
+  prod-weekly: { env: prod, keep: 30 }
+code: |
+  #!/usr/bin/env bash
+  set -euo pipefail
+  echo "env=$SS_PARAM_ENV keep=$SS_PARAM_KEEP verbose=\${SS_PARAM_VERBOSE:-0}"
+YAML
 \`\`\`
-- Param JSON: \`name\` (required), \`type\` string|number|bool|choice|file, \`default\`, \`required\`, \`choices\`, \`description\`, \`as\` flag(default → \`--name value\`)|env|positional, \`flag\` (custom flag text).
-- Every param is also exported as env \`SS_PARAM_<NAME>\`, so scripts may read env instead of parsing argv.
-- Interpreter is inferred from the extension (.py python3, .sh bash, .js node, .ts npx tsx); otherwise the file must be executable.
-- \`--link\` references the file in place instead of copying it into ~/.shooting-star/run/scripts/.
-- \`ss run rm <name>\` removes a registration. Give every script a one-line \`--desc\` — it is what future sessions see.
+- \`ss run template [bash|python|node]\` prints a fully commented template — use it if unsure of a field.
+- Instead of \`code:\`, \`script: ./path/file.py\` registers an existing file (path relative to the YAML, or cwd for stdin); \`--link\` references it in place instead of copying.
+- Other param fields: \`required: true\`, \`as: flag\` (default → \`--name value\`) | \`env\` | \`positional\`, \`flag: "-k"\` (custom flag text).
+- Every param is also exported as env \`SS_PARAM_<NAME>\` (bool → 1/0), so scripts may read env instead of parsing argv.
+- Optional: \`cwd: ~/dir\`, \`interpreter: python3 -u\` (default: inferred from extension; otherwise the file must be executable).
+- Re-registering the same name needs \`--force\` (that is also how you update a script). \`ss run rm <name>\` removes one.
+- Several scripts can go in one YAML separated by \`---\`.
+- Legacy one-liner still works: \`ss run add ./x.sh --name n --desc d --param '{"name":"env","type":"choice","choices":["dev","prod"]}'\`.
+
+## Move scripts between computers
+\`\`\`bash
+ss run export <name> [<name>...] > scripts.yaml   # or: ss run export --all
+ss run add scripts.yaml --force                    # on the other machine (code is embedded, nothing else to copy)
+\`\`\`
+If the user pastes such a YAML into the chat, pipe it to \`ss run add -\` (or save it to a temp file) and register it.
+If \`ss\` itself is missing on a machine, shooting-star must be installed first (\`./install.sh\` in its repo); \`ss run install\` sets up this skill and the hook.
 
 ## DB connections (same registry, same CLI)
 \`\`\`bash
@@ -248,6 +380,11 @@ ss db query <conn> "SELECT ..." [--limit 1000] [--json|--csv]
 `;
 const HOOK_CMD = 'ss run context';
 const claudeDir = () => path.join(HOME, '.claude');
+// ss 를 업데이트하면 다음 Claude 세션 시작(hook)에서 skill 문서도 최신으로 맞춘다 (설치된 경우에만)
+function refreshSkill() {
+  const f = path.join(claudeDir(), 'skills', 'ss-run', 'SKILL.md');
+  try { if (fs.readFileSync(f, 'utf8') !== SKILL_MD) fs.writeFileSync(f, SKILL_MD); } catch {}
+}
 function install() {
   const skillDir = path.join(claudeDir(), 'skills', 'ss-run');
   fs.mkdirSync(skillDir, { recursive: true });
@@ -280,10 +417,13 @@ function parseFlags(argv) {   // --k v / --k=v / 단독 --flag(→ true); 반복
 const HELP = `ss run — 스크립트 등록/실행 (UI 의 Run 메뉴, Claude 와 공유)
 
   ss run list [--json]            등록된 스크립트
-  ss run show <name>              상세 (파라미터 스키마)
-  ss run <name> [--파라미터 값…]   실행  (danger 스크립트는 --yes)
-  ss run add <file> [--name n] [--desc d] [--param '{json}']… [--danger] [--cwd dir]
+  ss run show <name>              상세 (YAML)
+  ss run <name> [@프리셋] [--파라미터 값…]   실행  (danger 스크립트는 --yes)
+  ss run add <x.yaml | ->         YAML 로 등록 (code: 에 본문 인라인 또는 script: 경로, --- 로 여러 개)
+  ss run add <file> [--config x.yaml] [--name n] [--desc d] [--param '{json}']… [--danger] [--cwd dir]
                     [--interpreter "python3 -u"] [--link] [--force]
+  ss run template [bash|python|node]   주석 달린 YAML 템플릿
+  ss run export <name…> | --all   본문까지 담은 YAML (다른 컴퓨터에서 ss run add 로 등록)
   ss run rm <name>                등록 해제
   ss run history [n]              최근 실행 기록
   ss run context                  에이전트용 텍스트 요약 (Claude SessionStart hook 이 호출. AGENTS.md 등에 붙여도 됨)
@@ -301,8 +441,15 @@ async function cli(argv) {
       for (const m of ms) console.log(m.broken ? `${m.name}  ⚠ ${m.broken}` : `${usageLine(m)}${m.missing ? '  ⚠ 파일 없음' : ''}${m.description ? '\n    ' + m.description : ''}`);
       return 0;
     }
-    if (sub === 'show') { const m = get(rest[0]); const { scriptPath: sp, ...pub } = m; console.log(JSON.stringify(pub, null, 2)); console.log('\nscript: ' + sp); console.log('usage:  ' + usageLine(m)); return 0; }
-    if (sub === 'context') { console.log(contextText()); return 0; }
+    if (sub === 'show') { const m = get(rest[0]); process.stdout.write(toYaml(m)); console.log('\n# script:   ' + m.scriptPath + '\n# manifest: ' + m.manifest + '\n# usage:    ' + usageLine(m)); return 0; }
+    if (sub === 'template') { process.stdout.write(TEMPLATE(rest[0] || 'bash')); return 0; }
+    if (sub === 'export') {
+      const { o, rest: names } = parseFlags(rest);
+      const all = o.all ? list().filter((m) => !m.broken && !m.missing).map((m) => m.name) : names;
+      if (!all.length) throw err('내보낼 이름을 주거나 --all');
+      process.stdout.write(exportYaml(all)); return 0;
+    }
+    if (sub === 'context') { refreshSkill(); console.log(contextText()); return 0; }
     if (sub === 'tools') { const { o } = parseFlags(rest); console.log(JSON.stringify(toolDefs(o.format === 'anthropic' ? 'anthropic' : 'openai'), null, 2)); return 0; }
     if (sub === 'install') {
       const r = install();
@@ -314,11 +461,32 @@ async function cli(argv) {
     if (sub === 'add') {
       const { o, rest: pos } = parseFlags(rest);
       const params = [].concat(o.param || []).map((s) => { try { return JSON.parse(s); } catch { throw err(`--param 은 JSON 이어야 합니다: ${s}`); } });
-      const m = add({ name: o.name, description: o.desc || o.description || '', params, danger: !!o.danger, cwd: o.cwd, interpreter: o.interpreter }, pos[0], { link: !!o.link, force: !!o.force });
-      console.log(`registered: ${usageLine(m)}`); return 0;
+      const over = {};
+      if (typeof o.name === 'string') over.name = o.name;
+      const desc = o.desc ?? o.description; if (typeof desc === 'string') over.description = desc;
+      if (params.length) over.params = params;
+      if (o.danger) over.danger = true;
+      if (typeof o.cwd === 'string') over.cwd = o.cwd;
+      if (typeof o.interpreter === 'string') over.interpreter = o.interpreter;
+      const opts = { link: !!o.link, force: !!o.force };
+      const f = pos[0];
+      if (!f) throw err('ss run add <x.yaml | - | 스크립트 파일>');
+      let ms;
+      if (f === '-' || MANIFEST_EXT.includes(path.extname(f).toLowerCase())) {   // YAML/JSON 매니페스트 (stdin 또는 파일)
+        const text = f === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(f), 'utf8');
+        ms = addFromText(text, { ...opts, baseDir: f === '-' ? process.cwd() : path.dirname(path.resolve(f)), over });
+      } else if (o.config) {   // 스크립트 파일 + 설정 YAML
+        let cfg; try { cfg = YAML.load(fs.readFileSync(path.resolve(String(o.config)), 'utf8')) || {}; } catch (e) { throw err(`--config 를 읽을 수 없습니다: ${e.message}`); }
+        delete cfg.script; delete cfg.code; delete cfg.lang;
+        const d = { ...cfg, ...over }; if (over.params) d.params = [...(cfg.params || []), ...over.params];
+        ms = [add(d, f, opts)];
+      } else ms = [add({ description: '', ...over }, f, opts)];
+      for (const m of ms) console.log(`registered: ${usageLine(m)}`);
+      return 0;
     }
     // ss run <name> …
     const m = get(sub);
+    const preset = rest[0] && rest[0].startsWith('@') ? rest.shift().slice(1) : null;
     const { o } = parseFlags(rest);
     const yes = !!o.yes; delete o.yes;
     if (m.danger && !yes) {
@@ -327,11 +495,11 @@ async function cli(argv) {
       process.stdin.pause(); if (!/^y(es)?$/i.test(ans)) return 1;
     }
     const given = {}; for (const [k, v] of Object.entries(o)) given[k] = Array.isArray(v) ? v[v.length - 1] : v;
-    const job = start(m, given, { cwd: process.cwd(), source: 'cli' });
+    const job = start(m, given, { cwd: process.cwd(), source: 'cli', preset });
     job.on('data', (s) => process.stdout.write(s));
     for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => kill(job.id));
     return await new Promise((r) => job.on('end', ({ code, signal }) => r(code ?? (signal ? 130 : 1))));
   } catch (e) { console.error(e.message); return e.status === 404 ? 127 : 2; }
 }
 
-module.exports = { DIR, list, get, add, remove, start, kill, jobs, history, readLog, normalizeManifest, contextText, install, cli, scriptPath, err };
+module.exports = { DIR, list, get, add, addFromText, exportYaml, remove, start, kill, jobs, history, readLog, normalizeManifest, contextText, install, cli, scriptPath, err };

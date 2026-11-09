@@ -1821,8 +1821,9 @@ function drawRun() {
       e.preventDefault();
       showMenu(e.clientX, e.clientY, [
         ...(m.broken ? [] : [['실행 화면 열기', () => openRunTab(m)], ['스크립트 편집', () => openExternal(m.scriptPath)]]),
-        ['매니페스트(.json) 편집', () => openExternal(runUi.dir + '/' + m.name + '.json')],
+        ['설정(' + (m.manifest || '').split('.').pop() + ') 편집', () => openExternal(m.manifest)],
         ['`ss run ' + m.name + '` 복사', () => copy('ss run ' + m.name, '명령 복사됨')],
+        ...(m.broken ? [] : [['내보내기 YAML 복사 (다른 컴퓨터용)', async () => { try { copy((await api('GET', 'run/export', { name: m.name })).yaml, 'YAML 복사됨 — 다른 컴퓨터에서 ss run add - 로 붙여넣기'); } catch (er) { toast(er.message); } }]]),
         ['등록 해제…', async () => { if (!confirm(`'${m.name}' 등록을 해제할까요? (실행 기록은 유지)`)) return; try { await api('DELETE', 'run/script', { name: m.name }); closeTab('@run/' + m.name).catch?.(() => {}); } catch (er) { toast(er.message); } loadRun(); }],
       ]);
     };
@@ -1848,16 +1849,24 @@ function openRunTab(m) {
   t.m = m; t.scriptPath = m.scriptPath;
   state.active = p; state.selected = p; renderAll(); drawRun(); return t;
 }
+const runBase = (t, p) => { const pv = t.preset && t.m.presets?.[t.preset]; return pv && pv[p.name] !== undefined ? pv[p.name] : p.default; };
 const runCmdline = (t) => {
-  const parts = ['ss run', t.name];
-  for (const p of t.m.params) { const v = t.vals[p.name]; if (v === undefined || v === '' || v === false || (p.type !== 'bool' && p.default !== undefined && String(v) === String(p.default))) continue; parts.push(p.type === 'bool' ? '--' + p.name : `--${p.name} ${/[\s"'$]/.test(String(v)) ? JSON.stringify(String(v)) : v}`); }
+  const parts = ['ss run', t.name]; if (t.preset) parts.push('@' + t.preset);
+  for (const p of t.m.params) { const v = t.vals[p.name], base = runBase(t, p); if (v === undefined || v === '' || (v === false && !base) || (base !== undefined && String(v) === String(base))) continue; parts.push(p.type === 'bool' ? '--' + p.name : `--${p.name} ${/[\s"'$]/.test(String(v)) ? JSON.stringify(String(v)) : v}`); }
   return parts.join(' ');
 };
 function runView(t) {
   if (t.dom) return t.dom;   // 실행 중에도 입력/출력 상태가 유지되도록 한 번 만든 DOM 을 재사용
   const m = t.m, form = el('div', { className: 'rv-form' });
-  for (const p of m.params) if (t.vals[p.name] === undefined) t.vals[p.name] = p.default !== undefined ? p.default : p.type === 'bool' ? false : '';
+  if (t.preset && !m.presets?.[t.preset]) t.preset = '';
+  for (const p of m.params) if (t.vals[p.name] === undefined) { const b = runBase(t, p); t.vals[p.name] = b !== undefined ? b : p.type === 'bool' ? false : ''; }
   const cmd = el('div', { className: 'rv-cmd' }), upd = () => { cmd.textContent = runCmdline(t); };
+  const presets = Object.keys(m.presets || {});
+  if (presets.length) {   // 프리셋을 고르면 그 값으로 폼을 채운다 (이후 개별 수정 가능)
+    const sel = el('select', { id: 'rp-@preset', onchange() { t.preset = this.value; t.vals = {}; t.dom = null; renderContent(); } }, el('option', { value: '', textContent: '(기본값)' }), ...presets.map((k) => el('option', { value: k, textContent: '@' + k + '  ' + Object.entries(m.presets[k]).map(([a, b]) => a + '=' + b).join(' ') })));
+    sel.value = t.preset || '';
+    form.append(el('label', { htmlFor: sel.id, textContent: '프리셋' }), sel);
+  }
   for (const p of m.params) {
     let inp;
     if (p.type === 'bool') inp = el('input', { type: 'checkbox', checked: !!t.vals[p.name], onchange() { t.vals[p.name] = this.checked; upd(); } });
@@ -1880,7 +1889,7 @@ function runView(t) {
     if (m.danger && !confirm(`'${m.name}' 은(는) danger 스크립트입니다. 실행할까요?\n\n${runCmdline(t)}`)) return;
     t.out = ''; out.textContent = ''; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; paint();
     const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }
-    let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
+    let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params, preset: t.preset || undefined }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
     t.job = { id: r.id }; t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
     append(`$ ${r.cmdline}\n`);
     const es = new EventSource(`/api/run/stream?id=${r.id}&root=${encodeURIComponent(state.root)}`); t.es = es;
@@ -1908,7 +1917,7 @@ $('#btn-run-refresh').onclick = loadRun;
 $('#btn-run-new').onclick = async () => {
   const name = (prompt('새 스크립트 이름 (영문/숫자/._-)') || '').trim(); if (!name) return;
   const lang = (prompt('언어: bash / python / node', 'bash') || 'bash').trim();
-  try { const r = await api('POST', 'run/new', {}, { name, lang }); await loadRun(); openExternal(r.script); toast('스크립트를 만들었습니다 — 설명/파라미터는 ' + name + '.json 에서 편집'); }
+  try { const r = await api('POST', 'run/new', {}, { name, lang }); await loadRun(); openExternal(r.script); toast('스크립트를 만들었습니다 — 설명/파라미터/프리셋은 ' + name + '.yaml 에서 편집'); }
   catch (e) { toast(e.message); }
 };
 
