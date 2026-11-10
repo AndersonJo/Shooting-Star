@@ -2556,7 +2556,7 @@ function drawRun() {
         if (!m) return toast('등록 해제된 스크립트입니다');
         const t = openRunTab(m, false);                 // 같은 탭을 재사용하되 '지난 결과 보기' 모드
         t.vals = { ...(h.params || {}) }; t.preset = h.preset || '';   // 그때 쓴 파라미터로 폼을 채움
-        t.viewing = h.id; t.fold = true;   // 지난 출력을 넓게
+        t.viewing = h.id; t.runId = h.id; t.fold = true;   // 지난 출력을 넓게
         try { t.out = (await api('GET', 'run/log', { id: h.id })).log; } catch { t.out = ''; }
         t.status = { cls: ok ? 'ok' : 'fail', text: `이전 실행 결과 · ${new Date(h.startedAt).toLocaleString()} · exit ${h.code ?? h.signal}` };
         t.dom = null; renderContent();
@@ -2573,6 +2573,15 @@ function openRunTab(m, fresh = true) {
   t.m = m; t.scriptPath = m.scriptPath;
   if (fresh && !t.job) { t.out = ''; t.status = null; t.viewing = null; t.vals = {}; t.preset = ''; t.fold = false; t.dom = null; }   // 실행기: 기본값 폼 + 빈 출력 (실행 중이면 건드리지 않음)
   state.active = p; state.selected = p; renderAll(); drawRun(); return t;
+}
+// Claude 에 붙여넣을 디버깅 안내: 실행 id → `ss run log <id>` 로 실행 정보 + 출력, 그리고 파일 경로들
+function runDebugText(t) {
+  const id = t.runId, st = t.status?.text;
+  return [id ? `ss run '${t.name}' 실행 결과를 확인하고, 문제가 있으면 원인을 찾아 고쳐줘.${st ? ' (' + st + ')' : ''}` : `ss run '${t.name}' 스크립트를 확인해줘.`,
+    `- 명령: ${id && t.viewing ? '(지난 실행) ' : ''}${runCmdline(t)}`,
+    id ? `- 실행 정보 + 출력: \`ss run log ${id}\`` : '',
+    id ? `- 로그 파일: ${runUi.dir}/logs/${id}.log` : '',
+    `- 스크립트: ${t.m.scriptPath}`, `- 설정: ${t.m.manifest}`].filter(Boolean).join('\n');
 }
 const runBase = (t, p) => { const pv = t.preset && t.m.presets?.[t.preset]; return pv && pv[p.name] !== undefined ? pv[p.name] : p.default; };
 const runCmdline = (t) => {
@@ -2629,7 +2638,7 @@ function runView(t) {
     t.out = ''; out.textContent = ''; t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; setFold(true); paint();
     const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }
     let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params, preset: t.preset || undefined }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
-    t.job = { id: r.id }; t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
+    t.job = { id: r.id }; t.runId = r.id; t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
     append(`$ ${r.cmdline}\n`);
     const es = new EventSource(`/api/run/stream?id=${r.id}&root=${encodeURIComponent(state.root)}`); t.es = es;
     es.addEventListener('data', (e) => append(JSON.parse(e.data)));
@@ -2644,12 +2653,13 @@ function runView(t) {
   stop.onclick = async () => { if (t.job?.id) { try { await api('POST', 'run/kill', {}, { id: t.job.id }); } catch {} } };
   const clear = el('button', { textContent: '지우기', onclick: () => { t.out = ''; out.textContent = ''; } });
   const cp = el('button', { textContent: '출력 복사', onclick: () => copy(t.out, '출력 복사됨') });
+  const ask = el('button', { textContent: 'Claude 에게', title: '로그/스크립트/설정 경로를 복사 — Claude 에 붙여넣으면 바로 로그를 읽고 디버깅합니다', onclick: () => copy(runDebugText(t), 'Claude 용 디버깅 정보 복사됨 — 붙여넣기 하세요') });
   const nOpt = m.params.length + (m.secrets || []).length + (presets.length ? 1 : 0);
   const fold = el('button', { className: 'rv-fold', title: '옵션 접기/펼치기 (실행하면 자동으로 접힘)', onclick: () => setFold(!t.fold) });
   const top = el('div', { className: 'rv-top' },
     el('div', { className: 'rv-title' }, m.name, m.danger ? el('span', { className: 'danger', textContent: 'danger' }) : ''),
     el('div', { className: 'rv-desc', textContent: m.description || '(설명 없음)' }), fold, form, cmd,
-    el('div', { className: 'rv-act' }, go, stop, clear, cp, st));
+    el('div', { className: 'rv-act' }, go, stop, clear, cp, ask, st));
   function setFold(v) { t.fold = !!v; top.classList.toggle('fold', t.fold); fold.textContent = (t.fold ? '▸ 옵션' : '▾ 옵션') + (nOpt ? ` (${nOpt})` : ''); }
   setFold(t.fold);
   const box = el('div', { className: 'rv' }, top, out);

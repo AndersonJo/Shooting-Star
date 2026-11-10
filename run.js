@@ -274,7 +274,30 @@ function kill(id) {
 function history(limit = 50) {
   try { return fs.readFileSync(HISTORY, 'utf8').trim().split('\n').slice(-limit).reverse().map((l) => JSON.parse(l)); } catch { return []; }
 }
-function readLog(id) { if (!/^[a-z0-9]+$/.test(id)) throw err('bad id'); try { return fs.readFileSync(path.join(LOGS, id + '.log'), 'utf8').slice(-MAX_BUF); } catch { return ''; } }
+const ID_RE = /^[a-z0-9]+$/;
+const logPath = (id) => { if (!ID_RE.test(id || '')) throw err('bad id'); return path.join(LOGS, id + '.log'); };
+function readLog(id) { try { return fs.readFileSync(logPath(id), 'utf8').slice(-MAX_BUF); } catch (e) { if (e.status) throw e; return ''; } }
+// 디버깅용: 이름(그 스크립트의 마지막 실행) / 실행 id / 생략(가장 최근 실행) → 실행 정보 + 로그 경로
+function findRun(q) {
+  const hs = history(1000);
+  let h = q ? hs.find((x) => x.name === q) || hs.find((x) => x.id === q) : null;
+  if (!q) {   // 가장 최근 로그 파일 (아직 끝나지 않은 실행은 history 에 없다)
+    let best = null;
+    try { for (const f of fs.readdirSync(LOGS)) { if (!f.endsWith('.log')) continue; const t = fs.statSync(path.join(LOGS, f)).mtimeMs; if (!best || t > best.t) best = { id: f.slice(0, -4), t }; } } catch {}
+    h = best ? hs.find((x) => x.id === best.id) || { id: best.id, running: true } : hs[0];
+  } else if (!h && ID_RE.test(q) && fs.existsSync(logPath(q))) h = { id: q, running: true };
+  if (!h) throw err(q ? `'${q}' 의 실행 기록이 없습니다` : '실행 기록이 없습니다', 404);
+  let m = null; try { if (h.name) m = get(h.name); } catch {}
+  return { ...h, log: logPath(h.id), script: m?.scriptPath, manifest: m?.manifest };
+}
+function runInfoText(r) {
+  const at = r.startedAt ? new Date(r.startedAt).toLocaleString() : '';
+  const st = r.running ? '실행 중 (또는 기록 전)' : r.signal ? 'killed ' + r.signal : 'exit ' + r.code;
+  return [`# run       ${r.id}${r.name ? ' · ' + r.name : ''} · ${st}${at ? ' · ' + at : ''}${r.endedAt ? ' · ' + ((r.endedAt - r.startedAt) / 1000).toFixed(1) + 's' : ''}${r.source ? ' · ' + r.source : ''}`,
+    r.params ? `# params    ${JSON.stringify(r.params)}${r.preset ? ' (@' + r.preset + ')' : ''}` : '',
+    r.cwd ? `# cwd       ${r.cwd}` : '', r.script ? `# script    ${r.script}` : '', r.manifest ? `# manifest  ${r.manifest}` : '',
+    `# log       ${r.log}`].filter(Boolean).join('\n');
+}
 
 // ───────── Claude 연동: 컨텍스트 요약 / skill / hook ─────────
 function usageLine(m) {
@@ -288,6 +311,7 @@ function contextText() {
   const lines = ['[shooting-star] 등록된 실행 스크립트 (ss run). 사용자가 실행을 요청하면 직접 짜지 말고 아래를 먼저 `ss run <name>` 으로 실행한다. 등록/상세는 ss-run skill 참고.'];
   if (!ms.length) lines.push('(아직 등록된 스크립트 없음 — 반복 작업은 `ss run add` 로 등록할 수 있다)');
   for (const m of ms) lines.push(`- ${usageLine(m)}${m.danger ? '  [danger: --yes 필요]' : ''}${m.description ? ' — ' + m.description : ''}`);
+  if (ms.length) lines.push('- 실행 결과/실패 디버깅: `ss run log <name|run-id>` (실행 정보 + 스크립트/로그 경로 + 출력, UI 에서 실행한 것도 포함)');
   try {
     const ss = SECRET.list();
     lines.push('[shooting-star] 세션키 저장소: `ss secret set <이름>`(값은 가려서 입력) · 스크립트는 secrets: [이름] 으로 선언하면 env SS_SECRET_<이름> 로 받음. 값은 chat 에 붙여넣게 하지 말 것.');
@@ -334,6 +358,15 @@ ss run <name> @preset [--k v ...]    # run with a saved option set; flags given 
 - Scripts marked \`danger\` need \`--yes\`; pass it only when the user explicitly asked for that run.
 - Bool params are flags (\`--verbose\`); omit params that have a default unless the user specified a value.
 - \`@preset\` must come right after the name. Unknown params / presets / bad values are rejected with the valid list.
+
+## Debug a run (UI or CLI)
+\`\`\`bash
+ss run log [<name>|<run-id>]         # run info (params, exit, cwd, script/manifest/log paths) + last 200 lines; no arg = most recent run
+ss run log <name> --all | --tail N   # more output;  --path prints only the log file path
+ss run history [n]                   # recent runs with their ids
+\`\`\`
+- Every run (UI or CLI) is logged to \`~/.shooting-star/run/logs/<id>.log\`. When the user says a run failed or "check the log", start with \`ss run log <name>\`, then read the script file it names.
+- To fix a script, edit the \`script\` file in place (the UI picks it up), or re-register with \`ss run add ... --force\` to change params.
 
 ## Register (one YAML, no other files needed)
 Prefer registering when the user will likely repeat the task. Pipe a self-contained YAML (script body in \`code:\`) into \`ss run add -\`:
@@ -446,7 +479,8 @@ const HELP = `ss run — 스크립트 등록/실행 (UI 의 Run 메뉴, Claude �
   ss run template [bash|python|node]   주석 달린 YAML 템플릿
   ss run export <name…> | --all   본문까지 담은 YAML (다른 컴퓨터에서 ss run add 로 등록)
   ss run rm <name>                등록 해제
-  ss run history [n]              최근 실행 기록
+  ss run history [n]              최근 실행 기록 (id 포함)
+  ss run log [name|id] [--tail N|--all] [--path]   실행 정보(스크립트/설정/로그 경로) + 출력. 생략하면 가장 최근 실행
   ss run context                  에이전트용 텍스트 요약 (Claude SessionStart hook 이 호출. AGENTS.md 등에 붙여도 됨)
   ss run tools [--format openai|anthropic]   function-calling 도구 정의(JSON). 호출은 'ss run <name> --k v' 로 실행
   ss run install                  Claude 에 skill(ss-run) + SessionStart hook + 실행 권한 설치
@@ -477,7 +511,16 @@ async function cli(argv) {
       console.log(`✓ skill: ${r.skill}\n✓ ${r.settings}: ${r.hookAdded ? 'SessionStart hook 추가' : 'hook 이미 있음'}${r.rulesAdded.length ? ', 권한 ' + r.rulesAdded.join(', ') + ' 추가 (백업 settings.json.bak-ss)' : ''}\n새 Claude 세션부터 적용됩니다.`);
       return 0;
     }
-    if (sub === 'history') { for (const h of history(Number(rest[0]) || 20)) console.log(`${new Date(h.startedAt).toLocaleString()}  ${h.name}  exit=${h.code ?? h.signal}  ${((h.endedAt - h.startedAt) / 1000).toFixed(1)}s  [${h.source}]  ${JSON.stringify(h.params)}`); return 0; }
+    if (sub === 'log') {
+      const { o, rest: pos } = parseFlags(rest); const r = findRun(pos[0]);
+      if (o.path) { console.log(r.log); return 0; }
+      let text = ''; try { text = fs.readFileSync(r.log, 'utf8'); } catch {}
+      const n = o.all ? Infinity : Number(o.tail) || 200, lines = text.replace(/\n$/, '').split('\n');
+      console.log(runInfoText(r)); if (lines.length > n) console.log(`# (마지막 ${n}줄 / 전체 ${lines.length}줄 — --all 로 전체)`);
+      console.log('─'.repeat(60)); if (text) console.log(lines.slice(-n).join('\n'));
+      return 0;
+    }
+    if (sub === 'history') { for (const h of history(Number(rest[0]) || 20)) console.log(`${h.id}  ${new Date(h.startedAt).toLocaleString()}  ${h.name}  exit=${h.code ?? h.signal}  ${((h.endedAt - h.startedAt) / 1000).toFixed(1)}s  [${h.source}]  ${JSON.stringify(h.params)}`); return 0; }
     if (sub === 'rm') { remove(rest[0]); console.log('removed ' + rest[0]); return 0; }
     if (sub === 'add') {
       const { o, rest: pos } = parseFlags(rest);
@@ -523,4 +566,4 @@ async function cli(argv) {
   } catch (e) { console.error(e.message); return e.status === 404 ? 127 : 2; }
 }
 
-module.exports = { DIR, list, get, add, addFromText, exportYaml, remove, start, kill, jobs, history, readLog, normalizeManifest, contextText, install, cli, scriptPath, err };
+module.exports = { DIR, list, get, add, addFromText, exportYaml, remove, start, kill, jobs, history, readLog, logPath, findRun, runInfoText, normalizeManifest, contextText, install, cli, scriptPath, err };
