@@ -959,8 +959,8 @@ async function api(req, res, url, root) {
       fs.mkdirSync(RUN.DIR, { recursive: true });   // UI 가 이 폴더를 감시한다 (첫 등록 전에도)
       return send(res, 200, { scripts: RUN.list().map(({ scriptPath, ...m }) => ({ ...m, scriptPath })), dir: RUN.DIR, running: [...RUN.jobs.values()].filter((j) => !j.endedAt).map((j) => ({ id: j.id, name: j.name })), history: RUN.history(30), secrets: SECRET.list().map((x) => x.name) });
     case 'POST /api/run/exec': { // 등록된 이름만 실행한다 (임의 명령 실행 아님)
-      const { name, params, preset } = JSON.parse(await readBody(req));
-      const job = RUN.start(RUN.get(name), params && typeof params === 'object' ? params : {}, { cwd: root, source: 'ui', shellEnv: true, color: true, preset: typeof preset === 'string' && preset ? preset : null });
+      const { name, params, preset, cols, rows } = JSON.parse(await readBody(req));
+      const job = RUN.start(RUN.get(name), params && typeof params === 'object' ? params : {}, { cwd: root, source: 'ui', shellEnv: true, color: true, pty: { cols, rows }, preset: typeof preset === 'string' && preset ? preset : null });
       return send(res, 200, { id: job.id, cmdline: job.cmdline, cwd: job.cwd, git: job.git, startedAt: job.startedAt });
     }
     case 'GET /api/run/where': { // 실행 전 미리보기: 어디서(작업 폴더) 어떤 브랜치로 실행되는지

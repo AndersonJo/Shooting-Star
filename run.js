@@ -47,6 +47,7 @@ function normalizeManifest(m) {
   if (m.cwd) out.cwd = String(m.cwd);
   if (m.danger) out.danger = true;
   if (m.color === false) out.color = false;   // 색 강제(FORCE_COLOR 등) 끄기
+  if (m.pty === false) out.pty = false;       // UI 실행을 가상 터미널 대신 파이프로
   out.params = (m.params || []).map(normalizeParam);
   const secrets = SECRET.normalize(m.secrets);   // 세션키/토큰: env SS_SECRET_<NAME> 로 주입
   if (secrets.length) out.secrets = secrets;
@@ -171,6 +172,7 @@ lang: ${LANG_EXT[lang] ? lang : 'bash'}                    # code 를 쓸 때 �
 # script: ./my-task.sh         # code 대신 기존 파일 (이 YAML 기준 상대경로). 파일명만 정하려면 code 와 함께 써도 됨
 # danger: true                 # 실행 전에 확인 (CLI 는 --yes 필요)
 # color: false                 # 색 강제(FORCE_COLOR/CLICOLOR_FORCE/TERM…) 끄기 — 출력을 파싱하는 스크립트용
+# pty: false                   # UI 실행을 가상 터미널(진행 막대 표시) 대신 파이프로
 # cwd: ~/work                  # 작업 폴더 (기본: 실행한 곳)
 # interpreter: python3 -u      # 기본은 확장자로 추론
 params:
@@ -288,7 +290,13 @@ const gitText = (g) => (g ? `${g.branch || 'detached'}${g.commit ? ' @' + g.comm
 const workdirOf = (m, cwd) => (m.cwd ? m.cwd.replace(/^~(?=$|\/)/, HOME) : (cwd || process.cwd()));
 // 파이프로 연결되면 대부분의 도구가 색을 끈다 → 보여줄 곳이 터미널(UI 렌더러 포함)이면 색을 켜도록 알려준다
 const COLOR_ENV = { FORCE_COLOR: '1', CLICOLOR_FORCE: '1', CLICOLOR: '1', PY_COLORS: '1', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
-function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false, color = false } = {}) {
+// UI 실행은 가상 터미널(pty)에서: 파이프면 tqdm·rich·pip·wget·docker 등이 진행 막대를 끄거나 줄여 버린다.
+// node 네이티브 모듈 없이 macOS 기본 /usr/bin/script 로 pty 를 만든다. 크기는 UI 터미널 폭, \n→\r\n 변환은 끈다.
+// stdin 은 /dev/null 그대로 (입력을 읽는 스크립트는 즉시 EOF) — script 가 EOF 를 ^D 로 넘기며 생기는 "^D\b\b" 메아리는 지운다.
+const PTY_OK = process.platform === 'darwin' && fs.existsSync('/usr/bin/script');
+const PTY_ECHO = '^D\b\b';
+const ptySize = (p) => { const n = (v, d, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : d); return { cols: n(p && p.cols, 120, 20, 1000), rows: n(p && p.rows, 40, 5, 500) }; };
+function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false, color = false, pty = null } = {}) {
   const vals = resolveParams(m, given || {}, preset || null);
   const { cmd, args, env } = buildCommand(m, vals);
   Object.assign(env, SECRET.injectEnv(m.secrets));   // 저장된 세션키를 env 로 주입 (required 인데 없으면 여기서 에러)
@@ -300,18 +308,30 @@ function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false,
   let base = process.env, envNote = '';   // CLI 는 터미널 환경 그대로, UI 는 로그인 셸 환경 (rc 파일 반영)
   if (shellEnv) { const le = loginEnv(); if (le.env) base = { ...process.env, ...le.env }; if (le.err) envNote = `[ss] ${le.err}${le.env ? ' — 이전에 읽은 환경으로 실행' : ' — 서버 환경으로 실행'}\n`; }
   if (color && m.color !== false && !('NO_COLOR' in base)) { const c = {}; for (const [k, v] of Object.entries(COLOR_ENV)) if (k === 'TERM' ? !base.TERM || base.TERM === 'dumb' : !(k in base)) c[k] = v; base = { ...base, ...c }; }
-  const child = spawn(cmd, args, { cwd: workdir, env: { ...base, ...env, SS_RUN_ID: id, SS_RUN_NAME: m.name }, stdio: stdio ? ['inherit', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+  let [exe, argv] = [cmd, args];
+  const usePty = !!pty && !stdio && PTY_OK && m.pty !== false;
+  if (usePty) { const { cols, rows } = ptySize(pty); exe = '/usr/bin/script'; argv = ['-q', '/dev/null', '/bin/sh', '-c', `stty -onlcr -echo cols ${cols} rows ${rows} 2>/dev/null; exec "$0" "$@"`, cmd, ...args]; }
+  const child = spawn(exe, argv, { cwd: workdir, env: { ...base, ...env, SS_RUN_ID: id, SS_RUN_NAME: m.name }, stdio: stdio ? ['inherit', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
   job.child = child;
   const chunk = (d) => {
     const s = d.toString(); log.write(d);
     job.buf = (job.buf + s).slice(-MAX_BUF); job.emit('data', s);
   };
   if (envNote) chunk(envNote);
-  child.stdout.on('data', chunk); child.stderr.on('data', chunk);
+  let head = usePty ? '' : null;   // pty: 맨 앞 "^D\b\b" 메아리를 걸러낼 때까지 잠깐 모은다
+  const out = (d) => {
+    if (head === null) return chunk(d);
+    head += d.toString();
+    if (head.length < PTY_ECHO.length && PTY_ECHO.startsWith(head)) return;
+    const s = head.startsWith(PTY_ECHO) ? head.slice(PTY_ECHO.length) : head; head = null;
+    if (s) chunk(s);
+  };
+  child.stdout.on('data', out); child.stderr.on('data', out);
   child.on('error', (e) => { chunk(`\n[실행 실패] ${e.message}\n`); finish(null, null); });
   let done = false;
   const finish = (code, signal) => {
     if (done) return; done = true;
+    if (head) { chunk(head); head = null; }
     job.code = code; job.signal = signal; job.endedAt = Date.now(); log.end();
     try { fs.appendFileSync(HISTORY, JSON.stringify({ id, name: m.name, params: vals, ...(preset ? { preset } : {}), source, startedAt: job.startedAt, endedAt: job.endedAt, code, signal, cwd: workdir, ...(git ? { git } : {}) }) + '\n'); } catch {}
     job.emit('end', { code, signal });
@@ -457,6 +477,7 @@ YAML
 - Every param is also exported as env \`SS_PARAM_<NAME>\` (bool → 1/0), so scripts may read env instead of parsing argv.
 - Optional: \`cwd: ~/dir\`, \`interpreter: python3 -u\` (default: inferred from extension; otherwise the file must be executable).
 - Runs shown in a terminal or the UI get FORCE_COLOR/CLICOLOR_FORCE/TERM=xterm-256color so tools keep their colors (the UI renders ANSI). Set \`color: false\` if the script parses command output that colors would break.
+- UI runs (macOS) execute in a pseudo-terminal sized to the output pane, so progress bars (tqdm, rich, pip, wget, docker…) render live, just like in Terminal. stdin is still empty (EOF). \`pty: false\` runs it on plain pipes instead.
 - Re-registering the same name needs \`--force\` (that is also how you update a script). \`ss run rm <name>\` removes one.
 - Several scripts can go in one YAML separated by \`---\`.
 - Legacy one-liner still works: \`ss run add ./x.sh --name n --desc d --param '{"name":"env","type":"choice","choices":["dev","prod"]}'\`.

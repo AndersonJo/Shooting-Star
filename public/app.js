@@ -2520,6 +2520,14 @@ function term256(n) {
   return `rgb(${c(Math.floor(n / 36))},${c(Math.floor(n / 6) % 6)},${c(n % 6)})`;
 }
 const TERM_MAX_LINES = 5000;
+// 실행 출력 칸에 들어가는 글자 수 → 서버가 가상 터미널(pty) 크기로 쓴다 (진행 막대 폭 등)
+function termSize(pre) {
+  const probe = document.createElement('span'); probe.textContent = 'M'.repeat(50); probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre';
+  pre.append(probe); const cw = probe.getBoundingClientRect().width / 50; probe.remove();
+  const cs = getComputedStyle(pre), ch = parseFloat(cs.lineHeight), w = pre.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), h = pre.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  if (!(cw > 0) || !(w > 0)) return {};
+  return { cols: Math.max(20, Math.floor(w / cw) - 1), rows: Math.max(5, Math.floor(h / (ch || 16))) };
+}
 class Term {
   constructor(pre) { this.pre = pre; this.reset(); }
   reset() { this.lines = [[]]; this.nodes = []; this.y = 0; this.x = 0; this.st = {}; this.sk = ''; this.pend = ''; this.dirty = new Set(); this.pre.replaceChildren(); }
@@ -2776,7 +2784,7 @@ function runView(t) {
     if (m.danger && !confirm(`'${m.name}' 은(는) danger 스크립트입니다. 실행할까요?\n\n${runCmdline(t)}`)) return;
     t.out = ''; term.reset(); refind(); t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; setFold(true); paint();
     const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }
-    let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params, preset: t.preset || undefined }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
+    let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params, preset: t.preset || undefined, ...termSize(out) }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
     t.job = { id: r.id }; t.runId = r.id; t.where = { cwd: r.cwd, git: r.git || null, at: r.startedAt, run: true }; drawWhere(); t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
     append(`$ ${r.cmdline}\n`);
     const es = new EventSource(`/api/run/stream?id=${r.id}&root=${encodeURIComponent(state.root)}`); t.es = es;
