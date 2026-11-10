@@ -1263,10 +1263,13 @@ document.addEventListener('keydown', (e) => {
   if (!fn) return;
   e.preventDefault(); e.stopImmediatePropagation(); fn();   // ⌘B(사이드바 토글) 등 전역 단축키보다 우선
 }, true);
-// Home / End: 페이지 처음·끝이 아니라 현재 줄의 처음·끝으로 (macOS 의 textarea 기본 동작 대체. ⌘/Ctrl 조합은 기본 동작 유지)
+// Home / End: 페이지 처음·끝이 아니라 현재 줄의 처음·끝으로 (macOS 기본 동작 대체 — 편집기·SQL·커밋 메시지 같은 textarea 와
+// 필터·검색·폼 같은 한 줄 입력칸 모두. ⌘/Ctrl 조합은 기본 동작 유지)
+const LINE_INPUT = /^(text|search|url|tel|email|password|)$/;
 document.addEventListener('keydown', (e) => {
   const ta = e.target;
-  if (ta?.tagName !== 'TEXTAREA' || (e.key !== 'Home' && e.key !== 'End') || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+  if ((e.key !== 'Home' && e.key !== 'End') || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+  if (ta?.tagName !== 'TEXTAREA' && !(ta?.tagName === 'INPUT' && LINE_INPUT.test(ta.getAttribute('type') || ''))) return;
   e.preventDefault();
   const v = ta.value, from = ta.selectionDirection === 'backward' ? ta.selectionStart : ta.selectionEnd;   // 움직이는 쪽 끝
   const anchor = ta.selectionDirection === 'backward' ? ta.selectionEnd : ta.selectionStart;
@@ -1345,18 +1348,24 @@ function navSync() { // 화면을 그릴 때마다: 활성 탭이 바뀌었으�
   }
   nav.replaceNext = false; navSave();
 }
-const navCan = (d) => (d < 0 ? nav.i > 0 || !!nav.from : nav.i < nav.stack.length - 1 || !!nav.fwd);
+const navCan = (d) => (d < 0 ? nav.i > 0 || !!nav.from || !!cur()?.h?.back?.length : nav.i < nav.stack.length - 1 || !!nav.fwd);
 async function navOpen(p) { // 기록의 항목을 다시 보여 준다 (닫힌 탭이면 다시 연다). 못 열면 false
   if (tabOf(p)) { flushAll(); state.active = p; state.selected = tabOf(p).kind === 'gallery' ? '' : p; persistTabs(); renderAll(); return true; }
   if (isGal(p)) { const t = cur(), abs = p.slice(4) || '/'; if (t?.kind === 'gallery') galGo(t, abs); else openGallery(abs); return true; }   // 갤러리는 같은 탭에서 폴더를 옮긴다
   if (isDrop(p)) { if (!dropped.has(p)) return false; openImageList([p]); return true; }
-  if (/^@(run|sql|diff|hist)\//.test(p)) return false;   // 닫은 실행/SQL/diff 탭은 다시 열 수 없다
+  if (p.startsWith('@hist/')) { // 닫은 히스토리 탭은 다시 연다 (줄 범위 히스토리는 그때의 줄 위치라 제외)
+    const [abs, scope, rel, range] = p.slice(6).split('|'); if (range) return false;
+    const a = abs + (rel ? '/' + rel : ''), src = a === state.root ? '' : a.startsWith(state.root + '/') ? a.slice(state.root.length + 1) : '@ext' + a;
+    await openHistory({ path: src, scope }); return state.active === p;
+  }
+  if (/^@(run|sql|diff)\//.test(p)) return false;   // 닫은 실행/SQL/diff 탭은 다시 열 수 없다
   await openFile(p); return state.active === p;
 }
 let navBusy = false;
 async function navStep(d) { // d: -1 뒤로, +1 앞으로
   if (navBusy) return; navBusy = true;
   try {
+    if (d < 0 && cur()?.kind === 'history' && histBack(cur())) return;   // 커밋 전체 diff 등 → 파일 히스토리로
     for (;;) {
       const j = nav.i + d; if (j < 0 || j >= nav.stack.length) break;
       nav.restoring = true; let ok = false;
@@ -2208,8 +2217,8 @@ function historyView(t) {
   const filter = el('input', { className: 'hv-filter', placeholder: '필터 · Enter: 전체 기록에서 메시지/작성자/해시 찾기', value: H.filter });
   const info = el('div', { className: 'hv-info' }), list = el('div', { className: 'hv-items', tabIndex: 0 });
   const left = el('div', { className: 'hv-list' }, filter, info, list), detail = el('div', { className: 'hv-detail' });
-  const split = el('div', { className: 'hv-split', title: '끌어서 너비 조절' });
-  left.style.width = store.get('histW', 360) + 'px';
+  const split = el('div', { className: 'hv-split', title: '끌어서 높이 조절' });
+  left.style.height = store.get('histH', 260) + 'px';
   Object.assign(H, { dom: el('div', { className: 'hv' }, left, split, detail), list, detail, info, filterEl: filter });
   filter.oninput = () => { H.filter = filter.value; if (H.q) histSearch(t, ''); else drawHistList(t); };
   filter.onkeydown = (e) => {
@@ -2226,9 +2235,9 @@ function historyView(t) {
   list.onscroll = () => { H.scroll = list.scrollTop; if (list.scrollTop + list.clientHeight > list.scrollHeight - 200 && H.more && !H.q && !H.filter.trim()) histMore(t); };
   detail.onscroll = () => { H.dscroll = detail.scrollTop; };
   split.onpointerdown = (e) => {
-    e.preventDefault(); split.setPointerCapture(e.pointerId); const x0 = e.clientX, w0 = left.offsetWidth;
-    split.onpointermove = (m) => { left.style.width = Math.max(220, Math.min(H.dom.clientWidth - 260, w0 + m.clientX - x0)) + 'px'; };
-    split.onpointerup = () => { split.onpointermove = split.onpointerup = null; store.set('histW', left.offsetWidth); };
+    e.preventDefault(); split.setPointerCapture(e.pointerId); const y0 = e.clientY, h0 = left.offsetHeight;
+    split.onpointermove = (m) => { left.style.height = Math.max(110, Math.min(H.dom.clientHeight - 140, h0 + m.clientY - y0)) + 'px'; };
+    split.onpointerup = () => { split.onpointermove = split.onpointerup = null; store.set('histH', left.offsetHeight); };
   };
   drawHistList(t); drawHistDetail(t);
   return H.dom;
@@ -2266,6 +2275,12 @@ function drawHistList(t) {
   if (H.more && !H.q) rows.push(Object.assign(el('button', { className: 'hv-more', textContent: H.loading ? '불러오는 중…' : '더 불러오기' }), { onclick: () => histMore(t) }));
   list.replaceChildren(...rows); list.scrollTop = st;
   drawHistInfo(t);
+}
+// 히스토리 탭 안의 '뒤로': 커밋 전체 diff 로 넓혔거나 부모/병합 커밋으로 건너뛴 것을 되돌린다
+function histPush(t) { const H = t.h; H.back = [...(H.back || []), { sel: H.sel, full: H.full }].slice(-50); }
+function histBack(t) {
+  const H = t.h, s = H.back?.pop(); if (!s) return false;
+  H.full = s.full; H.dscroll = 0; histSelect(t, s.sel); return true;
 }
 function histSelect(t, sha) {
   const H = t.h; if (!sha) return;
@@ -2330,8 +2345,14 @@ function renderHistDetail(t, c, d) {
     el('span', { className: 'hv-an', textContent: m.an, title: m.ae }),
     el('span', { textContent: `${fmtDate(m.at)} · ${ago(m.at)}` }),
     ...(m.cn && m.cn !== m.an ? [el('span', { className: 'dim', textContent: `커밋한 사람 ${m.cn}` })] : []));
-  if (m.p.length) meta.append(el('span', { className: 'dim', textContent: m.p.length > 1 ? '병합 · 부모' : '부모' }), ...m.p.map((x) => chipBtn(x.slice(0, 7), '이 커밋 보기', () => histSelect(t, x), 'sha')));
+  if (m.p.length) meta.append(el('span', { className: 'dim', textContent: m.p.length > 1 ? '병합 · 부모' : '부모' }), ...m.p.map((x) => chipBtn(x.slice(0, 7), '이 커밋 보기 (뒤로: 돌아오기)', () => { histPush(t); histSelect(t, x); }, 'sha')));
+  const open = store.get('histMeta', false), partialScope = t.scope !== 'repo';
+  meta.append(chipBtn(open ? '상세 ▾' : '상세 ▸', 'PR · 브랜치 · 커밋 메시지 본문 · 바뀐 파일 목록', () => { store.set('histMeta', !open); drawHistDetail(t); }));
+  if (partialScope) meta.append(chipBtn(H.full ? '← ' + (t.scope === 'lines' ? '선택한 줄만' : t.scope === 'dir' ? '이 폴더만' : '이 파일만') : '커밋 전체 diff', H.full ? '뒤로 (⌘[ · 스와이프)' : '이 커밋에서 바뀐 모든 파일', () => {
+    if (H.full) { if (!histBack(t)) { H.full = false; H.dscroll = 0; drawHistDetail(t); } } else { histPush(t); H.full = true; H.dscroll = 0; drawHistDetail(t); }
+  }));
   head.append(meta);
+  box.classList.toggle('compact', !open);
   // 이 커밋 범위(-L)에서 이 시점의 줄 위치
   let la = 0, lb = 0;
   if (t.scope === 'lines' && c.patch) { const hk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/m.exec(c.patch); if (hk) { la = +hk[1]; lb = la + Math.max(1, hk[2] == null ? 1 : +hk[2]) - 1; } }
@@ -2350,12 +2371,12 @@ function renderHistDetail(t, c, d) {
     const row = el('div', { className: 'hv-f' + (f.path === pth && t.scope !== 'repo' ? ' cur' : ''), title: (ST_LABEL[f.st] || f.st) + (f.from ? `: ${f.from} → ${f.path}` : '') },
       el('span', { className: 'hv-st hs-' + f.st, textContent: f.st }), el('span', { className: 'p', textContent: f.from ? `${f.from} → ${f.path}` : f.path }),
       el('span', { className: 'n', textContent: f.add == null ? 'bin' : `+${f.add} −${f.del}` }));
-    row.onclick = () => { const s = box.querySelector(`.hv-fd[data-p="${CSS.escape(f.path)}"]`); if (s) s.scrollIntoView({ block: 'start' }); else { H.full = true; H.jump = f.path; drawHistDetail(t); } };
+    row.onclick = () => { const s = box.querySelector(`.hv-fd[data-p="${CSS.escape(f.path)}"]`); if (s) s.scrollIntoView({ block: 'start' }); else { histPush(t); H.full = true; H.jump = f.path; drawHistDetail(t); } };
     return row;
   });
   if (fileRows.length) {
-    const fl = el('div', { className: 'hv-files' }, el('div', { className: 'hv-sec' }, el('span', { textContent: `바뀐 파일 ${d.nfiles}개` }),
-      ...(t.scope !== 'repo' ? [chipBtn(H.full ? (t.scope === 'lines' ? '선택한 줄만 보기' : t.scope === 'dir' ? '이 폴더만 보기' : '이 파일만 보기') : '커밋 전체 diff 보기', '', () => { H.full = !H.full; H.dscroll = 0; drawHistDetail(t); })] : [])));
+    const fl = el('div', { className: 'hv-files' }, el('div', { className: 'hv-sec' }, el('span', { textContent: `바뀐 파일 ${d.nfiles}개` })));
+    if (!open && partialScope && !H.full) fl.hidden = true;   // 접힌 상태: 파일 하나의 diff 만 바로 보이게
     const LIM = 15; fl.append(...fileRows.slice(0, LIM));
     if (fileRows.length > LIM) fl.append(chipBtn(`나머지 ${fileRows.length - LIM}개 보기`, '', (e) => { e.target.replaceWith(...fileRows.slice(LIM)); }));
     parts.push(fl);
@@ -2399,7 +2420,7 @@ async function loadRefs(t, sha, box) {
       rows.push(row('PR', ...kids));
     }
   } else rows.push(row('PR', el('span', { className: 'dim', textContent: r.prSource === 'gh' ? '연결된 PR 없음' : r.ghFailed ? 'PR 을 찾지 못했습니다 (gh 조회 실패 — 아직 push 하지 않은 커밋일 수 있습니다)' : w?.kind === 'github' ? 'PR 을 찾지 못했습니다 (gh CLI 를 설치하고 로그인하면 정확히 찾습니다)' : 'PR 을 찾지 못했습니다' })));
-  if (r.merge) rows.push(row('병합', chipBtn(r.merge.h.slice(0, 7), '이 병합 커밋 보기', () => histSelect(t, r.merge.h), 'sha'), el('span', { className: 'dim ell', textContent: r.merge.subj })));
+  if (r.merge) rows.push(row('병합', chipBtn(r.merge.h.slice(0, 7), '이 병합 커밋 보기 (뒤로: 돌아오기)', () => { histPush(t); histSelect(t, r.merge.h); }, 'sha'), el('span', { className: 'dim ell', textContent: r.merge.subj })));
   const brs = r.branches.map((b) => brChip(b.name, b.remote));
   rows.push(row('브랜치', ...(brs.length ? brs.slice(0, 8) : [el('span', { className: 'dim', textContent: '이 커밋을 포함한 브랜치가 없습니다' })]),
     ...(r.nbranches > 8 ? [chipBtn(`외 ${r.nbranches - 8}개`, r.branches.slice(8).map((b) => b.name).join('\n'), (e) => e.target.replaceWith(...brs.slice(8)))] : [])));
@@ -2742,7 +2763,8 @@ function runView(t) {
   const out = el('pre', { className: 'rv-out' }), st = el('span', { className: 'rv-st' }), term = new Term(out); t.term = term;
   if (t.out) term.write(t.out);
   const go = el('button', { className: 'go', textContent: t.viewing ? '▶ 다시 실행' : '▶ 실행', title: '실행 (⌘/Ctrl+Enter)' }), stop = el('button', { textContent: '■ 중지', hidden: true });
-  const paint = () => { const s = t.status; st.className = 'rv-st ' + (s?.cls || ''); st.textContent = s?.text || ''; go.disabled = !!t.job; stop.hidden = !t.job; };
+  const paint = () => { const s = t.status; st.className = 'rv-st ' + (s?.cls || ''); st.textContent = s?.text || ''; go.disabled = !!t.job; stop.hidden = !t.job;
+    const idle = !t.job && !t.viewing && !t.out; out.hidden = idle; top.classList.toggle('idle', idle); clear.hidden = cp.hidden = idle; };   // 실행 전엔 터미널을 숨기고, 실행하면 보여준다
   const refind = () => { if (fb.open && t.path === state.active) { clearTimeout(t.findT); t.findT = setTimeout(() => runFileFind(false), 200); } };   // 출력이 늘어나도 찾기 결과 유지
   const append = (s) => { const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40; t.out = (t.out + s).slice(-400000); term.write(s); if (stick) out.scrollTop = out.scrollHeight; refind(); };
   const run = async () => {
@@ -2768,7 +2790,7 @@ function runView(t) {
   };
   go.onclick = run;
   stop.onclick = async () => { if (t.job?.id) { try { await api('POST', 'run/kill', {}, { id: t.job.id }); } catch {} } };
-  const clear = el('button', { textContent: '지우기', onclick: () => { t.out = ''; term.reset(); refind(); } });
+  const clear = el('button', { textContent: '지우기', onclick: () => { t.out = ''; term.reset(); refind(); paint(); } });
   const cp = el('button', { textContent: '출력 복사', onclick: () => copy(term.text(), '출력 복사됨') });
   const ask = el('button', { textContent: 'Claude 에게', title: '로그/스크립트/설정 경로를 복사 — Claude 에 붙여넣으면 바로 로그를 읽고 디버깅합니다', onclick: () => copy(runDebugText(t), 'Claude 용 디버깅 정보 복사됨 — 붙여넣기 하세요') });
   const nOpt = m.params.length + (m.secrets || []).length + (presets.length ? 1 : 0);

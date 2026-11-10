@@ -961,6 +961,7 @@ table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
 .rv-fold:hover { color: var(--fg); }
 .rv-top.fold .rv-form, .rv-top.fold .rv-desc { display: none; }
 .rv-top.fold .rv-fold { margin-top: 6px; }
+.rv-top.idle { flex: 1; max-height: none; border-bottom: 0; }
 .rv-cmd { margin: 10px 0 8px; font: 12px var(--mono); color: var(--fg2); word-break: break-all; user-select: all; }
 .rv-where { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin: -2px 0 10px; font: 12px var(--mono); color: var(--fg2); }
 .rv-where:empty { display: none; }
@@ -1093,21 +1094,22 @@ table.grid td.ed input { font: inherit; width: 100%; min-width: 120px; box-sizin
 #menu div.has-sub::after { content: '▸'; margin-left: auto; color: var(--fg2); font-size: 11px; }
 
 /* ───────── Git 히스토리 탭 ───────── */
-.hv { flex: 1; min-width: 0; display: flex; background: var(--bg); }
-.hv-list { flex: none; display: flex; flex-direction: column; min-width: 220px; border-right: 1px solid var(--bd); background: var(--bg2); }
-.hv-split { flex: none; width: 5px; margin-left: -3px; cursor: col-resize; position: relative; z-index: 2; }
+.hv { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }   /* 위: 커밋 목록 / 아래: 바뀐 내용 */
+.hv-list { flex: none; display: flex; flex-direction: column; min-height: 110px; max-height: calc(100% - 140px); border-bottom: 1px solid var(--bd); background: var(--bg2); }
+.hv-split { flex: none; height: 5px; margin-top: -3px; cursor: row-resize; position: relative; z-index: 2; }
 .hv-split:hover { background: var(--accent-bg); }
 .hv-filter { margin: 8px 8px 4px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--bd); background: var(--bg); color: var(--fg); font: 12.5px var(--sans); outline: 0; }
 .hv-filter:focus { border-color: var(--accent); }
 .hv-info { padding: 0 10px 6px; font-size: 11.5px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hv-items { flex: 1; overflow: auto; outline: 0; }
-.hv-row { padding: 6px 10px 7px; border-bottom: 1px solid var(--bd); cursor: pointer; }
+.hv-row { display: flex; align-items: center; gap: 12px; padding: 4px 12px; border-bottom: 1px solid var(--bd); cursor: pointer; }
 .hv-row:hover { background: var(--hover); }
 .hv-row.on { background: var(--accent-bg); box-shadow: inset 3px 0 0 var(--accent); }
 .hv-items:focus .hv-row.on { background: var(--sel); }
 .hv-row.merge .hv-subj { color: var(--fg2); }
-.hv-subj { font-size: 13px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hv-subj { flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hv-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 8px; margin-top: 3px; font-size: 11.5px; color: var(--fg2); }
+.hv-row .hv-meta { flex: none; flex-wrap: nowrap; margin-top: 0; max-width: 60%; overflow: hidden; }
 .hv-sha { font-family: var(--mono); color: var(--accent); }
 .hv-an { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hv-ren { font-family: var(--mono); font-size: 11px; opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
@@ -1117,7 +1119,11 @@ table.grid td.ed input { font: inherit; width: 100%; min-width: 120px; box-sizin
 .ref.tag { background: color-mix(in srgb, var(--star) 22%, transparent); color: var(--star); }
 .hv-empty { padding: 18px 12px; color: var(--fg2); font-size: 12.5px; line-height: 1.5; }
 .hv-more { display: block; width: calc(100% - 16px); margin: 8px; padding: 5px; border: 1px solid var(--bd); color: var(--fg2); }
-.hv-detail { flex: 1; min-width: 0; overflow: auto; }
+.hv-detail { flex: 1; min-width: 0; min-height: 0; overflow: auto; }
+.hv-detail.compact .hv-head { padding: 8px 18px; }
+.hv-detail.compact .hv-title { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hv-detail.compact .hv-m { margin-top: 4px; }
+.hv-detail.compact .hv-body, .hv-detail.compact .hv-links, .hv-detail.compact .hv-refs { display: none; }
 .hv-head { padding: 14px 18px 10px; border-bottom: 1px solid var(--bd); background: var(--bg); }
 .hv-title { font-size: 15px; font-weight: 600; line-height: 1.4; word-break: break-word; }
 .hv-body { margin-top: 6px; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.5; color: var(--fg2); max-height: 260px; overflow: auto; }
