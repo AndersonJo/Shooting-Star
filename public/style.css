@@ -955,6 +955,10 @@ table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
 .rv-form .pd { grid-column: 2; margin-top: -4px; font-size: 11.5px; color: var(--fg2); }
 .rv-form input[type=text], .rv-form input[type=number], .rv-form select { width: 100%; box-sizing: border-box; }
 .rv-form input[type=checkbox] { justify-self: start; }
+.rv-fold { display: block; margin: 0 0 8px; padding: 1px 0; border: 0; background: none; color: var(--fg2); font: 600 12px var(--sans); cursor: pointer; }
+.rv-fold:hover { color: var(--fg); }
+.rv-top.fold .rv-form, .rv-top.fold .rv-desc { display: none; }
+.rv-top.fold .rv-fold { margin-top: 6px; }
 .rv-cmd { margin: 10px 0 8px; font: 12px var(--mono); color: var(--fg2); word-break: break-all; user-select: all; }
 .rv-act { display: flex; gap: 8px; align-items: center; }
 .rv-act button.go { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; padding: 3px 14px; }

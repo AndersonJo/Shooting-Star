@@ -2556,7 +2556,7 @@ function drawRun() {
         if (!m) return toast('등록 해제된 스크립트입니다');
         const t = openRunTab(m, false);                 // 같은 탭을 재사용하되 '지난 결과 보기' 모드
         t.vals = { ...(h.params || {}) }; t.preset = h.preset || '';   // 그때 쓴 파라미터로 폼을 채움
-        t.viewing = h.id;
+        t.viewing = h.id; t.fold = true;   // 지난 출력을 넓게
         try { t.out = (await api('GET', 'run/log', { id: h.id })).log; } catch { t.out = ''; }
         t.status = { cls: ok ? 'ok' : 'fail', text: `이전 실행 결과 · ${new Date(h.startedAt).toLocaleString()} · exit ${h.code ?? h.signal}` };
         t.dom = null; renderContent();
@@ -2571,7 +2571,7 @@ function openRunTab(m, fresh = true) {
   const p = '@run/' + m.name; let t = tabOf(p);
   if (!t) { t = { path: p, kind: 'run', name: m.name, content: '', orig: '', mtime: 0, mode: 'view', vals: {}, out: '', status: null, job: null }; state.tabs.push(t); }
   t.m = m; t.scriptPath = m.scriptPath;
-  if (fresh && !t.job) { t.out = ''; t.status = null; t.viewing = null; t.vals = {}; t.preset = ''; t.dom = null; }   // 실행기: 기본값 폼 + 빈 출력 (실행 중이면 건드리지 않음)
+  if (fresh && !t.job) { t.out = ''; t.status = null; t.viewing = null; t.vals = {}; t.preset = ''; t.fold = false; t.dom = null; }   // 실행기: 기본값 폼 + 빈 출력 (실행 중이면 건드리지 않음)
   state.active = p; state.selected = p; renderAll(); drawRun(); return t;
 }
 const runBase = (t, p) => { const pv = t.preset && t.m.presets?.[t.preset]; return pv && pv[p.name] !== undefined ? pv[p.name] : p.default; };
@@ -2626,7 +2626,7 @@ function runView(t) {
     const needSecret = (m.secrets || []).find((x) => x.required !== false && !runUi.secrets.has(x.name));
     if (needSecret) { toast(`세션키를 먼저 저장하세요: ${needSecret.name}`); return; }
     if (m.danger && !confirm(`'${m.name}' 은(는) danger 스크립트입니다. 실행할까요?\n\n${runCmdline(t)}`)) return;
-    t.out = ''; out.textContent = ''; t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; paint();
+    t.out = ''; out.textContent = ''; t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; setFold(true); paint();
     const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }
     let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params, preset: t.preset || undefined }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
     t.job = { id: r.id }; t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
@@ -2644,10 +2644,14 @@ function runView(t) {
   stop.onclick = async () => { if (t.job?.id) { try { await api('POST', 'run/kill', {}, { id: t.job.id }); } catch {} } };
   const clear = el('button', { textContent: '지우기', onclick: () => { t.out = ''; out.textContent = ''; } });
   const cp = el('button', { textContent: '출력 복사', onclick: () => copy(t.out, '출력 복사됨') });
+  const nOpt = m.params.length + (m.secrets || []).length + (presets.length ? 1 : 0);
+  const fold = el('button', { className: 'rv-fold', title: '옵션 접기/펼치기 (실행하면 자동으로 접힘)', onclick: () => setFold(!t.fold) });
   const top = el('div', { className: 'rv-top' },
     el('div', { className: 'rv-title' }, m.name, m.danger ? el('span', { className: 'danger', textContent: 'danger' }) : ''),
-    el('div', { className: 'rv-desc', textContent: m.description || '(설명 없음)' }), form, cmd,
+    el('div', { className: 'rv-desc', textContent: m.description || '(설명 없음)' }), fold, form, cmd,
     el('div', { className: 'rv-act' }, go, stop, clear, cp, st));
+  function setFold(v) { t.fold = !!v; top.classList.toggle('fold', t.fold); fold.textContent = (t.fold ? '▸ 옵션' : '▾ 옵션') + (nOpt ? ` (${nOpt})` : ''); }
+  setFold(t.fold);
   const box = el('div', { className: 'rv' }, top, out);
   box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); run(); } });
   paint(); t.dom = box; return box;
