@@ -701,7 +701,7 @@ function renderContent() {
   if (!t) { box.replaceChildren(EMPTY); return; }
   if (t.kind === 'gallery') { const v = galleryView(t); if (box.firstChild !== v || box.childNodes.length !== 1) box.replaceChildren(v); validate(); return; }   // 같은 화면이면 다시 붙이지 않는다 (스크롤 유지)
   if (t.kind === 'image') { box.replaceChildren(imageViewer(t)); validate(); return; }
-  if (t.kind === 'run') { box.replaceChildren(runView(t)); validate(); return; }
+  if (t.kind === 'run') { box.replaceChildren(runView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.kind === 'sql') { box.replaceChildren(sqlView(t)); validate(); return; }
   if (t.kind === 'history') { const v = historyView(t); if (box.firstChild !== v || box.childNodes.length !== 1) { box.replaceChildren(v); histRestoreScroll(t); } validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.blame) { box.replaceChildren(blameView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
@@ -2729,7 +2729,8 @@ function runView(t) {
   if (t.out) term.write(t.out);
   const go = el('button', { className: 'go', textContent: t.viewing ? '▶ 다시 실행' : '▶ 실행', title: '실행 (⌘/Ctrl+Enter)' }), stop = el('button', { textContent: '■ 중지', hidden: true });
   const paint = () => { const s = t.status; st.className = 'rv-st ' + (s?.cls || ''); st.textContent = s?.text || ''; go.disabled = !!t.job; stop.hidden = !t.job; };
-  const append = (s) => { const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40; t.out = (t.out + s).slice(-400000); term.write(s); if (stick) out.scrollTop = out.scrollHeight; };
+  const refind = () => { if (fb.open && t.path === state.active) { clearTimeout(t.findT); t.findT = setTimeout(() => runFileFind(false), 200); } };   // 출력이 늘어나도 찾기 결과 유지
+  const append = (s) => { const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40; t.out = (t.out + s).slice(-400000); term.write(s); if (stick) out.scrollTop = out.scrollHeight; refind(); };
   const run = async () => {
     if (t.job) return;
     const missing = m.params.find((p) => p.required && (t.vals[p.name] === '' || t.vals[p.name] === undefined));
@@ -2737,7 +2738,7 @@ function runView(t) {
     const needSecret = (m.secrets || []).find((x) => x.required !== false && !runUi.secrets.has(x.name));
     if (needSecret) { toast(`세션키를 먼저 저장하세요: ${needSecret.name}`); return; }
     if (m.danger && !confirm(`'${m.name}' 은(는) danger 스크립트입니다. 실행할까요?\n\n${runCmdline(t)}`)) return;
-    t.out = ''; term.reset(); t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; setFold(true); paint();
+    t.out = ''; term.reset(); refind(); t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; setFold(true); paint();
     const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }
     let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params, preset: t.preset || undefined }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
     t.job = { id: r.id }; t.runId = r.id; t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
@@ -2753,7 +2754,7 @@ function runView(t) {
   };
   go.onclick = run;
   stop.onclick = async () => { if (t.job?.id) { try { await api('POST', 'run/kill', {}, { id: t.job.id }); } catch {} } };
-  const clear = el('button', { textContent: '지우기', onclick: () => { t.out = ''; term.reset(); } });
+  const clear = el('button', { textContent: '지우기', onclick: () => { t.out = ''; term.reset(); refind(); } });
   const cp = el('button', { textContent: '출력 복사', onclick: () => copy(term.text(), '출력 복사됨') });
   const ask = el('button', { textContent: 'Claude 에게', title: '로그/스크립트/설정 경로를 복사 — Claude 에 붙여넣으면 바로 로그를 읽고 디버깅합니다', onclick: () => copy(runDebugText(t), 'Claude 용 디버깅 정보 복사됨 — 붙여넣기 하세요') });
   const nOpt = m.params.length + (m.secrets || []).length + (presets.length ? 1 : 0);
@@ -3295,7 +3296,7 @@ document.querySelectorAll('#activity .act').forEach((b) => {
 // ───────── 문서 안에서 찾기 (⌘/Ctrl+F) ─────────
 // 편집기: 원문에서 찾아 입력창 뒤의 표시 레이어(pre.fm)에 모든 일치를 칠한다. 보기 모드(마크다운/CSV/트리): 화면 텍스트에서 직접 찾아 <mark> 로 감싼다.
 const fb = { open: false, q: '', matches: [], idx: -1, dom: false, built: false, timer: 0, opts: store.get('fbopts', { case: false, word: false, regex: false }) };
-const FIND_ROOTS = '#preview, .smart-doc, .dvbox, .hv-detail, .blv';   // 보기 모드에서 화면 텍스트를 찾는 영역 (diff 포함)
+const FIND_ROOTS = '#preview, .smart-doc, .dvbox, .hv-detail, .blv, .rv-out';   // 보기 모드에서 화면 텍스트를 찾는 영역 (diff 포함)
 const escHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function fbRegex() {
   if (!fb.q) return null;
