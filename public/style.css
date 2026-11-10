@@ -962,6 +962,14 @@ table.dv.sp td.cd:nth-child(2) { border-right: 1px solid var(--bd); }
 .rv-top.fold .rv-form, .rv-top.fold .rv-desc { display: none; }
 .rv-top.fold .rv-fold { margin-top: 6px; }
 .rv-cmd { margin: 10px 0 8px; font: 12px var(--mono); color: var(--fg2); word-break: break-all; user-select: all; }
+.rv-where { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin: -2px 0 10px; font: 12px var(--mono); color: var(--fg2); }
+.rv-where:empty { display: none; }
+.rv-where .wl { font: 600 11px var(--sans); }
+.rv-where .wd { color: var(--fg); word-break: break-all; }
+.rv-where .wg { color: var(--ok); }
+.rv-where .wg.dirty { color: var(--warn, #e5c07b); }
+.rv-where .wn { font-style: italic; }
+.rh .rbr { flex: none; margin-left: auto; margin-right: 6px; font: 11px var(--mono); color: var(--fg2); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rv-act { display: flex; gap: 8px; align-items: center; }
 .rv-act button.go { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; padding: 3px 14px; }
 .rv-act .rv-st { font: 12px var(--mono); color: var(--fg2); }

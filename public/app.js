@@ -701,7 +701,7 @@ function renderContent() {
   if (!t) { box.replaceChildren(EMPTY); return; }
   if (t.kind === 'gallery') { const v = galleryView(t); if (box.firstChild !== v || box.childNodes.length !== 1) box.replaceChildren(v); validate(); return; }   // 같은 화면이면 다시 붙이지 않는다 (스크롤 유지)
   if (t.kind === 'image') { box.replaceChildren(imageViewer(t)); validate(); return; }
-  if (t.kind === 'run') { box.replaceChildren(runView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
+  if (t.kind === 'run') { const fresh = !t.dom; box.replaceChildren(runView(t)); if (!fresh) t.refreshWhere?.(); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.kind === 'sql') { box.replaceChildren(sqlView(t)); validate(); return; }
   if (t.kind === 'history') { const v = historyView(t); if (box.firstChild !== v || box.childNodes.length !== 1) { box.replaceChildren(v); histRestoreScroll(t); } validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.blame) { box.replaceChildren(blameView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
@@ -2649,14 +2649,15 @@ function drawRun() {
     kids.push(el('div', { className: 'rn-sec', textContent: '최근 실행' }));
     for (const h of runUi.history.slice(0, 15)) {
       const ok = h.code === 0, m = runUi.scripts.find((x) => x.name === h.name);
-      const r = el('div', { className: 'rh', title: `${new Date(h.startedAt).toLocaleString()} · ${h.source}\n${JSON.stringify(h.params)}\n클릭: 이 실행의 출력 보기` },
+      const r = el('div', { className: 'rh', title: `${new Date(h.startedAt).toLocaleString()} · ${h.source}${h.cwd ? '\n📁 ' + h.cwd.replace(state.home || '\u0000', '~') : ''}${h.git ? '\n⎇ ' + gitLabel(h.git) : ''}\n${JSON.stringify(h.params)}\n클릭: 이 실행의 출력 보기` },
         el('span', { className: 'rc ' + (ok ? 'ok' : 'fail'), textContent: ok ? '✓' : '✗' + (h.code ?? '') }), el('span', { className: 'rn2', textContent: h.name }),
+        h.git?.branch ? el('span', { className: 'rbr', textContent: '⎇ ' + h.git.branch }) : '',
         el('span', { className: 'rw', textContent: h.source === 'cli' ? 'CLI' : new Date(h.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }));
       r.onclick = async () => {
         if (!m) return toast('등록 해제된 스크립트입니다');
         const t = openRunTab(m, false);                 // 같은 탭을 재사용하되 '지난 결과 보기' 모드
         t.vals = { ...(h.params || {}) }; t.preset = h.preset || '';   // 그때 쓴 파라미터로 폼을 채움
-        t.viewing = h.id; t.runId = h.id; t.fold = true;   // 지난 출력을 넓게
+        t.viewing = h.id; t.runId = h.id; t.fold = true; t.where = { cwd: h.cwd, git: h.git || null, at: h.startedAt };   // 지난 출력을 넓게
         try { t.out = (await api('GET', 'run/log', { id: h.id })).log; } catch { t.out = ''; }
         t.status = { cls: ok ? 'ok' : 'fail', text: `이전 실행 결과 · ${new Date(h.startedAt).toLocaleString()} · exit ${h.code ?? h.signal}` };
         t.dom = null; renderContent();
@@ -2672,7 +2673,7 @@ function openRunTab(m, fresh = true) {
   const p = '@run/' + m.name; let t = tabOf(p);
   if (!t) { t = { path: p, kind: 'run', name: m.name, content: '', orig: '', mtime: 0, mode: 'view', vals: {}, out: '', status: null, job: null }; state.tabs.push(t); }
   t.m = m; t.scriptPath = m.scriptPath;
-  if (fresh && !t.job) { t.out = ''; t.status = null; t.viewing = null; t.vals = {}; t.preset = ''; t.fold = false; t.dom = null; }   // 실행기: 기본값 폼 + 빈 출력 (실행 중이면 건드리지 않음)
+  if (fresh && !t.job) { t.out = ''; t.status = null; t.viewing = null; t.vals = {}; t.preset = ''; t.fold = false; t.where = null; t.dom = null; }   // 실행기: 기본값 폼 + 빈 출력 (실행 중이면 건드리지 않음)
   state.active = p; state.selected = p; renderAll(); drawRun(); return t;
 }
 // Claude 에 붙여넣을 디버깅 안내: 실행 id → `ss run log <id>` 로 실행 정보 + 출력, 그리고 파일 경로들
@@ -2682,8 +2683,10 @@ function runDebugText(t) {
     `- 명령: ${id && t.viewing ? '(지난 실행) ' : ''}${runCmdline(t)}`,
     id ? `- 실행 정보 + 출력: \`ss run log ${id}\`` : '',
     id ? `- 로그 파일: ${runUi.dir}/logs/${id}.log` : '',
+    t.where ? `- 실행 위치: ${t.where.cwd}${t.where.git ? ' (git ' + gitLabel(t.where.git) + ')' : ''}` : '',
     `- 스크립트: ${t.m.scriptPath}`, `- 설정: ${t.m.manifest}`].filter(Boolean).join('\n');
 }
+const gitLabel = (g) => `${g.branch || 'detached'}${g.commit ? ' @' + g.commit : ''}${g.dirty ? ' · 변경 ' + g.dirty : ''}`;
 const runBase = (t, p) => { const pv = t.preset && t.m.presets?.[t.preset]; return pv && pv[p.name] !== undefined ? pv[p.name] : p.default; };
 const runCmdline = (t) => {
   const parts = ['ss run', t.name]; if (t.preset) parts.push('@' + t.preset);
@@ -2696,6 +2699,17 @@ function runView(t) {
   if (t.preset && !m.presets?.[t.preset]) t.preset = '';
   for (const p of m.params) if (t.vals[p.name] === undefined) { const b = runBase(t, p); t.vals[p.name] = b !== undefined ? b : p.type === 'bool' ? false : ''; }
   const cmd = el('div', { className: 'rv-cmd' }), upd = () => { cmd.textContent = runCmdline(t); };
+  const where = el('div', { className: 'rv-where' });
+  const drawWhere = () => {   // 어디서(작업 폴더) 어떤 브랜치로 — 실행 전엔 지금 상태, 실행/지난 결과는 그때 상태
+    const w = t.where; if (!w) { where.replaceChildren(); return; }
+    const lab = t.viewing ? '그때 위치' : w.run ? '실행한 위치' : '실행할 위치';
+    where.replaceChildren(el('span', { className: 'wl', textContent: lab }), el('span', { className: 'wd', textContent: '📁 ' + (w.cwd || '').replace(state.home || '\u0000', '~'), title: w.cwd + (w.git?.repo && w.git.repo !== w.cwd ? '\nrepo: ' + w.git.repo : '') }),
+      w.git ? el('span', { className: 'wg' + (w.git.dirty ? ' dirty' : ''), textContent: '⎇ ' + gitLabel(w.git), title: w.git.dirty ? '커밋되지 않은 변경 ' + w.git.dirty + '개 (추적 중인 파일)' : '깨끗함' }) : el('span', { className: 'wn', textContent: 'git 저장소 아님' }));
+  };
+  t.refreshWhere = async () => {   // 실행 전 미리보기 (브랜치를 바꾸고 돌아와도 맞게)
+    if (t.job || t.viewing || t.where?.run) return;
+    try { const r = await api('GET', 'run/where', { name: t.name }); if (t.job || t.viewing || t.where?.run) return; t.where = r; drawWhere(); } catch {}
+  };
   const presets = Object.keys(m.presets || {});
   if (presets.length) {   // 프리셋을 고르면 그 값으로 폼을 채운다 (이후 개별 수정 가능)
     const sel = el('select', { id: 'rp-@preset', onchange() { t.preset = this.value; t.vals = {}; t.dom = null; renderContent(); } }, el('option', { value: '', textContent: '(기본값)' }), ...presets.map((k) => el('option', { value: k, textContent: '@' + k + '  ' + Object.entries(m.presets[k]).map(([a, b]) => a + '=' + b).join(' ') })));
@@ -2741,7 +2755,7 @@ function runView(t) {
     t.out = ''; term.reset(); refind(); t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; setFold(true); paint();
     const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }
     let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params, preset: t.preset || undefined }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
-    t.job = { id: r.id }; t.runId = r.id; t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
+    t.job = { id: r.id }; t.runId = r.id; t.where = { cwd: r.cwd, git: r.git || null, at: r.startedAt, run: true }; drawWhere(); t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
     append(`$ ${r.cmdline}\n`);
     const es = new EventSource(`/api/run/stream?id=${r.id}&root=${encodeURIComponent(state.root)}`); t.es = es;
     es.addEventListener('data', (e) => append(JSON.parse(e.data)));
@@ -2761,10 +2775,10 @@ function runView(t) {
   const fold = el('button', { className: 'rv-fold', title: '옵션 접기/펼치기 (실행하면 자동으로 접힘)', onclick: () => setFold(!t.fold) });
   const top = el('div', { className: 'rv-top' },
     el('div', { className: 'rv-title' }, m.name, m.danger ? el('span', { className: 'danger', textContent: 'danger' }) : ''),
-    el('div', { className: 'rv-desc', textContent: m.description || '(설명 없음)' }), fold, form, cmd,
+    el('div', { className: 'rv-desc', textContent: m.description || '(설명 없음)' }), fold, form, cmd, where,
     el('div', { className: 'rv-act' }, go, stop, clear, cp, ask, st));
   function setFold(v) { t.fold = !!v; top.classList.toggle('fold', t.fold); fold.textContent = (t.fold ? '▸ 옵션' : '▾ 옵션') + (nOpt ? ` (${nOpt})` : ''); }
-  setFold(t.fold);
+  setFold(t.fold); drawWhere(); t.refreshWhere();
   const box = el('div', { className: 'rv' }, top, out);
   box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); run(); } });
   paint(); t.dom = box; return box;

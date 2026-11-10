@@ -267,6 +267,25 @@ const envInfo = () => ({ shell: shellEnvCache.shell, at: shellEnvCache.at, ms: s
 // ───────── 실행 ─────────
 const jobs = new Map();   // id → job (서버 프로세스 안에서 UI 가 시작한 것)
 const MAX_BUF = 256 * 1024;
+// 실행 위치의 git 상태 (브랜치/커밋/변경 여부). git 저장소가 아니면 null
+function gitInfo(dir) {
+  try {
+    const r = spawnSync('git', ['-C', dir, 'status', '--porcelain=v2', '--branch', '-uno'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
+    if (r.status !== 0 || !r.stdout) return null;
+    const g = {}; let dirty = 0;
+    for (const l of r.stdout.split('\n')) {
+      if (l.startsWith('# branch.head ')) g.branch = l.slice(14); else if (l.startsWith('# branch.oid ') && !l.startsWith('# branch.oid (')) g.commit = l.slice(13, 20);   // (initial) = 커밋 없음
+      else if (l && !l.startsWith('#')) dirty++;
+    }
+    if (g.branch === '(detached)') { g.detached = true; g.branch = null; }
+    if (dirty) g.dirty = dirty;
+    const top = spawnSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (top.status === 0) g.repo = top.stdout.trim();
+    return g;
+  } catch { return null; }
+}
+const gitText = (g) => (g ? `${g.branch || 'detached'}${g.commit ? ' @' + g.commit : ''}${g.dirty ? ' · 변경 ' + g.dirty + '개' : ''}` : '');
+const workdirOf = (m, cwd) => (m.cwd ? m.cwd.replace(/^~(?=$|\/)/, HOME) : (cwd || process.cwd()));
 // 파이프로 연결되면 대부분의 도구가 색을 끈다 → 보여줄 곳이 터미널(UI 렌더러 포함)이면 색을 켜도록 알려준다
 const COLOR_ENV = { FORCE_COLOR: '1', CLICOLOR_FORCE: '1', CLICOLOR: '1', PY_COLORS: '1', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
 function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false, color = false } = {}) {
@@ -274,8 +293,8 @@ function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false,
   const { cmd, args, env } = buildCommand(m, vals);
   Object.assign(env, SECRET.injectEnv(m.secrets));   // 저장된 세션키를 env 로 주입 (required 인데 없으면 여기서 에러)
   const id = Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
-  const workdir = m.cwd ? m.cwd.replace(/^~(?=$|\/)/, HOME) : (cwd || process.cwd());
-  const job = Object.assign(new EventEmitter(), { id, name: m.name, params: vals, preset: preset || undefined, source, startedAt: Date.now(), endedAt: 0, code: null, signal: null, buf: '', cwd: workdir, cmdline: [cmd, ...args].join(' ') });
+  const workdir = workdirOf(m, cwd), git = gitInfo(workdir);
+  const job = Object.assign(new EventEmitter(), { id, name: m.name, params: vals, preset: preset || undefined, source, startedAt: Date.now(), endedAt: 0, code: null, signal: null, buf: '', cwd: workdir, git, cmdline: [cmd, ...args].join(' ') });
   fs.mkdirSync(LOGS, { recursive: true });
   const logf = path.join(LOGS, id + '.log'); const log = fs.createWriteStream(logf);
   let base = process.env, envNote = '';   // CLI 는 터미널 환경 그대로, UI 는 로그인 셸 환경 (rc 파일 반영)
@@ -294,7 +313,7 @@ function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false,
   const finish = (code, signal) => {
     if (done) return; done = true;
     job.code = code; job.signal = signal; job.endedAt = Date.now(); log.end();
-    try { fs.appendFileSync(HISTORY, JSON.stringify({ id, name: m.name, params: vals, ...(preset ? { preset } : {}), source, startedAt: job.startedAt, endedAt: job.endedAt, code, signal, cwd: workdir }) + '\n'); } catch {}
+    try { fs.appendFileSync(HISTORY, JSON.stringify({ id, name: m.name, params: vals, ...(preset ? { preset } : {}), source, startedAt: job.startedAt, endedAt: job.endedAt, code, signal, cwd: workdir, ...(git ? { git } : {}) }) + '\n'); } catch {}
     job.emit('end', { code, signal });
   };
   child.on('close', finish);
@@ -332,7 +351,7 @@ function runInfoText(r) {
   const st = r.running ? '실행 중 (또는 기록 전)' : r.signal ? 'killed ' + r.signal : 'exit ' + r.code;
   return [`# run       ${r.id}${r.name ? ' · ' + r.name : ''} · ${st}${at ? ' · ' + at : ''}${r.endedAt ? ' · ' + ((r.endedAt - r.startedAt) / 1000).toFixed(1) + 's' : ''}${r.source ? ' · ' + r.source : ''}`,
     r.params ? `# params    ${JSON.stringify(r.params)}${r.preset ? ' (@' + r.preset + ')' : ''}` : '',
-    r.cwd ? `# cwd       ${r.cwd}` : '', r.script ? `# script    ${r.script}` : '', r.manifest ? `# manifest  ${r.manifest}` : '',
+    r.cwd ? `# cwd       ${r.cwd}` : '', r.git ? `# git       ${gitText(r.git)}${r.git.repo && r.git.repo !== r.cwd ? '  (repo ' + r.git.repo + ')' : ''}` : '', r.script ? `# script    ${r.script}` : '', r.manifest ? `# manifest  ${r.manifest}` : '',
     `# log       ${r.log}`].filter(Boolean).join('\n');
 }
 
@@ -559,7 +578,7 @@ async function cli(argv) {
       console.log('─'.repeat(60)); if (text) console.log(lines.slice(-n).join('\n'));
       return 0;
     }
-    if (sub === 'history') { for (const h of history(Number(rest[0]) || 20)) console.log(`${h.id}  ${new Date(h.startedAt).toLocaleString()}  ${h.name}  exit=${h.code ?? h.signal}  ${((h.endedAt - h.startedAt) / 1000).toFixed(1)}s  [${h.source}]  ${JSON.stringify(h.params)}`); return 0; }
+    if (sub === 'history') { for (const h of history(Number(rest[0]) || 20)) console.log(`${h.id}  ${new Date(h.startedAt).toLocaleString()}  ${h.name}${h.git ? '  [' + gitText(h.git) + ']' : ''}  exit=${h.code ?? h.signal}  ${((h.endedAt - h.startedAt) / 1000).toFixed(1)}s  [${h.source}]  ${JSON.stringify(h.params)}`); return 0; }
     if (sub === 'rm') { remove(rest[0]); console.log('removed ' + rest[0]); return 0; }
     if (sub === 'add') {
       const { o, rest: pos } = parseFlags(rest);
@@ -605,4 +624,4 @@ async function cli(argv) {
   } catch (e) { console.error(e.message); return e.status === 404 ? 127 : 2; }
 }
 
-module.exports = { DIR, loginEnv, envInfo, list, get, add, addFromText, exportYaml, remove, start, kill, jobs, history, readLog, logPath, findRun, runInfoText, normalizeManifest, contextText, install, cli, scriptPath, err };
+module.exports = { DIR, loginEnv, envInfo, gitInfo, workdirOf, list, get, add, addFromText, exportYaml, remove, start, kill, jobs, history, readLog, logPath, findRun, runInfoText, normalizeManifest, contextText, install, cli, scriptPath, err };
