@@ -956,6 +956,7 @@ async function api(req, res, url, root) {
       return send(res, 200, { ok: true });
     }
     case 'GET /api/run/list':
+      fs.mkdirSync(RUN.DIR, { recursive: true });   // UI 가 이 폴더를 감시한다 (첫 등록 전에도)
       return send(res, 200, { scripts: RUN.list().map(({ scriptPath, ...m }) => ({ ...m, scriptPath })), dir: RUN.DIR, running: [...RUN.jobs.values()].filter((j) => !j.endedAt).map((j) => ({ id: j.id, name: j.name })), history: RUN.history(30), secrets: SECRET.list().map((x) => x.name) });
     case 'POST /api/run/exec': { // 등록된 이름만 실행한다 (임의 명령 실행 아님)
       const { name, params, preset } = JSON.parse(await readBody(req));

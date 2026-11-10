@@ -541,6 +541,7 @@ let lastActivate = 0;
 function onActivate() {
   if (document.hidden || Date.now() - lastActivate < 400) return;
   lastActivate = Date.now(); onFsEvent({ all: true, paths: [] }); refreshGit();
+  if (runUi.dir) loadRun();   // Run 폴더 감시가 놓친 변경 대비
 }
 window.addEventListener('focus', onActivate);
 document.addEventListener('visibilitychange', onActivate);
@@ -2493,7 +2494,36 @@ async function loadRun() {
   const box = $('#run-list');
   try { const r = await api('GET', 'run/list'); runUi.scripts = r.scripts; runUi.history = r.history; runUi.dir = r.dir; runUi.running = new Set(r.running.map((j) => j.name)); runUi.secrets = new Set(r.secrets || []); }
   catch (e) { box.replaceChildren(el('div', { className: 'git-empty', textContent: 'Run 목록을 읽지 못했습니다: ' + e.message })); return; }
-  drawRun();
+  runSyncTabs(); drawRun(); runWatchDir();
+}
+// 열려 있는 실행 탭에 바뀐 매니페스트(설명/파라미터/프리셋/기본값)를 반영한다. 실행 중이면 끝난 뒤(loadRun) 반영.
+function runSyncTabs() {
+  for (const t of state.tabs) {
+    if (t.kind !== 'run' || t.job) continue;
+    const m = runUi.scripts.find((x) => x.name === t.name);
+    if (!m || m.broken || JSON.stringify(m) === JSON.stringify(t.m)) continue;
+    const old = t.m; t.m = m; t.scriptPath = m.scriptPath;
+    for (const k of Object.keys(t.vals)) {   // 사용자가 직접 바꾼 값만 남긴다 (예전 기본값 그대로면 새 기본값을 쓰도록)
+      const op = old?.params.find((p) => p.name === k), np = m.params.find((p) => p.name === k);
+      if (!np || !op || np.type !== op.type) { delete t.vals[k]; continue; }
+      const ob = old && runBase({ ...t, m: old }, op);
+      if (String(t.vals[k]) === String(ob ?? (op.type === 'bool' ? false : ''))) delete t.vals[k];
+    }
+    if (t.preset && !m.presets?.[t.preset]) t.preset = '';
+    t.dom = null; if (t.path === state.active) renderContent();
+  }
+}
+// ~/.shooting-star/run 은 프로젝트 밖이라 파일 감시에 안 걸린다 → 폴더를 따로 감시 (Claude/CLI 가 등록·수정하면 바로 갱신)
+let runWatch = null, runWatchT = 0;
+function runWatchDir() {
+  if (!runUi.dir || runWatch?.dir === runUi.dir || typeof EventSource === 'undefined') return;
+  runWatch?.es.close();
+  const es = new EventSource('/api/dirwatch?root=%2F&path=' + encodeURIComponent(runUi.dir.slice(1))); let first = true;
+  const again = () => { clearTimeout(runWatchT); runWatchT = setTimeout(loadRun, 150); };
+  es.onmessage = again;
+  es.onopen = () => { if (!first) again(); first = false; };
+  es.onerror = () => { if (es.readyState === 2 && runWatch?.es === es) runWatch = null; };   // 영구 실패면 다음 loadRun 때 다시 시도
+  runWatch = { dir: runUi.dir, es };
 }
 function drawRun() {
   const box = $('#run-list'), kids = [];
