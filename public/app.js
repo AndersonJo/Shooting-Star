@@ -2565,7 +2565,8 @@ function drawRun() {
     }
   }
   box.replaceChildren(...kids);
-  $('#run-foot').replaceChildren(el('span', { textContent: runUi.dir.replace(state.home || '\u0000', '~') }), ' · ', Object.assign(el('a', { textContent: 'Claude 연동 설치', href: '#', title: '~/.claude 에 ss-run skill + SessionStart hook + `ss run` 실행 권한 추가' }), { onclick: async (e) => { e.preventDefault(); try { const r = await api('POST', 'run/install'); toast(r.hookAdded || r.rulesAdded.length ? 'Claude 연동 설치됨 (새 세션부터)' : '이미 설치되어 있습니다'); } catch (er) { toast(er.message); } } }));
+  const envLink = Object.assign(el('a', { textContent: '환경 다시 읽기', href: '#', title: 'UI 실행은 로그인 셸(~/.bash_profile, ~/.bashrc …) 환경을 씁니다. rc 파일이 바뀌면 자동으로 다시 읽고, rc 가 source 하는 다른 파일을 바꿨을 때는 이걸 누르세요.' }), { onclick: async (e) => { e.preventDefault(); try { const r = await api('POST', 'run/env-reload'); toast(r.err || `환경 다시 읽음 — ${r.shell} · 변수 ${r.vars}개 · ${r.ms}ms`); } catch (er) { toast(er.message); } } });
+  $('#run-foot').replaceChildren(el('span', { textContent: runUi.dir.replace(state.home || '\u0000', '~') }), ' · ', envLink, ' · ', Object.assign(el('a', { textContent: 'Claude 연동 설치', href: '#', title: '~/.claude 에 ss-run skill + SessionStart hook + `ss run` 실행 권한 추가' }), { onclick: async (e) => { e.preventDefault(); try { const r = await api('POST', 'run/install'); toast(r.hookAdded || r.rulesAdded.length ? 'Claude 연동 설치됨 (새 세션부터)' : '이미 설치되어 있습니다'); } catch (er) { toast(er.message); } } }));
 }
 function openRunTab(m, fresh = true) {
   const p = '@run/' + m.name; let t = tabOf(p);

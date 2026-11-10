@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
 const YAML = require('./public/vendor/js-yaml.umd.min.js');   // UI 와 같은 사본 (외부 의존성 없음)
 const SECRET = require('./secret');
@@ -234,10 +234,38 @@ function buildCommand(m, vals) {
   return { cmd: argv[0], args: argv.slice(1), env };
 }
 
+// ───────── 로그인 셸 환경 (UI 실행용) ─────────
+// 앱(launchd)으로 뜬 서버는 PATH=/usr/bin:/bin… 뿐이라 ~/.bash_profile·~/.bashrc 의 PATH/변수가 없다.
+// 로그인+인터랙티브 셸을 한 번 띄워 그 환경을 캐시하고, rc 파일의 mtime/크기/inode 가 바뀌면 다음 실행 때 다시 읽는다.
+const RC_FILES = ['.bash_profile', '.bash_login', '.profile', '.bashrc', '.zshenv', '.zprofile', '.zshrc', '.zlogin'].map((f) => path.join(HOME, f));
+const ENV_DROP = ['PWD', 'OLDPWD', 'SHLVL', '_', 'PS1', 'PS2', 'PROMPT_COMMAND', 'TERM_SESSION_ID'];
+const shellEnvCache = { sig: null, env: null, err: null, at: 0, ms: 0, shell: '' };
+const rcSig = () => RC_FILES.map((f) => { try { const st = fs.statSync(f); return `${st.mtimeMs}:${st.size}:${st.ino}`; } catch { return '-'; } }).join('|');
+function loginEnv({ force = false } = {}) {
+  const sig = rcSig();
+  if (!force && shellEnvCache.sig === sig && (shellEnvCache.env || shellEnvCache.err)) return shellEnvCache;
+  let shell = process.env.SHELL; try { shell = shell || os.userInfo().shell; } catch {}
+  shell = shell || '/bin/bash';
+  const mark = '__SS_ENV_' + crypto.randomBytes(4).toString('hex') + '__';   // rc 가 stdout 에 뭘 찍어도 구분되게
+  const code = `process.stdout.write(${JSON.stringify(mark)} + JSON.stringify(process.env))`;
+  const t0 = Date.now();
+  const r = spawnSync(shell, ['-ilc', `exec ${JSON.stringify(process.execPath)} -e '${code}'`], { cwd: HOME, env: { ...process.env, SS_SHELL_ENV: '1' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  Object.assign(shellEnvCache, { sig, at: Date.now(), ms: Date.now() - t0, shell, err: null });
+  try {
+    if (r.error) throw r.error;
+    const i = (r.stdout || '').lastIndexOf(mark); if (i < 0) throw new Error(`exit ${r.status}${r.signal ? ' ' + r.signal : ''} ${(r.stderr || '').trim().slice(-300)}`);
+    const env = JSON.parse(r.stdout.slice(i + mark.length));
+    for (const k of ENV_DROP) delete env[k]; delete env.SS_SHELL_ENV;
+    shellEnvCache.env = env;
+  } catch (e) { shellEnvCache.err = `로그인 셸(${shell}) 환경을 읽지 못했습니다: ${e.message}`; }   // 이전에 읽은 env 는 그대로 쓴다
+  return shellEnvCache;
+}
+const envInfo = () => ({ shell: shellEnvCache.shell, at: shellEnvCache.at, ms: shellEnvCache.ms, err: shellEnvCache.err, vars: shellEnvCache.env ? Object.keys(shellEnvCache.env).length : 0, rcFiles: RC_FILES.filter((f) => fs.existsSync(f)) });
+
 // ───────── 실행 ─────────
 const jobs = new Map();   // id → job (서버 프로세스 안에서 UI 가 시작한 것)
 const MAX_BUF = 256 * 1024;
-function start(m, given, { cwd, source = 'cli', stdio, preset } = {}) {
+function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false } = {}) {
   const vals = resolveParams(m, given || {}, preset || null);
   const { cmd, args, env } = buildCommand(m, vals);
   Object.assign(env, SECRET.injectEnv(m.secrets));   // 저장된 세션키를 env 로 주입 (required 인데 없으면 여기서 에러)
@@ -246,12 +274,15 @@ function start(m, given, { cwd, source = 'cli', stdio, preset } = {}) {
   const job = Object.assign(new EventEmitter(), { id, name: m.name, params: vals, preset: preset || undefined, source, startedAt: Date.now(), endedAt: 0, code: null, signal: null, buf: '', cwd: workdir, cmdline: [cmd, ...args].join(' ') });
   fs.mkdirSync(LOGS, { recursive: true });
   const logf = path.join(LOGS, id + '.log'); const log = fs.createWriteStream(logf);
-  const child = spawn(cmd, args, { cwd: workdir, env: { ...process.env, ...env, SS_RUN_ID: id, SS_RUN_NAME: m.name }, stdio: stdio ? ['inherit', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+  let base = process.env, envNote = '';   // CLI 는 터미널 환경 그대로, UI 는 로그인 셸 환경 (rc 파일 반영)
+  if (shellEnv) { const le = loginEnv(); if (le.env) base = { ...process.env, ...le.env }; if (le.err) envNote = `[ss] ${le.err}${le.env ? ' — 이전에 읽은 환경으로 실행' : ' — 서버 환경으로 실행'}\n`; }
+  const child = spawn(cmd, args, { cwd: workdir, env: { ...base, ...env, SS_RUN_ID: id, SS_RUN_NAME: m.name }, stdio: stdio ? ['inherit', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
   job.child = child;
   const chunk = (d) => {
     const s = d.toString(); log.write(d);
     job.buf = (job.buf + s).slice(-MAX_BUF); job.emit('data', s);
   };
+  if (envNote) chunk(envNote);
   child.stdout.on('data', chunk); child.stderr.on('data', chunk);
   child.on('error', (e) => { chunk(`\n[실행 실패] ${e.message}\n`); finish(null, null); });
   let done = false;
@@ -566,4 +597,4 @@ async function cli(argv) {
   } catch (e) { console.error(e.message); return e.status === 404 ? 127 : 2; }
 }
 
-module.exports = { DIR, list, get, add, addFromText, exportYaml, remove, start, kill, jobs, history, readLog, logPath, findRun, runInfoText, normalizeManifest, contextText, install, cli, scriptPath, err };
+module.exports = { DIR, loginEnv, envInfo, list, get, add, addFromText, exportYaml, remove, start, kill, jobs, history, readLog, logPath, findRun, runInfoText, normalizeManifest, contextText, install, cli, scriptPath, err };
