@@ -46,6 +46,7 @@ function normalizeManifest(m) {
   if (m.interpreter) out.interpreter = Array.isArray(m.interpreter) ? m.interpreter.map(String) : String(m.interpreter).split(/\s+/).filter(Boolean);
   if (m.cwd) out.cwd = String(m.cwd);
   if (m.danger) out.danger = true;
+  if (m.color === false) out.color = false;   // 색 강제(FORCE_COLOR 등) 끄기
   out.params = (m.params || []).map(normalizeParam);
   const secrets = SECRET.normalize(m.secrets);   // 세션키/토큰: env SS_SECRET_<NAME> 로 주입
   if (secrets.length) out.secrets = secrets;
@@ -169,6 +170,7 @@ description: 한 줄 설명 (Claude 가 세션 시작 때 보는 문장)
 lang: ${LANG_EXT[lang] ? lang : 'bash'}                    # code 를 쓸 때 확장자 결정: bash/python/node/ts/ruby/…
 # script: ./my-task.sh         # code 대신 기존 파일 (이 YAML 기준 상대경로). 파일명만 정하려면 code 와 함께 써도 됨
 # danger: true                 # 실행 전에 확인 (CLI 는 --yes 필요)
+# color: false                 # 색 강제(FORCE_COLOR/CLICOLOR_FORCE/TERM…) 끄기 — 출력을 파싱하는 스크립트용
 # cwd: ~/work                  # 작업 폴더 (기본: 실행한 곳)
 # interpreter: python3 -u      # 기본은 확장자로 추론
 params:
@@ -265,7 +267,9 @@ const envInfo = () => ({ shell: shellEnvCache.shell, at: shellEnvCache.at, ms: s
 // ───────── 실행 ─────────
 const jobs = new Map();   // id → job (서버 프로세스 안에서 UI 가 시작한 것)
 const MAX_BUF = 256 * 1024;
-function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false } = {}) {
+// 파이프로 연결되면 대부분의 도구가 색을 끈다 → 보여줄 곳이 터미널(UI 렌더러 포함)이면 색을 켜도록 알려준다
+const COLOR_ENV = { FORCE_COLOR: '1', CLICOLOR_FORCE: '1', CLICOLOR: '1', PY_COLORS: '1', TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false, color = false } = {}) {
   const vals = resolveParams(m, given || {}, preset || null);
   const { cmd, args, env } = buildCommand(m, vals);
   Object.assign(env, SECRET.injectEnv(m.secrets));   // 저장된 세션키를 env 로 주입 (required 인데 없으면 여기서 에러)
@@ -276,6 +280,7 @@ function start(m, given, { cwd, source = 'cli', stdio, preset, shellEnv = false 
   const logf = path.join(LOGS, id + '.log'); const log = fs.createWriteStream(logf);
   let base = process.env, envNote = '';   // CLI 는 터미널 환경 그대로, UI 는 로그인 셸 환경 (rc 파일 반영)
   if (shellEnv) { const le = loginEnv(); if (le.env) base = { ...process.env, ...le.env }; if (le.err) envNote = `[ss] ${le.err}${le.env ? ' — 이전에 읽은 환경으로 실행' : ' — 서버 환경으로 실행'}\n`; }
+  if (color && m.color !== false && !('NO_COLOR' in base)) { const c = {}; for (const [k, v] of Object.entries(COLOR_ENV)) if (k === 'TERM' ? !base.TERM || base.TERM === 'dumb' : !(k in base)) c[k] = v; base = { ...base, ...c }; }
   const child = spawn(cmd, args, { cwd: workdir, env: { ...base, ...env, SS_RUN_ID: id, SS_RUN_NAME: m.name }, stdio: stdio ? ['inherit', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
   job.child = child;
   const chunk = (d) => {
@@ -321,6 +326,7 @@ function findRun(q) {
   let m = null; try { if (h.name) m = get(h.name); } catch {}
   return { ...h, log: logPath(h.id), script: m?.scriptPath, manifest: m?.manifest };
 }
+const plainText = (s) => s.replace(/\x1b(?:\[[0-9;?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-9A-Za-z]|[@-Z\\-_])/g, '').split('\n').map((l) => { const p = l.replace(/\r+$/, '').split('\r'); return p[p.length - 1]; }).join('\n');
 function runInfoText(r) {
   const at = r.startedAt ? new Date(r.startedAt).toLocaleString() : '';
   const st = r.running ? '실행 중 (또는 기록 전)' : r.signal ? 'killed ' + r.signal : 'exit ' + r.code;
@@ -431,6 +437,7 @@ YAML
 - Other param fields: \`required: true\`, \`as: flag\` (default → \`--name value\`) | \`env\` | \`positional\`, \`flag: "-k"\` (custom flag text).
 - Every param is also exported as env \`SS_PARAM_<NAME>\` (bool → 1/0), so scripts may read env instead of parsing argv.
 - Optional: \`cwd: ~/dir\`, \`interpreter: python3 -u\` (default: inferred from extension; otherwise the file must be executable).
+- Runs shown in a terminal or the UI get FORCE_COLOR/CLICOLOR_FORCE/TERM=xterm-256color so tools keep their colors (the UI renders ANSI). Set \`color: false\` if the script parses command output that colors would break.
 - Re-registering the same name needs \`--force\` (that is also how you update a script). \`ss run rm <name>\` removes one.
 - Several scripts can go in one YAML separated by \`---\`.
 - Legacy one-liner still works: \`ss run add ./x.sh --name n --desc d --param '{"name":"env","type":"choice","choices":["dev","prod"]}'\`.
@@ -511,7 +518,7 @@ const HELP = `ss run — 스크립트 등록/실행 (UI 의 Run 메뉴, Claude �
   ss run export <name…> | --all   본문까지 담은 YAML (다른 컴퓨터에서 ss run add 로 등록)
   ss run rm <name>                등록 해제
   ss run history [n]              최근 실행 기록 (id 포함)
-  ss run log [name|id] [--tail N|--all] [--path]   실행 정보(스크립트/설정/로그 경로) + 출력. 생략하면 가장 최근 실행
+  ss run log [name|id] [--tail N|--all] [--path] [--raw]   실행 정보(스크립트/설정/로그 경로) + 출력. 생략하면 가장 최근 실행 (터미널이 아니면 색 코드 제거, --raw 로 원본)
   ss run context                  에이전트용 텍스트 요약 (Claude SessionStart hook 이 호출. AGENTS.md 등에 붙여도 됨)
   ss run tools [--format openai|anthropic]   function-calling 도구 정의(JSON). 호출은 'ss run <name> --k v' 로 실행
   ss run install                  Claude 에 skill(ss-run) + SessionStart hook + 실행 권한 설치
@@ -546,6 +553,7 @@ async function cli(argv) {
       const { o, rest: pos } = parseFlags(rest); const r = findRun(pos[0]);
       if (o.path) { console.log(r.log); return 0; }
       let text = ''; try { text = fs.readFileSync(r.log, 'utf8'); } catch {}
+      if (!process.stdout.isTTY && !o.raw) text = plainText(text);   // Claude 등 비터미널: 색 코드 제거 + \r 덮어쓰기 반영
       const n = o.all ? Infinity : Number(o.tail) || 200, lines = text.replace(/\n$/, '').split('\n');
       console.log(runInfoText(r)); if (lines.length > n) console.log(`# (마지막 ${n}줄 / 전체 ${lines.length}줄 — --all 로 전체)`);
       console.log('─'.repeat(60)); if (text) console.log(lines.slice(-n).join('\n'));
@@ -590,7 +598,7 @@ async function cli(argv) {
       process.stdin.pause(); if (!/^y(es)?$/i.test(ans)) return 1;
     }
     const given = {}; for (const [k, v] of Object.entries(o)) given[k] = Array.isArray(v) ? v[v.length - 1] : v;
-    const job = start(m, given, { cwd: process.cwd(), source: 'cli', preset });
+    const job = start(m, given, { cwd: process.cwd(), source: 'cli', preset, color: !!process.stdout.isTTY });
     job.on('data', (s) => process.stdout.write(s));
     for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => kill(job.id));
     return await new Promise((r) => job.on('end', ({ code, signal }) => r(code ?? (signal ? 130 : 1))));

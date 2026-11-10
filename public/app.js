@@ -2489,7 +2489,107 @@ function blameView(t) {
 
 // ───────── Run: ~/.shooting-star/run 에 등록된 스크립트 (CLI `ss run`, Claude 와 공유) ─────────
 const runUi = { scripts: [], history: [], dir: '', running: new Set(), secrets: new Set() };
-const ANSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07/g;
+// ───────── 실행 출력: 작은 터미널 렌더러 (ANSI 색/스타일, \r 덮어쓰기, 줄 지우기, 커서 위/아래) ─────────
+const TERM_16 = ['#1e1f22', '#f14c4c', '#23d18b', '#e5c07b', '#3b8eea', '#d670d6', '#29b8db', '#cccccc',
+  '#666666', '#ff6e6e', '#5af78e', '#f4f99d', '#6cb6ff', '#ff92df', '#9aedfe', '#ffffff'];
+function term256(n) {
+  if (n < 16) return TERM_16[n];
+  if (n >= 232) { const v = 8 + (n - 232) * 10; return `rgb(${v},${v},${v})`; }
+  n -= 16; const c = (v) => (v ? 55 + v * 40 : 0);
+  return `rgb(${c(Math.floor(n / 36))},${c(Math.floor(n / 6) % 6)},${c(n % 6)})`;
+}
+const TERM_MAX_LINES = 5000;
+class Term {
+  constructor(pre) { this.pre = pre; this.reset(); }
+  reset() { this.lines = [[]]; this.nodes = []; this.y = 0; this.x = 0; this.st = {}; this.sk = ''; this.pend = ''; this.dirty = new Set(); this.pre.replaceChildren(); }
+  setStyle(st) { this.st = st; this.sk = JSON.stringify(st); }
+  sgr(ps) {
+    const st = { ...this.st }; const a = ps.length ? ps : [0];
+    for (let i = 0; i < a.length; i++) {
+      const p = a[i];
+      if (p === 0) { for (const k in st) delete st[k]; }
+      else if (p === 1) st.b = 1; else if (p === 2) st.d = 1; else if (p === 3) st.i = 1; else if (p === 4) st.u = 1; else if (p === 7) st.r = 1; else if (p === 9) st.s = 1;
+      else if (p === 22) { delete st.b; delete st.d; } else if (p === 23) delete st.i; else if (p === 24) delete st.u; else if (p === 27) delete st.r; else if (p === 29) delete st.s;
+      else if (p >= 30 && p <= 37) st.fg = TERM_16[p - 30]; else if (p >= 90 && p <= 97) st.fg = TERM_16[p - 82];
+      else if (p >= 40 && p <= 47) st.bg = TERM_16[p - 40]; else if (p >= 100 && p <= 107) st.bg = TERM_16[p - 92];
+      else if (p === 39) delete st.fg; else if (p === 49) delete st.bg;
+      else if (p === 38 || p === 48) {
+        const k = p === 38 ? 'fg' : 'bg';
+        if (a[i + 1] === 5 && a[i + 2] !== undefined) { st[k] = term256(a[i + 2]); i += 2; }
+        else if (a[i + 1] === 2 && a[i + 4] !== undefined) { st[k] = `rgb(${a[i + 2]},${a[i + 3]},${a[i + 4]})`; i += 4; }
+      }
+    }
+    this.setStyle(st);
+  }
+  line(y) { while (this.lines.length <= y) this.lines.push([]); return this.lines[y]; }
+  put(ch) { const L = this.line(this.y); while (L.length < this.x) L.push([' ', '']); L[this.x++] = [ch, this.sk]; this.dirty.add(this.y); }
+  csi(params, fin) {
+    const ps = params.replace(/^\?/, '').split(';').map((v) => (v === '' ? NaN : Number(v))), n = Number.isNaN(ps[0]) ? 1 : Math.max(1, ps[0]);
+    const L = () => this.line(this.y);
+    switch (fin) {
+      case 'm': if (!params.startsWith('?')) this.sgr(params === '' ? [] : ps.map((v) => (Number.isNaN(v) ? 0 : v))); break;
+      case 'K': { const m = Number.isNaN(ps[0]) ? 0 : ps[0], l = L(); if (m === 0) l.length = Math.min(l.length, this.x); else if (m === 1) for (let i = 0; i <= this.x && i < l.length; i++) l[i] = [' ', '']; else l.length = 0; this.dirty.add(this.y); break; }
+      case 'A': this.y = Math.max(0, this.y - n); break;
+      case 'B': this.y += n; this.line(this.y); break;
+      case 'C': this.x += n; break;
+      case 'D': this.x = Math.max(0, this.x - n); break;
+      case 'G': this.x = n - 1; break;
+      case 'E': this.y += n; this.x = 0; this.line(this.y); break;
+      case 'F': this.y = Math.max(0, this.y - n); this.x = 0; break;
+      case 'J': if (ps[0] === 2 || ps[0] === 3) { const st = this.st; this.reset(); this.setStyle(st); } break;   // clear (화면 지우기)
+      default: break;   // 위치 지정(H) 등 화면 단위 제어는 무시 (로그 용도)
+    }
+  }
+  write(s) {
+    s = this.pend + s; this.pend = '';
+    const re = /\x1b(?:\[([0-9;?]*)[ -\/]*([@-~])|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-9A-Za-z]|[@-Z\\-_])/y;
+    for (let i = 0; i < s.length;) {
+      const c = s[i];
+      if (c === '\x1b') {
+        re.lastIndex = i; const m = re.exec(s);
+        if (!m) { if (s.length - i < 64 && !/[\x07\n]/.test(s.slice(i))) { this.pend = s.slice(i); break; } i++; continue; }   // 다음 조각에서 이어지는 escape
+        if (m[2]) this.csi(m[1], m[2]);
+        i = re.lastIndex; continue;
+      }
+      if (c === '\n') { this.y++; this.x = 0; this.line(this.y); this.dirty.add(this.y); }
+      else if (c === '\r') this.x = 0;
+      else if (c === '\b') this.x = Math.max(0, this.x - 1);
+      else if (c === '\t') { const to = (Math.floor(this.x / 8) + 1) * 8; while (this.x < to) this.put(' '); }
+      else if (c >= ' ' || c > '\x7f') this.put(c);
+      i++;
+    }
+    if (this.lines.length > TERM_MAX_LINES) {   // 오래된 줄은 버린다
+      const cut = this.lines.length - TERM_MAX_LINES;
+      this.lines.splice(0, cut); for (const nd of this.nodes.splice(0, cut)) nd?.remove();
+      this.y = Math.max(0, this.y - cut); this.dirty = new Set([...this.dirty].map((y) => y - cut).filter((y) => y >= 0));
+    }
+    this.render();
+  }
+  render() {
+    for (const y of [...this.dirty].sort((a, b) => a - b)) {
+      let nd = this.nodes[y];
+      if (!nd) { for (let k = this.nodes.length; k <= y; k++) { const d = document.createElement('div'); d.className = 'tl'; this.pre.append(d); this.nodes[k] = d; this.paint(d, this.lines[k] || []); } continue; }
+      this.paint(nd, this.lines[y] || []);
+    }
+    this.dirty.clear();
+  }
+  paint(d, L) {
+    const kids = []; let txt = '', key = null;
+    const flush = () => {
+      if (!txt) return;
+      if (!key) { kids.push(txt); txt = ''; return; }
+      const st = JSON.parse(key), sp = document.createElement('span');
+      let fg = st.fg, bg = st.bg; if (st.r) { [fg, bg] = [bg || 'var(--term-bg)', fg || 'var(--term-fg)']; }
+      if (fg) sp.style.color = fg; if (bg) sp.style.background = bg;
+      if (st.b) sp.style.fontWeight = '700'; if (st.d) sp.style.opacity = '.6'; if (st.i) sp.style.fontStyle = 'italic';
+      if (st.u || st.s) sp.style.textDecoration = (st.u ? 'underline ' : '') + (st.s ? 'line-through' : '');
+      sp.textContent = txt; kids.push(sp); txt = '';
+    };
+    for (const [ch, k] of L) { const kk = k && k !== '{}' ? k : null; if (kk !== key) { flush(); key = kk; } txt += ch; }
+    flush(); d.replaceChildren(...kids);
+  }
+  text() { return this.lines.map((L) => L.map((c) => c[0]).join('').replace(/\s+$/, '')).join('\n').replace(/\n+$/, '\n'); }
+}
 async function loadRun() {
   const box = $('#run-list');
   try { const r = await api('GET', 'run/list'); runUi.scripts = r.scripts; runUi.history = r.history; runUi.dir = r.dir; runUi.running = new Set(r.running.map((j) => j.name)); runUi.secrets = new Set(r.secrets || []); }
@@ -2625,10 +2725,11 @@ function runView(t) {
   }
   if (!m.params.length) form.append(el('div', { className: 'pd', style: 'grid-column:1/-1', textContent: '파라미터가 없습니다.' }));
   upd();
-  const out = el('pre', { className: 'rv-out', textContent: t.out }), st = el('span', { className: 'rv-st' });
+  const out = el('pre', { className: 'rv-out' }), st = el('span', { className: 'rv-st' }), term = new Term(out); t.term = term;
+  if (t.out) term.write(t.out);
   const go = el('button', { className: 'go', textContent: t.viewing ? '▶ 다시 실행' : '▶ 실행', title: '실행 (⌘/Ctrl+Enter)' }), stop = el('button', { textContent: '■ 중지', hidden: true });
   const paint = () => { const s = t.status; st.className = 'rv-st ' + (s?.cls || ''); st.textContent = s?.text || ''; go.disabled = !!t.job; stop.hidden = !t.job; };
-  const append = (s) => { const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40; t.out = (t.out + s.replace(ANSI, '')).slice(-200000); out.textContent = t.out; if (stick) out.scrollTop = out.scrollHeight; };
+  const append = (s) => { const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40; t.out = (t.out + s).slice(-400000); term.write(s); if (stick) out.scrollTop = out.scrollHeight; };
   const run = async () => {
     if (t.job) return;
     const missing = m.params.find((p) => p.required && (t.vals[p.name] === '' || t.vals[p.name] === undefined));
@@ -2636,7 +2737,7 @@ function runView(t) {
     const needSecret = (m.secrets || []).find((x) => x.required !== false && !runUi.secrets.has(x.name));
     if (needSecret) { toast(`세션키를 먼저 저장하세요: ${needSecret.name}`); return; }
     if (m.danger && !confirm(`'${m.name}' 은(는) danger 스크립트입니다. 실행할까요?\n\n${runCmdline(t)}`)) return;
-    t.out = ''; out.textContent = ''; t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; setFold(true); paint();
+    t.out = ''; term.reset(); t.viewing = null; go.textContent = '▶ 실행'; t.status = { cls: 'run', text: '시작 중…' }; t.job = { id: null }; setFold(true); paint();
     const params = {}; for (const p of m.params) { const v = t.vals[p.name]; if (v !== '' && v !== undefined) params[p.name] = v; }
     let r; try { r = await api('POST', 'run/exec', {}, { name: m.name, params, preset: t.preset || undefined }); } catch (e) { t.job = null; t.status = { cls: 'fail', text: e.message }; paint(); return; }
     t.job = { id: r.id }; t.runId = r.id; t.status = { cls: 'run', text: '실행 중…' }; paint(); runUi.running.add(m.name); drawRun();
@@ -2652,8 +2753,8 @@ function runView(t) {
   };
   go.onclick = run;
   stop.onclick = async () => { if (t.job?.id) { try { await api('POST', 'run/kill', {}, { id: t.job.id }); } catch {} } };
-  const clear = el('button', { textContent: '지우기', onclick: () => { t.out = ''; out.textContent = ''; } });
-  const cp = el('button', { textContent: '출력 복사', onclick: () => copy(t.out, '출력 복사됨') });
+  const clear = el('button', { textContent: '지우기', onclick: () => { t.out = ''; term.reset(); } });
+  const cp = el('button', { textContent: '출력 복사', onclick: () => copy(term.text(), '출력 복사됨') });
   const ask = el('button', { textContent: 'Claude 에게', title: '로그/스크립트/설정 경로를 복사 — Claude 에 붙여넣으면 바로 로그를 읽고 디버깅합니다', onclick: () => copy(runDebugText(t), 'Claude 용 디버깅 정보 복사됨 — 붙여넣기 하세요') });
   const nOpt = m.params.length + (m.secrets || []).length + (presets.length ? 1 : 0);
   const fold = el('button', { className: 'rv-fold', title: '옵션 접기/펼치기 (실행하면 자동으로 접힘)', onclick: () => setFold(!t.fold) });
