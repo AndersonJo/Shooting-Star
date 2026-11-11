@@ -3743,6 +3743,7 @@ function galTile(t, it) {
     showMenu(e.clientX, e.clientY, [
       ...(n > 1 ? [] : [['전체화면으로 보기', () => galView(t, tile._i)], ['탭으로 열기', () => openExternal(abs)], ['기본 앱으로 열기', () => revealPath('@ext' + abs, 'open')]]),
       [`${FM}에서 보기`, () => revealPath('@ext' + abs, 'reveal')],
+      [`휴지통으로 버리기${n > 1 ? ` (${n}장)` : ''}\t${M}⌫`, () => galTrash(t)],
       ['-'],
       [`복사${n > 1 ? ` (${n}장)` : ''}\t${M}C`, () => galClip(t, 'copy')],
       [`잘라내기${n > 1 ? ` (${n}장)` : ''}\t${M}X`, () => galClip(t, 'cut')],
@@ -3824,6 +3825,7 @@ function galLayout(t) { // 행마다 높이를 맞추고 원래 비율 그대로
     }
     return div;
   }));
+  if (galHolding(g)) galKeepPos(t);
 }
 function galWant(tile) { // 화면 근처에 있고 지금 해상도가 모자라면 큐에 넣는다
   if (!tile._vis || !tile._need || tile._w >= tile._need || tile._q) return;
@@ -3844,7 +3846,6 @@ function galPump() { // 동시에 3개까지 (서버 변환도 3개씩이고, �
 }
 // how: '' 하나만 · 'toggle' ⌘/Ctrl+클릭 · 'range' Shift+클릭 (기준점부터 여기까지만) · 'add' ⌘/Ctrl+Shift+클릭 (범위를 더함) · 'cursor' 고른 것 안이면 선택은 그대로 두고 커서만
 const galHow = (e) => (e.shiftKey ? (e.metaKey || e.ctrlKey ? 'add' : 'range') : e.metaKey || e.ctrlKey ? 'toggle' : '');
-  if (galHolding(g)) galKeepPos(t);
 function galSelect(t, i, scroll = true, how = '') {
   const g = t.g; if (!g || i < 0 || i >= g.tileList.length) return;
   const name = g.tileList[i]._it.name;
@@ -3908,6 +3909,8 @@ function galKey(t, e) {
   if (mod && code === 'KeyX' && !e.shiftKey && !e.altKey) { e.preventDefault(); galClip(t, 'cut'); return; }
   if (mod && code === 'KeyV' && !e.shiftKey) { e.preventDefault(); clipKeyAt = Date.now(); clipPaste(t.dir, e.altKey); return; }   // ⌘V 붙여넣기 · ⌘⌥V 이동
   if (mod && code === 'KeyA' && !e.shiftKey && !e.altKey) { e.preventDefault(); galSelectAll(t); return; }
+  if (mod && k === 'Backspace' && !e.shiftKey && !e.altKey) { e.preventDefault(); if (!g.viewer) galTrash(t); return; }   // ⌘/Ctrl+⌫ 휴지통으로
+  if (mod && code === 'KeyZ' && !e.shiftKey && !e.altKey) { e.preventDefault(); galUndoTrash(); return; }   // ⌘/Ctrl+Z 되돌리기
   if (g.viewer || e.metaKey || e.ctrlKey || e.altKey) return;
   let i = g.sel; const how = e.shiftKey ? 'range' : '';   // Shift+방향키: 기준점부터 범위 선택
   if (k === 'Enter' || k === ' ') { if (i >= 0) galView(t, i); }
@@ -3935,7 +3938,47 @@ function galView(t, i) { // 전체화면 보기: 목록은 갤러리 순서 그�
       g.dom.focus({ preventScroll: true });
     },
   });
+  g.scroll = g.scroller.scrollTop;
   g.viewer = box; g.dom.append(box); box.enterFs();
+}
+// 휴지통: ⌘/Ctrl+⌫ 로 고른 이미지를 휴지통으로, ⌘/Ctrl+Z 로 마지막 것부터 원래 자리로 되돌린다
+const trashUndo = [];   // [{ from, to }] 묶음들 (최근 것이 끝)
+async function galTrash(t) {
+  const g = t.g; if (!g) return;
+  let sel = galPicked(t); if (!sel.length && g.tileList[g.sel]) sel = [g.tileList[g.sel]];
+  if (!sel.length) return toast('먼저 이미지를 고르세요');
+  const gone = new Set(sel), last = Math.max(...sel.map((x) => x._i));
+  const next = g.tileList.slice(last + 1).find((x) => !gone.has(x)) || [...g.tileList.slice(0, last)].reverse().find((x) => !gone.has(x));   // 지운 뒤 커서는 다음 이미지로
+  let r; try { r = await api('POST', 'fs/trash', { path: ROOT_ALL }, { paths: sel.map((x) => x._abs) }); }
+  catch (e) { return toast('휴지통으로 옮기지 못했습니다: ' + e.message, 3500); }
+  if (r.done.length) trashUndo.push(r.done.map((x) => ({ from: x.from, to: x.to })));
+  if (clip && r.done.some((x) => clip.paths.has(x.from))) clipClear();
+  toast((r.done.length ? `${r.done.length}장 휴지통으로 — ${modKey()}Z 되돌리기` : '') + (r.errors.length ? ` 실패 ${r.errors.length}개 — ${r.errors[0]}` : ''), r.errors.length ? 4500 : 2600);
+  if (next) g.pendingPick = { names: new Set([next._it.name]), at: Date.now() };
+  g.picked = new Set(); galLoad(t); childrenCache.clear(); renderTree();
+}
+async function galUndoTrash() {
+  const items = trashUndo.pop(); if (!items) return toast('되돌릴 것이 없습니다');
+  const byDir = new Map(); for (const x of items) { const d = x.from.slice(0, x.from.lastIndexOf('/')) || '/'; (byDir.get(d) || byDir.set(d, []).get(d)).push(x.to); }
+  let n = 0; const errs = [];
+  for (const [dir, paths] of byDir) {
+    try {
+      const r = await api('POST', 'fs/transfer', { path: ROOT_ALL }, { paths, dest: dir, move: true });
+      n += r.done.length; errs.push(...r.errors);
+      const names = new Set(r.done.map((x) => x.to.split('/').pop()));
+      for (const t of state.tabs) if (t.kind === 'gallery' && t.g && (t.g.data?.path || t.dir) === r.dest && names.size) { t.g.pendingPick = { names, at: Date.now() }; galLoad(t); }   // 되돌린 것들을 골라 둔다
+    } catch (e) { errs.push(e.message); }
+  }
+  toast((n ? `${n}장 되돌림` : '되돌리지 못했습니다') + (errs.length ? ` — ${errs[0]}` : ''), errs.length ? 4500 : 2200);
+  childrenCache.clear(); renderTree();
+}
+// 전체화면 보기 동안 창 크기가 바뀌면(네이티브 앱의 창 전체화면) 갤러리가 다시 배치되며 스크롤이 맨 위로 밀릴 수 있다 → 열기 전 위치를 붙잡아 둔다
+const galHolding = (g) => !!g.viewer || g.hold > performance.now();
+function galKeepPos(t) {
+  const g = t.g; if (!g) return;
+  g.scroller.scrollTop = g.scroll;
+  const tile = g.tileList[g.sel]; if (tile && !g.viewer) tile.scrollIntoView({ block: 'nearest' });   // 보기에서 다른 이미지로 넘겼으면 그 이미지가 보이게
+  if (!g.viewer) g.scroll = g.scroller.scrollTop;
 }
 
 // ───────── 파일 클립보드: 갤러리에서 복사/잘라내기 → 트리 폴더·갤러리에 붙여넣기 ─────────
@@ -3955,17 +3998,8 @@ async function clipSetNow(paths, mode) {
   toast(`${paths.length}장 ${mode === 'cut' ? '잘라냄' : '복사됨'} — 트리에서 폴더를 고르고 ${modKey()}V`, 2600);
 }
 function clipClear() { if (!clip) return; clip = null; clipShow(); }
-  g.scroll = g.scroller.scrollTop;
 function clipShow(flash) { // 상태바 + 보이는 갤러리의 타일 표시
   const chip = $('#st-clip'), M = modKey(); chip.hidden = !clip;
-// 전체화면 보기 동안 창 크기가 바뀌면(네이티브 앱의 창 전체화면) 갤러리가 다시 배치되며 스크롤이 맨 위로 밀릴 수 있다 → 열기 전 위치를 붙잡아 둔다
-const galHolding = (g) => !!g.viewer || g.hold > performance.now();
-function galKeepPos(t) {
-  const g = t.g; if (!g) return;
-  g.scroller.scrollTop = g.scroll;
-  const tile = g.tileList[g.sel]; if (tile && !g.viewer) tile.scrollIntoView({ block: 'nearest' });   // 보기에서 다른 이미지로 넘겼으면 그 이미지가 보이게
-  if (!g.viewer) g.scroll = g.scroller.scrollTop;
-}
   if (clip) {
     const cut = clip.mode === 'cut';
     chip.className = cut ? 'cut' : '';

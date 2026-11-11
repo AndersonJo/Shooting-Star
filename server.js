@@ -1217,6 +1217,15 @@ async function api(req, res, url, root) {
       markDirty(root);
       return send(res, 200, r);
     }
+    case 'POST /api/fs/trash': { // 휴지통으로 옮긴다 (macOS ~/.Trash · 그 밖 ~/.local/share/Trash/files). 결과의 from/to 로 되돌릴 수 있다
+      const { paths = [] } = JSON.parse((await readBody(req)) || '{}');
+      if (!Array.isArray(paths) || !paths.length) throw httpError(400, 'bad request');
+      const trash = process.platform === 'darwin' ? path.join(HOME, '.Trash') : path.join(HOME, '.local/share/Trash/files');
+      await fsp.mkdir(trash, { recursive: true });
+      const r = await fsTransfer(paths.map((x) => resolveSafe(root, String(x))), trash, true);
+      markDirty(root);
+      return send(res, 200, r);
+    }
     case 'GET /api/dirwatch': { // 폴더 하나의 변경을 SSE 로 알린다 (갤러리 자동 갱신)
       const dir = await fsp.realpath(resolveSafe(root, p));
       if (!isDirSafe(dir)) throw httpError(400, 'not a directory');
