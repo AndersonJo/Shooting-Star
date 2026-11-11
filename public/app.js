@@ -3704,7 +3704,8 @@ function galleryView(t) {
   const root = el('div', { className: 'gal' + (store.get('galNames', true) ? '' : ' nonames'), tabIndex: -1 });
   const sc = el('div', { className: 'gal-scroll' }), grid = el('div', { className: 'gal-grid' });
   root.append(sc); Object.assign(g, { dom: root, scroller: sc, grid });
-  sc.onscroll = () => { if (!galHolding(g)) g.scroll = sc.scrollTop; };   // 전체화면 보기 중·직후엔 창 크기 변화로 생긴 스크롤은 기억하지 않는다
+  sc.onscroll = () => { if (!galHolding(g)) g.scroll = sc.scrollTop; };
+  sc.addEventListener('wheel', () => { if (!g.viewer) g.hold = 0; }, { passive: true });   // 직접 스크롤하면 붙잡기를 그만   // 전체화면 보기 중·직후엔 창 크기 변화로 생긴 스크롤은 기억하지 않는다
   g.ro = new ResizeObserver(() => galRelayout(t)); g.ro.observe(sc);
   g.io = new IntersectionObserver((ents) => { for (const e of ents) { e.target._vis = e.isIntersecting; if (e.isIntersecting) galWant(e.target); } }, { root: sc, rootMargin: '900px 0px' });
   root.addEventListener('keydown', (e) => galKey(t, e));
@@ -3825,7 +3826,7 @@ function galLayout(t) { // 행마다 높이를 맞추고 원래 비율 그대로
     }
     return div;
   }));
-  if (galHolding(g)) galKeepPos(t);
+  if (galHolding(g)) { if (!g.viewer) g.hold = Math.max(g.hold, performance.now() + 700); galKeepPos(t); }   // 창 크기가 계속 바뀌는 동안은 붙잡기를 늘린다
 }
 function galWant(tile) { // 화면 근처에 있고 지금 해상도가 모자라면 큐에 넣는다
   if (!tile._vis || !tile._need || tile._w >= tile._need || tile._q) return;
@@ -3938,7 +3939,7 @@ function galView(t, i) { // 전체화면 보기: 목록은 갤러리 순서 그�
       g.dom.focus({ preventScroll: true });
     },
   });
-  g.scroll = g.scroller.scrollTop;
+  g.keep = g.scroller.scrollTop; g.keepSel = g.sel;
   g.viewer = box; g.dom.append(box); box.enterFs();
 }
 // 휴지통: ⌘/Ctrl+⌫ 로 고른 이미지를 휴지통으로, ⌘/Ctrl+Z 로 마지막 것부터 원래 자리로 되돌린다
@@ -3976,9 +3977,9 @@ async function galUndoTrash() {
 const galHolding = (g) => !!g.viewer || g.hold > performance.now();
 function galKeepPos(t) {
   const g = t.g; if (!g) return;
-  g.scroller.scrollTop = g.scroll;
-  const tile = g.tileList[g.sel]; if (tile && !g.viewer) tile.scrollIntoView({ block: 'nearest' });   // 보기에서 다른 이미지로 넘겼으면 그 이미지가 보이게
-  if (!g.viewer) g.scroll = g.scroller.scrollTop;
+  if (g.keep == null) return;
+  g.scroller.scrollTop = g.scroll = g.keep;   // 목표값은 바꾸지 않는다 (창이 아직 작을 때 잘린 값을 기억하면 위치가 틀어진다)
+  const tile = g.tileList[g.sel]; if (tile && !g.viewer && g.sel !== g.keepSel) tile.scrollIntoView({ block: 'nearest' });   // 보기에서 다른 이미지로 넘겼을 때만
 }
 
 // ───────── 파일 클립보드: 갤러리에서 복사/잘라내기 → 트리 폴더·갤러리에 붙여넣기 ─────────
