@@ -584,6 +584,24 @@ mark.fmd.cur { background: var(--accent); color: var(--bg); }
 .gal-empty { color: var(--fg2); padding: 24px 4px; font-size: 13px; }
 .gal-empty:empty { display: none; }
 #toolbar .gal-size { width: 110px; vertical-align: middle; accent-color: var(--accent); }
+/* 갤러리: 여러 장 선택 (체크 표시, 커서는 바깥 고리 하나 더) · 복사/잘라내기 표시 */
+.gal-chk, .gal-clip { position: absolute; display: none; pointer-events: none; }
+.gal.multi .gal-tile.sel .gal-chk { display: flex; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 12px; font-weight: 700; align-items: center; justify-content: center; box-shadow: 0 1px 4px #0009; }
+.gal.multi .gal-tile.sel .gal-chk::before { content: '✓'; }
+.gal-tile.sel.cur { box-shadow: 0 0 0 3px var(--accent), 0 0 0 6px color-mix(in srgb, var(--accent) 35%, transparent); }
+.gal-tile.cur:not(.sel) { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent); }
+.gal-tile.clip .gal-clip { display: block; inset: 0; border: 2px dashed var(--accent); border-radius: 4px; }
+.gal-tile.clip .gal-clip::before { content: '📋 복사됨'; position: absolute; top: 6px; left: 6px; padding: 1px 8px; border-radius: 10px; font-size: 11px; line-height: 18px; color: #fff; background: #000b; white-space: nowrap; }
+.gal-tile.cut .gal-clip::before { content: '✂ 잘라냄'; }
+.gal-tile.cut.ok img { opacity: .4; }
+.gal-tile.flash { animation: gal-flash .45s ease-out; }
+@keyframes gal-flash { 0% { filter: brightness(1.7); transform: scale(.96); } 100% { filter: none; transform: none; } }
+#st-clip { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; padding: 0 6px; border-radius: 4px; color: var(--accent); background: var(--accent-bg); white-space: nowrap; }
+#st-clip[hidden] { display: none; }
+#st-clip .x { opacity: .55; font-size: 10px; }
+#st-clip:hover .x { opacity: 1; }
+#menu div.has-key, #menu-sub div.has-key { display: flex; align-items: center; gap: 24px; }
+#menu .mk, #menu-sub .mk { margin-left: auto; color: var(--fg2); font-size: 11.5px; }
 
 /* 이미지 뷰어 */
 .imgv { position: relative; flex: 1; min-width: 0; overflow: hidden; background: #0b0c0e; color: #e8eaed; user-select: none; }

@@ -48,9 +48,9 @@ function rootRel(p) { return isMemo(p) ? { root: state.memoDir, rel: p.slice(6) 
 const absOf = (p) => (isExt(p) || isGal(p) ? p.slice(4) || '/' : isMemo(p) ? state.memoDir + '/' + p.slice(6) : state.root + '/' + p);
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, ms = 1800) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 1800);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
 async function copy(text, label = '복사됨') {
   try { await navigator.clipboard.writeText(text); }
@@ -59,6 +59,7 @@ async function copy(text, label = '복사됨') {
     document.execCommand('copy'); ta.remove();
   }
   toast(`${label} (${text.length.toLocaleString()}자)`);
+  clipCheck();   // 글자를 복사했으니 파일 복사 표시는 지운다 (macOS)
 }
 const setStatus = (msg, cls = '') => { const s = $('#st-msg'); s.textContent = msg || ''; s.className = cls; };
 
@@ -540,7 +541,7 @@ function connectEvents() {
 let lastActivate = 0;
 function onActivate() {
   if (document.hidden || Date.now() - lastActivate < 400) return;
-  lastActivate = Date.now(); onFsEvent({ all: true, paths: [] }); refreshGit();
+  lastActivate = Date.now(); onFsEvent({ all: true, paths: [] }); refreshGit(); clipCheck();   // 다른 앱에서 복사했으면 복사 표시를 지운다
   if (runUi.dir) loadRun();   // Run 폴더 감시가 놓친 변경 대비
 }
 window.addEventListener('focus', onActivate);
@@ -674,8 +675,9 @@ function validate() {
   const t = cur(); const pos = $('#st-pos'); pos.textContent = '';
   if (t && (t.kind === 'run' || t.kind === 'sql')) return setStatus('');
   if (t && t.kind === 'gallery') {
-    const d = t.g?.data, s = t.g?.tileList[t.g.sel]?._it;
-    return setStatus(d ? [`이미지 ${d.total.toLocaleString()}장`, d.dirs.length ? `폴더 ${d.dirs.length}` : '', d.others ? `기타 파일 ${d.others}` : '', s ? `${s.name}${s.w ? `  ${s.w}×${s.h}` : ''}  ${fmtSize(s.size)}` : ''].filter(Boolean).join(' · ') : '');
+    const d = t.g?.data, s = t.g?.tileList[t.g.sel]?._it, many = t.g?.picked.size > 1 ? galPicked(t) : null;
+    const selTxt = many ? `${many.length}장 선택 · ${fmtSize(many.reduce((a, x) => a + x._it.size, 0))}` : s && t.g.picked.has(s.name) ? `${s.name}${s.w ? `  ${s.w}×${s.h}` : ''}  ${fmtSize(s.size)}` : '';
+    return setStatus(d ? [`이미지 ${d.total.toLocaleString()}장`, d.dirs.length ? `폴더 ${d.dirs.length}` : '', d.others ? `기타 파일 ${d.others}` : '', selTxt].filter(Boolean).join(' · ') : '');
   }
   if (t && t.kind === 'diff') return setStatus(t.stat || '');
   if (t && t.kind === 'history') return setStatus(histStatus(t));
@@ -949,7 +951,8 @@ const closeMenus = () => { $('#menu').hidden = true; subMenu.hidden = true; };
 function fillMenu(m, items, isSub) {
   m.replaceChildren(...items.map(([label, fn, cls, sub]) => {
     if (label === '-') return el('hr');   // 구분선
-    const d = el('div', { textContent: label, className: (cls || '') + (sub ? ' has-sub' : '') });
+    const [txt, key] = label.split('\t');   // '이름\t⌘C' → 오른쪽에 단축키
+    const d = el('div', { className: (cls || '') + (sub ? ' has-sub' : '') + (key ? ' has-key' : '') }, txt, ...(key ? [el('span', { className: 'mk', textContent: key })] : []));
     if (sub) { const open = () => showSubMenu(d, sub); d.onmouseenter = open; d.onclick = (e) => { e.stopPropagation(); open(); }; }
     else { if (!isSub) d.onmouseenter = () => { subMenu.hidden = true; $('#menu').querySelector('.sub-open')?.classList.remove('sub-open'); }; d.onclick = () => { closeMenus(); fn(); }; }
     return d;
@@ -982,6 +985,7 @@ $('#tree').addEventListener('contextmenu', (ev) => {
   const items = [
     ['새 파일…', () => createEntry(baseDir, false)],
     ['새 폴더…', () => createEntry(baseDir, true)],
+    ...(clip || state.platform === 'darwin' ? (() => { const dest = baseDir ? state.root + '/' + baseDir : state.root, M = modKey(); return [['붙여넣기\t' + M + 'V', () => clipPaste(dest)], ['여기로 이동\t' + M + '⌥V', () => clipPaste(dest, true)]]; })() : []),
     ...(row ? [[favs.includes(favKey(p, isDir)) ? '즐겨찾기에서 제거' : '★ 즐겨찾기에 추가', () => toggleFavDir(favKey(p, isDir))]] : []),
     [isDir ? `${FM}에서 열기` : `${FM}에서 보기`, () => revealPath(p, 'reveal')],
     ...(isDir ? [['🖼 이미지 갤러리로 보기', () => openGallery(p ? state.root + '/' + p : state.root)]] : []),
@@ -3631,6 +3635,7 @@ function imageViewer(t, o = {}) {
 // 폴더를 열면(⌘O / Shift 두 번에 폴더 경로 붙여넣기, 트리 우클릭) 메인 화면에 이미지를 원래 비율 그대로 행 단위로 채워 보여 준다.
 // · 썸네일은 서버 축소본(/thumb, 캐시)을 화면 근처에 왔을 때만, 동시에 3개씩 요청 (보이는 것부터)  · 하위 폴더는 맨 앞 폴더 타일
 // · 클릭=선택, 더블클릭/Enter=전체화면 보기(검정 배경, ←/→·‹ ›, 앞뒤 미리 디코딩, Esc 로 목록)  · 보고 있는 폴더가 바뀌면 자동 반영
+// · 여러 장 선택: ⌘/Ctrl+클릭 하나씩, Shift+클릭(Shift+방향키) 범위, ⌘A 전체 → ⌘C 복사 / ⌘X 잘라내기 → 트리 폴더·갤러리에서 ⌘V (아래 '파일 클립보드')
 const galJoin = (dir, name) => (dir === '/' ? '' : dir) + '/' + name;
 const galThumb = (abs, w, ver) => `/thumb?root=%2F&path=${encodeURIComponent(abs.slice(1))}&w=${w}&v=${ver || 0}`;
 const GAL_GAP = 6;
@@ -3684,9 +3689,9 @@ function galleryView(t) {
   if (g?.dom) { // 탭을 다시 열었을 때: 그대로 붙이고, 떨어져 있던 동안의 변경을 다시 읽는다
     galWatchDir(t);
     if (!g.dom.isConnected) { requestAnimationFrame(() => { g.scroller.scrollTop = g.scroll; }); galRefresh(t); }
-    galRelayout(t); return g.dom;
+    galPaint(t); galRelayout(t); return g.dom;
   }
-  g = t.g = { seq: 0, data: null, err: null, tiles: new Map(), dirTiles: new Map(), tileList: [], sel: -1, scroll: 0, viewer: null };
+  g = t.g = { seq: 0, data: null, err: null, tiles: new Map(), dirTiles: new Map(), tileList: [], sel: -1, picked: new Set(), anchor: null, pendingPick: null, scroll: 0, viewer: null };   // sel=커서(번호), picked=고른 이름들, anchor=Shift 범위의 기준
   const root = el('div', { className: 'gal' + (store.get('galNames', true) ? '' : ' nonames'), tabIndex: -1 });
   const sc = el('div', { className: 'gal-scroll' }), grid = el('div', { className: 'gal-grid' });
   root.append(sc); Object.assign(g, { dom: root, scroller: sc, grid });
@@ -3701,32 +3706,41 @@ function galleryView(t) {
 }
 function galTile(t, it) {
   const abs = galJoin(t.dir, it.name), img = el('img', { alt: '', draggable: false, decoding: 'async' });
-  const tile = el('div', { className: 'gal-tile', title: it.name }, img, el('span', { className: 'gal-name', textContent: it.name }));
+  const tile = el('div', { className: 'gal-tile', title: it.name }, img, el('span', { className: 'gal-name', textContent: it.name }), el('span', { className: 'gal-chk' }), el('span', { className: 'gal-clip' }));
   Object.assign(tile, { _it: it, _abs: abs, _a: it.w && it.h ? it.w / it.h : 1, _w: 0, _need: 0, _vis: false });
   img.addEventListener('load', () => { // 헤더로 크기를 몰랐거나 EXIF 회전이 있으면 실제 비율로 다시 배치
     tile.classList.add('ok'); const a = img.naturalWidth / img.naturalHeight;
     if (a && Math.abs(a - tile._a) / tile._a > 0.02) { tile._a = a; galRelayout(t); }
   });
   img.addEventListener('error', () => tile.classList.add('bad'));
-  tile.onclick = () => galSelect(t, tile._i);
+  const macCtrl = (e) => state.platform === 'darwin' && e.ctrlKey && !e.metaKey;   // macOS 의 Ctrl+클릭은 원래 우클릭 → ⌘+클릭과 같게 쓴다
+  tile.onclick = (e) => { if (!macCtrl(e)) galSelect(t, tile._i, true, galHow(e)); };
   const dragArm = window.webkit?.messageHandlers?.dragArm;
   tile.onmousedown = (e) => {
+    if (macCtrl(e) && e.button !== 1) { tile._ctrlAt = Date.now(); galSelect(t, tile._i, true, e.shiftKey ? 'add' : 'toggle'); return; }   // 이어서 오는 contextmenu 는 무시 (브라우저마다 button 이 0 또는 2)
     if (e.button !== 0) return;
     loadImg('@ext' + abs, false);   // 더블클릭보다 먼저 전체화면용 이미지를 디코딩해 둔다
-    if (dragArm && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) dragArm.postMessage([tile._abs]);   // 앱(macOS): 이대로 끌면 실제 파일로 나간다 → Chrome 업로드 칸·Finder·메신저 등 (복사만)
+    if (dragArm && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) { // 앱(macOS): 이대로 끌면 실제 파일로 나간다 → Chrome 업로드 칸·Finder·메신저 등 (복사만). 고른 것 중 하나를 끌면 고른 것 전부
+      const g = t.g, many = g.picked.size > 1 && g.picked.has(it.name);
+      dragArm.postMessage(many ? galPicked(t).map((x) => x._abs) : [tile._abs]);
+    }
   };
-  tile.ondblclick = () => galView(t, tile._i);
+  tile.ondblclick = (e) => { if (!e.metaKey && !e.ctrlKey && !e.shiftKey) galView(t, tile._i); };
   tile.oncontextmenu = (e) => {
-    e.preventDefault(); galSelect(t, tile._i);
-    const FM = state.platform === 'darwin' ? 'Finder' : '파일 관리자';
+    e.preventDefault();
+    if (Date.now() - (tile._ctrlAt || 0) < 1500) { tile._ctrlAt = 0; return; }
+    galSelect(t, tile._i, false, 'cursor');   // 고른 것 위에서 열면 선택을 그대로 둔다 (Finder 처럼)
+    const sel = galPicked(t), n = sel.length, M = modKey(), FM = state.platform === 'darwin' ? 'Finder' : '파일 관리자';
     showMenu(e.clientX, e.clientY, [
-      ['전체화면으로 보기', () => galView(t, tile._i)],
-      ['탭으로 열기', () => openExternal(abs)],
-      ['기본 앱으로 열기', () => revealPath('@ext' + abs, 'open')],
+      ...(n > 1 ? [] : [['전체화면으로 보기', () => galView(t, tile._i)], ['탭으로 열기', () => openExternal(abs)], ['기본 앱으로 열기', () => revealPath('@ext' + abs, 'open')]]),
       [`${FM}에서 보기`, () => revealPath('@ext' + abs, 'reveal')],
       ['-'],
-      ['경로 복사', () => copy(abs, '전체 경로 복사됨')],
-      ['이름 복사', () => copy(it.name, '이름 복사됨')],
+      [`복사${n > 1 ? ` (${n}장)` : ''}\t${M}C`, () => galClip(t, 'copy')],
+      [`잘라내기${n > 1 ? ` (${n}장)` : ''}\t${M}X`, () => galClip(t, 'cut')],
+      ...(clip || state.platform === 'darwin' ? [['이 폴더에 붙여넣기\t' + M + 'V', () => clipPaste(t.dir)]] : []),
+      ['-'],
+      [`경로 복사${n > 1 ? ` (${n}개)` : ''}\t${M}⇧C`, () => galCopyPaths(t)],
+      [`이름 복사${n > 1 ? ` (${n}개)` : ''}`, () => copy(sel.map((x) => x._it.name).join('\n'), '이름 복사됨')],
     ]);
   };
   return tile;
@@ -3738,12 +3752,22 @@ function galDirTile(t, sd) {
     el('div', { className: 'gal-dir-cover' }, cover),
     el('div', { className: 'gal-dir-meta' }, el('span', { className: 'gal-dir-name', textContent: sd.name }), el('span', { className: 'gal-dir-n', textContent: sd.images ? sd.images + '장' : '' })));
   tile.onclick = () => galGo(t, abs);
+  tile.oncontextmenu = (e) => {
+    e.preventDefault(); const M = modKey();
+    showMenu(e.clientX, e.clientY, [
+      ['열기', () => galGo(t, abs)],
+      ['-'],
+      ['여기에 붙여넣기\t' + M + 'V', () => clipPaste(abs)],
+      ['여기로 이동\t' + M + '⌥V', () => clipPaste(abs, true)],
+      ...(galPicked(t).length ? [['-'], [`고른 ${galPicked(t).length}장을 여기로 이동`, () => galMoveTo(t, abs)]] : []),
+    ]);
+  };
   return tile;
 }
 function galBuild(t) {
   const g = t.g, sc = g?.scroller; if (!sc) return;
   if (g.err || !g.data) { g.tileList = []; g.sel = -1; sc.replaceChildren(el('div', { className: 'gal-empty', textContent: g.err ? '폴더를 열 수 없습니다: ' + g.err : '불러오는 중…' })); return; }
-  const d = g.data, selName = g.tileList[g.sel]?._it.name, tiles = new Map(), dirTiles = new Map();
+  const d = g.data, curName = g.tileList[g.sel]?._it.name, tiles = new Map(), dirTiles = new Map();
   g.tileList = galItems(t).map((it, i) => { // 바뀌지 않은 타일은 그대로 써서 다시 불러오지 않는다 (자동 갱신 때 깜빡임 없음)
     let tile = g.tiles.get(it.name);
     if (!tile || tile._it.mtime !== it.mtime || tile._it.size !== it.size) { if (tile) g.io.unobserve(tile); tile = galTile(t, it); g.io.observe(tile); }
@@ -3754,8 +3778,13 @@ function galBuild(t) {
   g.tiles = tiles;
   const dirs = d.dirs.map((sd) => { const k = `${sd.name}|${sd.images}|${sd.cover}`; const x = g.dirTiles.get(k) || galDirTile(t, sd); dirTiles.set(k, x); return x; });
   g.dirTiles = dirTiles;
-  g.sel = selName != null ? g.tileList.findIndex((x) => x._it.name === selName) : -1;
-  g.tileList.forEach((x, i) => x.classList.toggle('sel', i === g.sel));
+  const pp = g.pendingPick, first = pp && Date.now() - pp.at < 5000 ? g.tileList.find((x) => pp.names.has(x._it.name)) : null;
+  if (first) { g.pendingPick = null; g.picked = new Set([...pp.names].filter((n) => tiles.has(n))); g.sel = first._i; g.anchor = first._it.name; requestAnimationFrame(() => first.scrollIntoView({ block: 'nearest' })); }   // 방금 붙여넣은 것들을 골라 둔다
+  else {
+    g.sel = curName != null ? g.tileList.findIndex((x) => x._it.name === curName) : -1;
+    for (const n of g.picked) if (!tiles.has(n)) g.picked.delete(n);   // 사라진(옮겨진) 것은 선택에서 뺀다
+  }
+  galPaint(t);
   const parts = [];
   if (dirs.length) parts.push(el('div', { className: 'gal-dirs' }, ...dirs));
   parts.push(g.grid);
@@ -3804,13 +3833,36 @@ function galPump() { // 동시에 3개까지 (서버 변환도 3개씩이고, �
     img.src = galThumb(tile._abs, tile._w, tile._it.mtime);
   }
 }
-function galSelect(t, i, scroll = true) {
+// how: '' 하나만 · 'toggle' ⌘/Ctrl+클릭 · 'range' Shift+클릭 (기준점부터 여기까지만) · 'add' ⌘/Ctrl+Shift+클릭 (범위를 더함) · 'cursor' 고른 것 안이면 선택은 그대로 두고 커서만
+const galHow = (e) => (e.shiftKey ? (e.metaKey || e.ctrlKey ? 'add' : 'range') : e.metaKey || e.ctrlKey ? 'toggle' : '');
+function galSelect(t, i, scroll = true, how = '') {
   const g = t.g; if (!g || i < 0 || i >= g.tileList.length) return;
-  g.tileList[g.sel]?.classList.remove('sel'); g.sel = i;
-  const tile = g.tileList[i]; tile.classList.add('sel');
-  if (scroll) tile.scrollIntoView({ block: 'nearest' });
+  const name = g.tileList[i]._it.name;
+  if (how === 'toggle') { if (!g.picked.delete(name)) g.picked.add(name); g.anchor = name; }
+  else if (how === 'range' || how === 'add') {
+    let a = g.tileList.findIndex((x) => x._it.name === g.anchor);
+    if (a < 0) { a = g.sel >= 0 ? g.sel : i; g.anchor = g.tileList[a]._it.name; }
+    if (how === 'range') g.picked = new Set();
+    for (let k = Math.min(a, i); k <= Math.max(a, i); k++) g.picked.add(g.tileList[k]._it.name);
+  } else if (how !== 'cursor' || !g.picked.has(name)) { g.picked = new Set([name]); g.anchor = name; }
+  g.sel = i; galPaint(t);
+  if (scroll) g.tileList[i].scrollIntoView({ block: 'nearest' });
   if (t.path === state.active) validate();
 }
+function galSelectAll(t) {
+  const g = t.g; if (!g?.tileList.length) return;
+  g.picked = new Set(g.tileList.map((x) => x._it.name)); if (g.sel < 0) g.sel = 0;
+  galPaint(t); if (t.path === state.active) validate();
+}
+function galPaint(t) { // 선택(.sel) · 여러 장일 때 커서(.cur)와 체크 표시 · 복사(.clip)/잘라내기(.cut) 표시
+  const g = t.g; if (!g?.dom) return; const multi = g.picked.size > 1;
+  g.dom.classList.toggle('multi', multi);
+  g.tileList.forEach((x, i) => {
+    x.classList.toggle('sel', g.picked.has(x._it.name)); x.classList.toggle('cur', multi && i === g.sel);
+    const c = !!clip?.paths.has(x._abs); x.classList.toggle('clip', c); x.classList.toggle('cut', c && clip.mode === 'cut');
+  });
+}
+const galPicked = (t) => (t.g ? t.g.tileList.filter((x) => t.g.picked.has(x._it.name)) : []);
 function galVert(g, i, d) { // 위/아래 행에서 가로 위치가 가장 가까운 타일
   const curT = g.tileList[i]; if (!curT) return 0;
   const next = d > 0 ? curT.parentElement.nextElementSibling : curT.parentElement.previousElementSibling;
@@ -3819,32 +3871,44 @@ function galVert(g, i, d) { // 위/아래 행에서 가로 위치가 가장 가�
   for (const c of next.children) { const dd = Math.abs(c.offsetLeft + c.offsetWidth / 2 - cx); if (dd < bd) { bd = dd; best = c; } }
   return best ? best._i : i;
 }
-// 선택한(전체화면에서는 보고 있는) 이미지의 경로: 전체 경로, rel=true 면 워크스페이스 기준 상대 경로(밖이면 파일 이름)
-function galSelPath(t, rel) {
-  const tile = t.g?.tileList[t.g.sel]; if (!tile) return null;
-  return !rel ? tile._abs : tile._abs.startsWith(state.root + '/') ? tile._abs.slice(state.root.length + 1) : tile._it.name;
+function galCopyPaths(t) { // 고른 이미지들의 전체 경로 (줄마다 하나)
+  const ps = galPicked(t).map((x) => x._abs); if (!ps.length) return;
+  copy(ps.join('\n'), ps.length > 1 ? `경로 ${ps.length}개 복사됨` : '전체 경로 복사됨');
 }
-document.addEventListener('copy', (e) => { // 메뉴(네이티브 앱의 편집 > 복사하기)로 들어온 복사: 갤러리에서는 선택한 이미지 경로
-  const t = cur(); if (t?.kind !== 'gallery' || !document.activeElement?.closest?.('.gal') || String(getSelection())) return;
-  const p = galSelPath(t); if (!p) return;
-  e.preventDefault(); e.clipboardData.setData('text/plain', p); toast('전체 경로 복사됨');
+function galClip(t, mode) { // 고른 이미지들을 파일로 복사/잘라내기
+  const ps = galPicked(t).map((x) => x._abs);
+  if (!ps.length) return toast('먼저 이미지를 고르세요');
+  clipSet(ps, mode);
+}
+async function galMoveTo(t, dest) { const ps = galPicked(t).map((x) => x._abs); if (ps.length) await transfer(ps, dest, true); }
+const galFocused = () => cur()?.kind === 'gallery' && !!document.activeElement?.closest?.('.gal') && !cur().g?.viewer;
+for (const kind of ['copy', 'cut']) document.addEventListener(kind, (e) => { // 메뉴(네이티브 앱의 편집 > 복사하기/오려두기)로 들어온 요청: 갤러리에서는 고른 이미지를 파일로
+  if (!galFocused() || String(getSelection())) return;
+  e.preventDefault(); galClip(cur(), kind);
+});
+document.addEventListener('paste', (e) => { // 편집 > 붙여넣기 메뉴로 들어온 경우 (단축키는 keydown 에서 이미 처리)
+  if (e.target.closest?.('input, textarea, [contenteditable]') || Date.now() - clipKeyAt < 600) return;
+  if (galFocused()) { e.preventDefault(); clipPaste(cur().dir); }
+  else if (inTree()) { e.preventDefault(); treePaste(false); }
 });
 function galKey(t, e) {
   const g = t.g; if (!g || e.target.closest?.('input, textarea, [contenteditable]')) return;
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.code === 'KeyC' || e.key.toLowerCase() === 'c') && !String(getSelection())) { // ⌘/Ctrl+C: 이미지 경로 복사 (Shift: 상대 경로)
-    const p = galSelPath(t, e.shiftKey); if (!p) return;
-    e.preventDefault(); copy(p, e.shiftKey ? '상대 경로 복사됨' : '전체 경로 복사됨'); return;
-  }
+  const mod = (e.metaKey || e.ctrlKey) && !String(getSelection()), code = e.code, n = g.tileList.length, k = e.key;
+  if (mod && code === 'KeyC') { e.preventDefault(); e.shiftKey ? galCopyPaths(t) : !e.altKey && galClip(t, 'copy'); return; }   // ⌘C 파일로 복사 · ⌘⇧C 경로 복사
+  if (mod && code === 'KeyX' && !e.shiftKey && !e.altKey) { e.preventDefault(); galClip(t, 'cut'); return; }
+  if (mod && code === 'KeyV' && !e.shiftKey) { e.preventDefault(); clipKeyAt = Date.now(); clipPaste(t.dir, e.altKey); return; }   // ⌘V 붙여넣기 · ⌘⌥V 이동
+  if (mod && code === 'KeyA' && !e.shiftKey && !e.altKey) { e.preventDefault(); galSelectAll(t); return; }
   if (g.viewer || e.metaKey || e.ctrlKey || e.altKey) return;
-  const n = g.tileList.length, k = e.key; let i = g.sel;
+  let i = g.sel; const how = e.shiftKey ? 'range' : '';   // Shift+방향키: 기준점부터 범위 선택
   if (k === 'Enter' || k === ' ') { if (i >= 0) galView(t, i); }
   else if (k === 'Backspace') { if (g.data?.parent) galGo(t, g.data.parent); }
+  else if (k === 'Escape' && g.picked.size > 1) galSelect(t, i, false);   // 여러 장 선택 → 커서 하나만
   else if (!n) return;
-  else if (k === 'ArrowRight') galSelect(t, Math.min(n - 1, i + 1));
-  else if (k === 'ArrowLeft') galSelect(t, Math.max(0, i - 1));
-  else if (k === 'ArrowDown' || k === 'ArrowUp') galSelect(t, i < 0 ? 0 : galVert(g, i, k === 'ArrowDown' ? 1 : -1));
-  else if (k === 'Home') galSelect(t, 0);
-  else if (k === 'End') galSelect(t, n - 1);
+  else if (k === 'ArrowRight') galSelect(t, Math.min(n - 1, i + 1), true, how);
+  else if (k === 'ArrowLeft') galSelect(t, Math.max(0, i - 1), true, how);
+  else if (k === 'ArrowDown' || k === 'ArrowUp') galSelect(t, i < 0 ? 0 : galVert(g, i, k === 'ArrowDown' ? 1 : -1), true, how);
+  else if (k === 'Home') galSelect(t, 0, true, how);
+  else if (k === 'End') galSelect(t, n - 1, true, how);
   else return;
   e.preventDefault();
 }
@@ -3853,7 +3917,7 @@ function galView(t, i) { // 전체화면 보기: 목록은 갤러리 순서 그�
   const list = g.tileList.map((x) => '@ext' + x._abs);
   const box = imageViewer({ path: list[i] }, {
     list, idx: i,
-    onShow: (_p, j) => galSelect(t, j, false),
+    onShow: (_p, j) => galSelect(t, j, false, 'cursor'),
     onClose: () => {
       box.remove(); g.viewer = null; imgv.cur = null;
       const tile = g.tileList[g.sel]; if (tile) requestAnimationFrame(() => tile.scrollIntoView({ block: 'nearest' }));
@@ -3862,6 +3926,81 @@ function galView(t, i) { // 전체화면 보기: 목록은 갤러리 순서 그�
   });
   g.viewer = box; g.dom.append(box); box.enterFs();
 }
+
+// ───────── 파일 클립보드: 갤러리에서 복사/잘라내기 → 트리 폴더·갤러리에 붙여넣기 ─────────
+// 갤러리에서 ⌘C(복사)·⌘X(잘라내기) → 왼쪽 트리에서 폴더를 고르고(파일을 고르면 그 파일의 폴더) ⌘V, 또는 갤러리 화면에서 ⌘V(지금 폴더).
+// 이동: ⌘X 후 ⌘V, 또는 Finder 처럼 ⌘C 후 ⌘⌥V. 하위 폴더 타일 우클릭 → 여기에 붙여넣기/이동. 이름이 겹치면 덮어쓰지 않고 '이름 2.jpg'.
+// macOS 는 시스템 클립보드에 '파일'로 올린다 → Finder·메신저에도 붙여넣을 수 있고, Finder 에서 ⌘C 한 파일도 여기로 붙여넣을 수 있다.
+// 표시: 복사한 타일은 점선 테두리 + '📋 복사됨' (잘라내기는 흐리게 + '✂ 잘라냄'), 하단 상태바에 개수 (클릭하면 취소). 그 사이 다른 것을 복사하면 표시가 사라진다.
+const modKey = () => (state.platform === 'darwin' ? '⌘' : 'Ctrl+');
+const ROOT_ALL = '@ext/';   // api(): 경로를 / 기준(절대경로)으로 다룬다
+let clip = null, clipKeyAt = 0, clipBusy = false, clipPending = null;   // clip: { mode: 'copy'|'cut', paths: Set(절대경로), cc: macOS 클립보드 changeCount (다른 OS·실패 시 null) }
+function clipSet(paths, mode) { return (clipPending = clipSetNow(paths, mode).finally(() => { clipPending = null; })); }   // 바로 이어서 ⌘V 를 눌러도 올린 뒤에 붙여넣는다
+async function clipSetNow(paths, mode) {
+  let cc = null;
+  try { cc = (await api('POST', 'clip/write', { path: ROOT_ALL }, { paths })).cc; }
+  catch (e) { toast('시스템 클립보드에 올리지 못했습니다 (이 앱 안에서는 붙여넣을 수 있음): ' + e.message, 3500); }
+  clip = { mode, paths: new Set(paths), cc }; clipShow(true);
+  toast(`${paths.length}장 ${mode === 'cut' ? '잘라냄' : '복사됨'} — 트리에서 폴더를 고르고 ${modKey()}V`, 2600);
+}
+function clipClear() { if (!clip) return; clip = null; clipShow(); }
+function clipShow(flash) { // 상태바 + 보이는 갤러리의 타일 표시
+  const chip = $('#st-clip'), M = modKey(); chip.hidden = !clip;
+  if (clip) {
+    const cut = clip.mode === 'cut';
+    chip.className = cut ? 'cut' : '';
+    chip.replaceChildren(el('span', { textContent: `${cut ? '✂' : '📋'} ${clip.paths.size}개 ${cut ? '잘라냄' : '복사됨'}` }), el('span', { className: 'x', textContent: '✕' }));
+    chip.title = `${M}V: ${cut ? '옮기기' : '붙여넣기'} — 왼쪽 트리에서 고른 폴더 / 갤러리 화면이면 지금 폴더 / 하위 폴더 타일은 우클릭${cut ? '' : `\n${M}⌥V: 옮기기`}\n클릭: 취소`;
+  }
+  const t = cur(); if (t?.kind !== 'gallery' || !t.g) return;
+  galPaint(t);
+  if (flash && clip) for (const x of t.g.tileList) if (clip.paths.has(x._abs)) { x.classList.remove('flash'); void x.offsetWidth; x.classList.add('flash'); }
+}
+$('#st-clip').onclick = clipClear;
+async function clipCheck() { // macOS: 그 사이 다른 것을 복사했으면(changeCount 가 바뀜) 표시를 지운다
+  if (clip?.cc == null) return;
+  const sys = await api('POST', 'clip/read', { path: ROOT_ALL }).catch(() => null);
+  if (clip && sys?.cc != null && sys.cc !== clip.cc) clipClear();
+}
+for (const kind of ['copy', 'cut']) document.addEventListener(kind, (e) => setTimeout(() => { if (!e.defaultPrevented) clipCheck(); }, 100));   // 글자 복사 등
+async function clipPaste(dest, forceMove) { // dest: 절대경로 폴더. forceMove(⌘⌥V): 복사한 것도 옮긴다
+  if (clipBusy) return; clipBusy = true;
+  try {
+    await clipPending;
+    let paths = clip ? [...clip.paths] : [], move = clip?.mode === 'cut';
+    const sys = await api('POST', 'clip/read', { path: ROOT_ALL }).catch(() => null);
+    const viaSys = sys?.cc != null && (!clip || clip.cc != null);   // 시스템 클립보드에 올리지 못한 경우는 앱 안의 것만
+    if (viaSys && sys.cc !== clip?.cc) { clipClear(); paths = sys.paths || []; move = false; }   // 다른 곳(Finder 등)에서 복사한 파일 → 시스템 클립보드를 따른다
+    if (!paths.length) return toast(`붙여넣을 파일이 없습니다 — 갤러리에서 이미지를 고르고 ${modKey()}C`, 2600);
+    const r = await transfer(paths, dest, move || !!forceMove);
+    if (r?.move && r.done.length) { // 옮긴 뒤에는 클립보드를 비운다 (옛 위치를 다시 붙여넣지 않게)
+      clip = null; clipShow();
+      if (viaSys) api('POST', 'clip/write', { path: ROOT_ALL }, { paths: [] }).catch(() => {});
+    }
+  } finally { clipBusy = false; }
+}
+async function transfer(paths, dest, move) { // 복사/이동 + 결과 알림 + 화면 갱신
+  let r; try { r = await api('POST', 'fs/transfer', { path: ROOT_ALL }, { paths, dest, move }); }
+  catch (e) { toast((move ? '옮기기' : '붙여넣기') + ' 실패: ' + e.message, 3500); return null; }
+  const n = r.done.length, ren = r.done.filter((x) => x.renamed).length;
+  const msg = [n ? `${n}개 ${move ? '옮김' : '붙여넣음'} → ${r.dest.split('/').pop() || '/'}` : '', ren ? `이름이 겹친 ${ren}개는 번호를 붙임` : '',
+    r.skipped.length ? `이미 그 폴더에 있는 ${r.skipped.length}개는 그대로` : '', r.errors.length ? `실패 ${r.errors.length}개 — ${r.errors[0]}` : ''].filter(Boolean).join(' · ');
+  toast(msg || '바뀐 것이 없습니다', r.errors.length || ren ? 4500 : 2200);
+  if (move && clip && r.done.some((x) => clip.paths.has(x.from))) clipClear();   // 클립보드에 있던 것을 다른 방법(타일 우클릭)으로 옮김
+  if (n && (r.dest === state.root || r.dest.startsWith(state.root + '/'))) { for (let d = r.dest.slice(state.root.length + 1); d; d = dirOf(d)) state.expanded.add(d); persistTabs(); }   // 붙여넣은 폴더를 트리에서 펼친다
+  childrenCache.clear(); renderTree();
+  const names = new Set(r.done.map((x) => x.to.split('/').pop()));
+  for (const t of state.tabs) if (t.kind === 'gallery' && t.g) {
+    if ((t.g.data?.path || t.dir) === r.dest && n) { t.g.pendingPick = { names, at: Date.now() }; galLoad(t); }   // 붙여넣은 것들을 골라 둔다
+    else if (move) galRefresh(t);
+  }
+  return { ...r, move };
+}
+function treePaste(forceMove) { const d = dirOfSel(); clipPaste(d ? state.root + '/' + d : state.root, forceMove); }   // 고른 폴더 (파일이면 그 파일의 폴더)
+document.addEventListener('keydown', (e) => { // 트리: ⌘V 붙여넣기 · ⌘⌥V 옮기기
+  if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.code !== 'KeyV' || !inTree() || e.target.closest?.('input, textarea')) return;
+  e.preventDefault(); clipKeyAt = Date.now(); treePaste(e.altKey);
+}, true);
 
 // ───────── 끌어다 놓기: 창 어디에든 이미지·폴더·파일을 놓으면 바로 연다 ─────────
 // · 앱(macOS): 네이티브 셸이 끌고 온 파일의 실제 경로를 window.ssDragPaths 로 알려 준다 → 경로로 연다

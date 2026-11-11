@@ -262,6 +262,47 @@ async function galleryList(dir) {
   });
   return { path: dir, parent: path.dirname(dir) !== dir ? path.dirname(dir) : null, dirs: subs, images, others, total: imgs.length, truncated: imgs.length > GALLERY_MAX };
 }
+
+// ───────── 파일 복사/붙여넣기 (갤러리 ⌘C/⌘X → 트리 폴더·갤러리 ⌘V) ─────────
+// macOS 는 시스템 클립보드에 '파일'로 올린다 → Finder·메신저·업로드 칸에도 붙여넣을 수 있고, Finder 에서 ⌘C 한 파일도 여기로 붙여넣을 수 있다.
+// changeCount 로 "우리가 올린 그대로인지"를 판단한다 (그 사이 다른 것을 복사했으면 클립보드 쪽을 따른다). 그 밖의 OS 는 웹 UI 안에서만.
+const PB_WRITE = `ObjC.import('AppKit');function run(a){const pb=$.NSPasteboard.generalPasteboard;pb.clearContents;if(a.length)pb.writeObjects($(a.map((p)=>$.NSURL.fileURLWithPath(p))));return String(pb.changeCount)}`;
+const PB_READ = `ObjC.import('AppKit');function run(){const pb=$.NSPasteboard.generalPasteboard,o=$.NSDictionary.dictionaryWithObjectForKey($.NSNumber.numberWithBool(true),$.NSPasteboardURLReadingFileURLsOnlyKey),r=pb.readObjectsForClassesOptions($.NSArray.arrayWithObject($.NSURL),o),out=[];if(r&&!r.isNil())for(let i=0;i<r.count;i++)out.push(ObjC.unwrap(r.objectAtIndex(i).path));return JSON.stringify({cc:Number(pb.changeCount),paths:out})}`;
+async function clipWrite(paths) {
+  if (process.platform !== 'darwin') return { cc: null };
+  return { cc: Number((await execP('osascript', ['-l', 'JavaScript', '-e', PB_WRITE, ...paths], { timeout: 10000 })).trim()) };
+}
+async function clipRead() {
+  if (process.platform !== 'darwin') return { cc: null, paths: null };
+  return JSON.parse(await execP('osascript', ['-l', 'JavaScript', '-e', PB_READ], { timeout: 10000 }));
+}
+async function freeName(dir, name, isDir) { // 같은 이름이 있으면 Finder 처럼 '이름 2.jpg', '이름 3.jpg' … (폴더는 '이름 2')
+  const ext = isDir ? '' : path.extname(name), stem = name.slice(0, name.length - ext.length);
+  for (let i = 1; i < 10000; i++) {
+    const cand = i === 1 ? name : `${stem} ${i}${ext}`;
+    try { await fsp.lstat(path.join(dir, cand)); } catch (e) { if (e.code === 'ENOENT') return cand; throw e; }
+  }
+  throw httpError(409, 'too many files with the same name');
+}
+async function fsTransfer(srcs, dest, move) { // 덮어쓰지 않는다 (이름이 겹치면 번호를 붙임). 하나가 실패해도 나머지는 계속
+  const destReal = await fsp.realpath(dest);
+  if (!(await fsp.stat(destReal)).isDirectory()) throw httpError(400, 'not a directory');
+  const done = [], skipped = [], errors = [];
+  for (const src of srcs) {
+    const name = path.basename(src);
+    try {
+      const st = await fsp.lstat(src);
+      if (move && (await fsp.realpath(path.dirname(src))) === destReal) { skipped.push(name); continue; }   // 이미 그 폴더에 있음
+      if (st.isDirectory()) { const s = await fsp.realpath(src); if (destReal === s || destReal.startsWith(s + path.sep)) { errors.push(`${name}: 폴더를 자기 안으로 넣을 수 없습니다`); continue; } }
+      const to = path.join(destReal, await freeName(destReal, name, st.isDirectory()));
+      const cp = () => fsp.cp(src, to, { recursive: true, force: false, errorOnExist: true, preserveTimestamps: true });
+      if (!move) await cp();
+      else { try { await fsp.rename(src, to); } catch (e) { if (e.code !== 'EXDEV') throw e; await cp(); await fsp.rm(src, { recursive: true }); } }   // 다른 디스크: 복사 후 원본 삭제
+      done.push({ from: src, to, renamed: path.basename(to) !== name });
+    } catch (e) { errors.push(`${name}: ${e.code === 'ENOENT' ? '원본이 없습니다' : e.message}`); }
+  }
+  return { dest: destReal, done, skipped, errors };
+}
 const dirWatchers = new Map(); // 절대경로 → { w, clients, names, timer } : 갤러리 화면이 보고 있는 폴더 (재귀 X)
 let thumbRunning = 0; const thumbQueue = [], thumbJobs = new Map();
 const limited = (fn) => new Promise((resolve, reject) => {   // 동시에 3개까지만 변환
@@ -1161,6 +1202,20 @@ async function api(req, res, url, root) {
       const dir = await fsp.realpath(resolveSafe(root, p));
       if (!isDirSafe(dir)) throw httpError(400, 'not a directory');
       return send(res, 200, await galleryList(dir));
+    }
+    case 'POST /api/clip/write': { // 파일들을 시스템 클립보드에 올린다 (빈 목록 = 비우기)
+      const { paths = [] } = JSON.parse((await readBody(req)) || '{}');
+      if (!Array.isArray(paths) || paths.length > 10000) throw httpError(400, 'bad paths');
+      return send(res, 200, await clipWrite(paths.map((x) => resolveSafe(root, String(x)))));
+    }
+    case 'POST /api/clip/read':   // 클립보드의 파일 경로 (POST: 다른 사이트가 읽어 가지 못하게 X-SS 헤더를 요구)
+      return send(res, 200, await clipRead());
+    case 'POST /api/fs/transfer': { // 복사(또는 move=true 이동)해서 dest 폴더에 넣는다
+      const { paths = [], dest, move = false } = JSON.parse((await readBody(req)) || '{}');
+      if (!Array.isArray(paths) || !paths.length || typeof dest !== 'string') throw httpError(400, 'bad request');
+      const r = await fsTransfer(paths.map((x) => resolveSafe(root, String(x))), resolveSafe(root, dest), !!move);
+      markDirty(root);
+      return send(res, 200, r);
     }
     case 'GET /api/dirwatch': { // 폴더 하나의 변경을 SSE 로 알린다 (갤러리 자동 갱신)
       const dir = await fsp.realpath(resolveSafe(root, p));
