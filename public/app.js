@@ -3704,7 +3704,7 @@ function galleryView(t) {
   const root = el('div', { className: 'gal' + (store.get('galNames', true) ? '' : ' nonames'), tabIndex: -1 });
   const sc = el('div', { className: 'gal-scroll' }), grid = el('div', { className: 'gal-grid' });
   root.append(sc); Object.assign(g, { dom: root, scroller: sc, grid });
-  sc.onscroll = () => { g.scroll = sc.scrollTop; };
+  sc.onscroll = () => { if (!galHolding(g)) g.scroll = sc.scrollTop; };   // 전체화면 보기 중·직후엔 창 크기 변화로 생긴 스크롤은 기억하지 않는다
   g.ro = new ResizeObserver(() => galRelayout(t)); g.ro.observe(sc);
   g.io = new IntersectionObserver((ents) => { for (const e of ents) { e.target._vis = e.isIntersecting; if (e.isIntersecting) galWant(e.target); } }, { root: sc, rootMargin: '900px 0px' });
   root.addEventListener('keydown', (e) => galKey(t, e));
@@ -3844,6 +3844,7 @@ function galPump() { // 동시에 3개까지 (서버 변환도 3개씩이고, �
 }
 // how: '' 하나만 · 'toggle' ⌘/Ctrl+클릭 · 'range' Shift+클릭 (기준점부터 여기까지만) · 'add' ⌘/Ctrl+Shift+클릭 (범위를 더함) · 'cursor' 고른 것 안이면 선택은 그대로 두고 커서만
 const galHow = (e) => (e.shiftKey ? (e.metaKey || e.ctrlKey ? 'add' : 'range') : e.metaKey || e.ctrlKey ? 'toggle' : '');
+  if (galHolding(g)) galKeepPos(t);
 function galSelect(t, i, scroll = true, how = '') {
   const g = t.g; if (!g || i < 0 || i >= g.tileList.length) return;
   const name = g.tileList[i]._it.name;
@@ -3929,7 +3930,8 @@ function galView(t, i) { // 전체화면 보기: 목록은 갤러리 순서 그�
     onShow: (_p, j) => galSelect(t, j, false, 'cursor'),
     onClose: () => {
       box.remove(); g.viewer = null; imgv.cur = null;
-      const tile = g.tileList[g.sel]; if (tile) requestAnimationFrame(() => tile.scrollIntoView({ block: 'nearest' }));
+      g.hold = performance.now() + 1500;   // 창 전체화면이 풀리는 동안(크기가 몇 번 바뀜) 다시 배치돼도 보던 자리로
+      galKeepPos(t); requestAnimationFrame(() => galKeepPos(t));
       g.dom.focus({ preventScroll: true });
     },
   });
@@ -3953,8 +3955,17 @@ async function clipSetNow(paths, mode) {
   toast(`${paths.length}장 ${mode === 'cut' ? '잘라냄' : '복사됨'} — 트리에서 폴더를 고르고 ${modKey()}V`, 2600);
 }
 function clipClear() { if (!clip) return; clip = null; clipShow(); }
+  g.scroll = g.scroller.scrollTop;
 function clipShow(flash) { // 상태바 + 보이는 갤러리의 타일 표시
   const chip = $('#st-clip'), M = modKey(); chip.hidden = !clip;
+// 전체화면 보기 동안 창 크기가 바뀌면(네이티브 앱의 창 전체화면) 갤러리가 다시 배치되며 스크롤이 맨 위로 밀릴 수 있다 → 열기 전 위치를 붙잡아 둔다
+const galHolding = (g) => !!g.viewer || g.hold > performance.now();
+function galKeepPos(t) {
+  const g = t.g; if (!g) return;
+  g.scroller.scrollTop = g.scroll;
+  const tile = g.tileList[g.sel]; if (tile && !g.viewer) tile.scrollIntoView({ block: 'nearest' });   // 보기에서 다른 이미지로 넘겼으면 그 이미지가 보이게
+  if (!g.viewer) g.scroll = g.scroller.scrollTop;
+}
   if (clip) {
     const cut = clip.mode === 'cut';
     chip.className = cut ? 'cut' : '';
