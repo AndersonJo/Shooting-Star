@@ -172,7 +172,7 @@ $('#filter-info').onclick = () => openSettings();
 const wsKey = (k) => `ws:${state.root}:${k}`; // 폴더(워크스페이스)별 탭/펼침 상태
 const persistTabs = () => {
   if (!state.root) return;
-  store.set(wsKey('tabs'), state.tabs.filter((t) => t.kind !== 'diff' && t.kind !== 'history' && t.kind !== 'run' && t.kind !== 'sql' && !isDrop(t.path)).map((t) => ({ path: t.path, mode: t.mode })));
+  store.set(wsKey('tabs'), state.tabs.filter((t) => t.kind !== 'diff' && t.kind !== 'history' && t.kind !== 'run' && t.kind !== 'sql' && !isDrop(t.path)).map((t) => ({ path: t.path, mode: t.mode, ...(t.preview ? { preview: true } : {}) })));
   store.set(wsKey('active'), state.active);
   store.set(wsKey('expanded'), [...state.expanded]);
 };
@@ -232,9 +232,9 @@ async function refreshDir(p) { // 변경 후 해당 폴더 재로딩
   await renderTree();
 }
 function toggleDir(p) { state.expanded.has(p) ? state.expanded.delete(p) : state.expanded.add(p); persistTabs(); return renderTree(); }
-// 폴더: 클릭 = 선택 (파일의 절반 이상이 이미지면 메인 화면에 이미지 갤러리) / 더블클릭 = 펼치기·접기 (화살표 클릭도), 파일: 클릭 = 열기
+// 폴더: 클릭 = 선택 + 메인 화면에 이미지 갤러리 / 더블클릭 = 펼치기·접기 (화살표 클릭도), 파일: 클릭 = 열기
 // 더블클릭은 클릭 간격(0.4초)으로 직접 판정한다 (첫 클릭에 트리를 다시 그려도 두 번째 클릭을 놓치지 않는다)
-let lastDirClick = { p: '', t: 0 }, dirGalSeq = 0;
+let lastDirClick = { p: '', t: 0 };
 $('#tree').addEventListener('click', async (ev) => {
   const row = ev.target.closest('.row'); if (!row) return;
   const p = row.dataset.path; state.selected = p;
@@ -246,14 +246,14 @@ $('#tree').addEventListener('click', async (ev) => {
   document.querySelectorAll('#tree .row.sel').forEach((r) => r.classList.remove('sel')); row.classList.add('sel');
   dirGallery(p);
 });
-async function dirGallery(p) { // 이미지 폴더(파일의 절반 이상이 이미지)면 갤러리로 보여 준다. 갤러리를 보고 있으면 같은 탭에서 폴더만 바꾼다
-  const seq = ++dirGalSeq;
-  let ls = childrenCache.get(p); if (!ls) { try { ls = await loadDir(p); } catch { return; } }
-  if (seq !== dirGalSeq || state.selected !== p) return;   // 그 사이 다른 것을 골랐다
-  const files = ls.filter((x) => !x.dir && !x.name.startsWith('.')), imgs = files.filter((x) => IMG_EXT.has(extOf(x.name))).length;
-  if (!imgs || imgs * 2 < files.length) return;
-  const abs = state.root + '/' + p, t = cur();
-  if (t?.kind === 'gallery') { if (t.dir !== abs) galGo(t, abs); } else openGallery(abs, p);
+// 트리에서 연 갤러리는 '미리보기 탭' 하나를 계속 쓴다 (다른 폴더를 누르면 그 탭에서 폴더만 바뀜, 탭 이름은 기울임).
+// 따로 연 갤러리 탭(우클릭 → 갤러리로 보기, ⌘O, 끌어놓기 등)은 건드리지 않는다. 그 폴더가 이미 탭으로 열려 있으면 그 탭으로 간다.
+function dirGallery(p) {
+  const abs = state.root + '/' + p, open = tabOf('@gal' + abs);
+  flushAll();
+  if (open) { state.active = open.path; state.selected = p; persistTabs(); renderAll(); return; }
+  const pv = state.tabs.find((x) => x.kind === 'gallery' && x.preview);
+  if (pv) galGo(pv, abs); else openGallery(abs, p, true);
 }
 $('#tree').addEventListener('keydown', (ev) => { // 키보드: ↑↓ 이동, → 펼치기, ← 접기, Enter 폴더 접기·펼치기/파일 열기, 글자 입력 = 이름 검색
   if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && ((ev.key.length === 1 && ev.key !== ' ') || ev.key === 'Process')) { startTreeSearch(ev); return; }   // 한글(IME)은 'Process' 로 들어온다
@@ -567,7 +567,7 @@ function renderTabs() {
   box.replaceChildren(...state.tabs.map((t) => {
     const x = el('span', { className: 'x', title: '닫기 (⌘W)' });
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.path); };
-    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : ''), title: (t.kind === 'gallery' ? `이미지: ${t.dir}` : t.kind === 'diff' ? `${t.repoName}: ${t.file} — 변경 내용` : t.kind === 'history' ? histTitle(t) : t.kind === 'run' ? `Run: ${t.name}` : t.kind === 'sql' ? `SQL: ${t.connName}` : t.path) + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
+    const tab = el('div', { className: 'tab' + (t.path === state.active ? ' active' : '') + (dirty(t) ? ' dirty' : '') + (t.conflict ? ' conflict' : '') + (t.missing ? ' missing' : '') + (t.preview ? ' preview' : ''), title: (t.kind === 'gallery' ? `이미지: ${t.dir}` + (t.preview ? '\n트리에서 연 미리보기 탭 — 트리에서 다른 폴더를 누르면 이 탭에서 바뀝니다' : '') : t.kind === 'diff' ? `${t.repoName}: ${t.file} — 변경 내용` : t.kind === 'history' ? histTitle(t) : t.kind === 'run' ? `Run: ${t.name}` : t.kind === 'sql' ? `SQL: ${t.connName}` : t.path) + (t.conflict ? '  — 외부에서도 수정됨' : '') + (t.missing ? '  — 삭제/이동됨' : '') },
       el('span', { textContent: t.kind === 'gallery' ? '🖼 ' + (t.dir.split('/').pop() || '/') : isMemo(t.path) ? (memoTitle(t.content) || '새 메모') : t.kind === 'diff' ? t.file.split('/').pop() + ' (diff)' : t.kind === 'history' ? histLabel(t) : t.kind === 'run' ? '▶ ' + t.name : t.kind === 'sql' ? '🗄 ' + t.connName + (t.n > 1 ? ' #' + t.n : '') : t.path.split('/').pop() }), x);
     tab.onclick = () => { flushAll(); state.active = t.path; state.selected = t.kind === 'gallery' ? '' : t.path; persistTabs(); renderAll(); };
     tab.onauxclick = (e) => e.button === 1 && closeTab(t.path);
@@ -3651,11 +3651,11 @@ const GAL_GAP = 6;
 let galWatch = null;   // { dir, es } : 지금 보이는 갤러리 폴더만 감시 (호스트당 연결 수 한도 때문에 탭마다 열어 두지 않는다)
 const galQ = { run: 0, list: [] };
 
-function openGallery(abs, sel = '') { // sel: 트리에서 선택해 둘 항목 (트리에서 폴더를 눌러 연 경우)
+function openGallery(abs, sel = '', preview = false) { // sel: 트리에서 선택해 둘 항목, preview: 트리에서 연 미리보기 탭
   flushAll();
   abs = abs.replace(/\/+$/, '') || '/';
   const p = '@gal' + abs; let t = tabOf(p);
-  if (!t) { t = { path: p, kind: 'gallery', dir: abs, content: '', orig: '', mtime: 0, mode: 'view' }; state.tabs.push(t); }
+  if (!t) { t = { path: p, kind: 'gallery', dir: abs, content: '', orig: '', mtime: 0, mode: 'view', preview }; state.tabs.push(t); }
   state.active = p; state.selected = sel; persistTabs(); renderAll();
 }
 function galGo(t, abs) { // 같은 탭에서 다른 폴더로 (하위 폴더 타일, 상위 폴더, 하단 경로)
@@ -4618,7 +4618,7 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
   state.expanded = new Set(store.get(wsKey('expanded'), []));
   for (const s of store.get(wsKey('tabs'), [])) {
     if (isEnc(s.path)) continue;   // 암호화 문서는 다시 열 때 암호를 묻는다
-    if (isGal(s.path)) { state.tabs.push({ path: s.path, kind: 'gallery', dir: s.path.slice(4) || '/', content: '', orig: '', mtime: 0, mode: 'view' }); continue; }   // 이미지 갤러리
+    if (isGal(s.path)) { state.tabs.push({ path: s.path, kind: 'gallery', dir: s.path.slice(4) || '/', content: '', orig: '', mtime: 0, mode: 'view', preview: !!s.preview }); continue; }   // 이미지 갤러리
     if (kindOf(s.path) === 'image') { state.tabs.push({ path: s.path, content: '', orig: '', mtime: 0, kind: 'image', mode: 'view' }); continue; }
     try {
       const f = await api('GET', 'file', { path: s.path }); const kind = kindOf(s.path);

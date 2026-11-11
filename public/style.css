@@ -284,6 +284,7 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .tab.dirty .x::before { content: "●"; }
 .tab.dirty:not(:hover) .x { font-size: 0; }
 .tab.dirty:not(:hover) .x::before { font-size: 11px; color: var(--accent); }
+.tab.preview > span:first-child { font-style: italic; }   /* 트리에서 연 미리보기 갤러리 탭 (다른 폴더를 누르면 이 탭에서 바뀜) */
 .tab:not(.dirty) .x::before { content: "✕"; font-size: 10px; }
 .tab.dirty:hover .x::before { content: "✕"; font-size: 10px; }
 #toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 5px 10px; border-bottom: 1px solid var(--bd); min-height: 38px; background: var(--bg); }
