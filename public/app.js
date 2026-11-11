@@ -232,9 +232,9 @@ async function refreshDir(p) { // 변경 후 해당 폴더 재로딩
   await renderTree();
 }
 function toggleDir(p) { state.expanded.has(p) ? state.expanded.delete(p) : state.expanded.add(p); persistTabs(); return renderTree(); }
-// 폴더: 닫혀 있으면 클릭 = 펼치고 선택 / 이미 열려 있으면 클릭 = 선택만 / 더블클릭 = 닫기 (화살표 클릭도 접기·펼치기), 파일: 클릭 = 열기
+// 폴더: 클릭 = 선택 (파일의 절반 이상이 이미지면 메인 화면에 이미지 갤러리) / 더블클릭 = 펼치기·접기 (화살표 클릭도), 파일: 클릭 = 열기
 // 더블클릭은 클릭 간격(0.4초)으로 직접 판정한다 (첫 클릭에 트리를 다시 그려도 두 번째 클릭을 놓치지 않는다)
-let lastDirClick = { p: '', t: 0 };
+let lastDirClick = { p: '', t: 0 }, dirGalSeq = 0;
 $('#tree').addEventListener('click', async (ev) => {
   const row = ev.target.closest('.row'); if (!row) return;
   const p = row.dataset.path; state.selected = p;
@@ -242,10 +242,19 @@ $('#tree').addEventListener('click', async (ev) => {
   if (ev.target.closest('.arrow')) return toggleDir(p);
   const now = Date.now(), dbl = lastDirClick.p === p && now - lastDirClick.t < 400;
   lastDirClick = { p, t: dbl ? 0 : now };
-  if (dbl) return toggleDir(p);                       // 더블클릭: 닫기
-  if (!state.expanded.has(p)) return toggleDir(p);    // 닫혀 있으면 펼치고 선택
-  document.querySelectorAll('#tree .row.sel').forEach((r) => r.classList.remove('sel')); row.classList.add('sel');   // 이미 열려 있으면 선택만
+  if (dbl) return toggleDir(p);   // 더블클릭: 펼치기·접기
+  document.querySelectorAll('#tree .row.sel').forEach((r) => r.classList.remove('sel')); row.classList.add('sel');
+  dirGallery(p);
 });
+async function dirGallery(p) { // 이미지 폴더(파일의 절반 이상이 이미지)면 갤러리로 보여 준다. 갤러리를 보고 있으면 같은 탭에서 폴더만 바꾼다
+  const seq = ++dirGalSeq;
+  let ls = childrenCache.get(p); if (!ls) { try { ls = await loadDir(p); } catch { return; } }
+  if (seq !== dirGalSeq || state.selected !== p) return;   // 그 사이 다른 것을 골랐다
+  const files = ls.filter((x) => !x.dir && !x.name.startsWith('.')), imgs = files.filter((x) => IMG_EXT.has(extOf(x.name))).length;
+  if (!imgs || imgs * 2 < files.length) return;
+  const abs = state.root + '/' + p, t = cur();
+  if (t?.kind === 'gallery') { if (t.dir !== abs) galGo(t, abs); } else openGallery(abs, p);
+}
 $('#tree').addEventListener('keydown', (ev) => { // 키보드: ↑↓ 이동, → 펼치기, ← 접기, Enter 폴더 접기·펼치기/파일 열기, 글자 입력 = 이름 검색
   if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && ((ev.key.length === 1 && ev.key !== ' ') || ev.key === 'Process')) { startTreeSearch(ev); return; }   // 한글(IME)은 'Process' 로 들어온다
   if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) return;
@@ -3632,7 +3641,7 @@ function imageViewer(t, o = {}) {
 }
 
 // ───────── 이미지 갤러리 ─────────
-// 폴더를 열면(⌘O / Shift 두 번에 폴더 경로 붙여넣기, 트리 우클릭) 메인 화면에 이미지를 원래 비율 그대로 행 단위로 채워 보여 준다.
+// 폴더를 열면(트리에서 이미지 폴더 클릭, ⌘O / Shift 두 번에 폴더 경로 붙여넣기, 트리 우클릭) 메인 화면에 이미지를 원래 비율 그대로 행 단위로 채워 보여 준다.
 // · 썸네일은 서버 축소본(/thumb, 캐시)을 화면 근처에 왔을 때만, 동시에 3개씩 요청 (보이는 것부터)  · 하위 폴더는 맨 앞 폴더 타일
 // · 클릭=선택, 더블클릭/Enter=전체화면 보기(검정 배경, ←/→·‹ ›, 앞뒤 미리 디코딩, Esc 로 목록)  · 보고 있는 폴더가 바뀌면 자동 반영
 // · 여러 장 선택: ⌘/Ctrl+클릭 하나씩, Shift+클릭(Shift+방향키) 범위, ⌘A 전체 → ⌘C 복사 / ⌘X 잘라내기 → 트리 폴더·갤러리에서 ⌘V (아래 '파일 클립보드')
@@ -3642,12 +3651,12 @@ const GAL_GAP = 6;
 let galWatch = null;   // { dir, es } : 지금 보이는 갤러리 폴더만 감시 (호스트당 연결 수 한도 때문에 탭마다 열어 두지 않는다)
 const galQ = { run: 0, list: [] };
 
-function openGallery(abs) {
+function openGallery(abs, sel = '') { // sel: 트리에서 선택해 둘 항목 (트리에서 폴더를 눌러 연 경우)
   flushAll();
   abs = abs.replace(/\/+$/, '') || '/';
   const p = '@gal' + abs; let t = tabOf(p);
   if (!t) { t = { path: p, kind: 'gallery', dir: abs, content: '', orig: '', mtime: 0, mode: 'view' }; state.tabs.push(t); }
-  state.active = p; state.selected = ''; persistTabs(); renderAll();
+  state.active = p; state.selected = sel; persistTabs(); renderAll();
 }
 function galGo(t, abs) { // 같은 탭에서 다른 폴더로 (하위 폴더 타일, 상위 폴더, 하단 경로)
   abs = abs.replace(/\/+$/, '') || '/';
