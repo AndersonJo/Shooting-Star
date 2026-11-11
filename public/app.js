@@ -2744,12 +2744,29 @@ function runView(t) {
   if (t.preset && !m.presets?.[t.preset]) t.preset = '';
   for (const p of m.params) if (t.vals[p.name] === undefined) { const b = runBase(t, p); t.vals[p.name] = b !== undefined ? b : p.type === 'bool' ? false : ''; }
   const cmd = el('div', { className: 'rv-cmd' }), upd = () => { cmd.textContent = runCmdline(t); };
-  const where = el('div', { className: 'rv-where' });
+  const where = el('span', { className: 'rv-where' });
   const drawWhere = () => {   // 어디서(작업 폴더) 어떤 브랜치로 — 실행 전엔 지금 상태, 실행/지난 결과는 그때 상태
     const w = t.where; if (!w) { where.replaceChildren(); return; }
     const lab = t.viewing ? '그때 위치' : w.run ? '실행한 위치' : '실행할 위치';
-    where.replaceChildren(el('span', { className: 'wl', textContent: lab }), el('span', { className: 'wd', textContent: '📁 ' + (w.cwd || '').replace(state.home || '\u0000', '~'), title: w.cwd + (w.git?.repo && w.git.repo !== w.cwd ? '\nrepo: ' + w.git.repo : '') }),
-      w.git ? el('span', { className: 'wg' + (w.git.dirty ? ' dirty' : ''), textContent: '⎇ ' + gitLabel(w.git), title: w.git.dirty ? '커밋되지 않은 변경 ' + w.git.dirty + '개 (추적 중인 파일)' : '깨끗함' }) : el('span', { className: 'wn', textContent: 'git 저장소 아님' }));
+    const wd = el('span', { className: 'wd', textContent: '📁 ' + (w.cwd || '').replace(state.home || '\u0000', '~'), title: lab + ': ' + w.cwd + (w.git?.repo && w.git.repo !== w.cwd ? '\nrepo: ' + w.git.repo : '') });
+    if (!w.git) return where.replaceChildren(wd, el('span', { className: 'wn', textContent: 'git 저장소 아님' }));
+    const sw = !t.viewing;   // 지난 실행의 기록은 바꾸지 않는다
+    const wg = el('span', { className: 'wg' + (w.git.dirty ? ' dirty' : '') + (sw ? ' sw' : ''), textContent: '⎇ ' + gitLabel(w.git) + (sw ? ' ▾' : ''), title: (w.git.dirty ? '커밋되지 않은 변경 ' + w.git.dirty + '개 (추적 중인 파일)' : '깨끗함') + (sw ? '\n클릭: 브랜치 바꾸기' : '') });
+    if (sw) wg.onclick = (e) => { e.stopPropagation(); pickBranch(wg); };
+    where.replaceChildren(wd, wg);
+  };
+  const pickBranch = async (anchor) => {   // 실행 위치의 브랜치를 바꾼다 (git switch)
+    if (t.job) return toast('실행 중에는 브랜치를 바꿀 수 없습니다');
+    let r; try { r = await api('GET', 'run/branches', { name: t.name }); } catch (e) { return toast(e.message); }
+    const sw = async (b) => {
+      try { t.where = await api('POST', 'run/checkout', {}, { name: t.name, branch: b }); } catch (e) { return toast(e.message); }
+      drawWhere(); toast('⎇ ' + b + ' 로 전환됨' + (t.where.git?.dirty ? ` · 변경 ${t.where.git.dirty}개는 그대로` : ''));
+      if (state.view === 'git') loadGit();
+    };
+    const items = r.local.map((b) => [(b === r.current ? '✓ ' : '  ') + b, () => sw(b), b === r.current ? 'disabled' : '']);
+    if (r.remote.length) items.push(['-'], ...r.remote.map((x) => ['☁ ' + x.ref, () => sw(x.name)]));
+    if (!items.length) return toast('브랜치가 없습니다');
+    const rc = anchor.getBoundingClientRect(); showMenu(rc.left, rc.bottom + 2, items);
   };
   t.refreshWhere = async () => {   // 실행 전 미리보기 (브랜치를 바꾸고 돌아와도 맞게)
     if (t.job || t.viewing || t.where?.run) return;
@@ -2819,10 +2836,13 @@ function runView(t) {
   const ask = el('button', { textContent: 'Claude 에게', title: '로그/스크립트/설정 경로를 복사 — Claude 에 붙여넣으면 바로 로그를 읽고 디버깅합니다', onclick: () => copy(runDebugText(t), 'Claude 용 디버깅 정보 복사됨 — 붙여넣기 하세요') });
   const nOpt = m.params.length + (m.secrets || []).length + (presets.length ? 1 : 0);
   const fold = el('button', { className: 'rv-fold', title: '옵션 접기/펼치기 (실행하면 자동으로 접힘)', onclick: () => setFold(!t.fold) });
-  const top = el('div', { className: 'rv-top' },
-    el('div', { className: 'rv-title' }, m.name, m.danger ? el('span', { className: 'danger', textContent: 'danger' }) : ''),
-    el('div', { className: 'rv-desc', textContent: m.description || '(설명 없음)' }), fold, form, cmd, where,
-    el('div', { className: 'rv-act' }, go, stop, clear, cp, ask, st));
+  const desc = m.description || '(설명 없음)';
+  const top = el('div', { className: 'rv-top' },   // 1줄: 이름 · 설명 · 버튼 / 2줄: 옵션 토글 · 명령 · 위치 · 상태 / (펼치면) 옵션 폼
+    el('div', { className: 'rv-head' },
+      el('div', { className: 'rv-title' }, m.name, m.danger ? el('span', { className: 'danger', textContent: 'danger' }) : ''),
+      el('div', { className: 'rv-desc', textContent: desc, title: desc }),
+      el('div', { className: 'rv-act' }, go, stop, clear, cp, ask)),
+    el('div', { className: 'rv-meta' }, fold, cmd, where, st), form);
   function setFold(v) { t.fold = !!v; top.classList.toggle('fold', t.fold); fold.textContent = (t.fold ? '▸ 옵션' : '▾ 옵션') + (nOpt ? ` (${nOpt})` : ''); }
   setFold(t.fold); drawWhere(); t.refreshWhere();
   const box = el('div', { className: 'rv' }, top, out);
@@ -4426,7 +4446,11 @@ function drawPath(t) {
     });
     return;
   }
-  if (t.kind === 'run') { inner.textContent = (t.scriptPath || t.name).replace(state.home || '\u0000', '~'); inner.title = '등록된 스크립트'; return; }
+  if (t.kind === 'run') {   // 누르면 스크립트를 편집기로 연다
+    const label = (t.scriptPath || t.name).replace(state.home || '\u0000', '~');
+    if (!t.scriptPath) { inner.textContent = label; return; }
+    inner.append(Object.assign(el('span', { className: 'seg', textContent: label, title: '스크립트 열기 (편집)' }), { onclick: () => openExternal(t.scriptPath) })); return;
+  }
   if (t.kind === 'history') { inner.textContent = (t.repo.abs + (t.rel ? '/' + t.rel : '')).replace(state.home || '\u0000', '~') + (t.range ? `  ${t.range.a}–${t.range.b}줄` : ''); inner.title = 'Git 히스토리'; return; }
   if (t.kind === 'diff') { inner.textContent = (t.repo + '/' + t.file).replace(state.home || '\u0000', '~'); inner.title = '변경 내용 (diff)'; return; }
   if (isMemo(t.path)) { inner.textContent = ((state.memoDir || '') + '/' + t.path.slice(6)).replace(state.home || '\u0000', '~'); inner.title = '메모 파일 위치'; return; }

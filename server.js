@@ -1008,6 +1008,26 @@ async function api(req, res, url, root) {
       const dir = RUN.workdirOf(RUN.get(url.searchParams.get('name') || ''), root);
       return send(res, 200, { cwd: dir, git: RUN.gitInfo(dir) });
     }
+    case 'GET /api/run/branches': { // 실행 위치 repo 의 브랜치 (최근 커밋 순). 원격에만 있는 것은 따로
+      const dir = RUN.workdirOf(RUN.get(url.searchParams.get('name') || ''), root);
+      let out; try { out = await git(dir, ['for-each-ref', '--sort=-committerdate', '--format=%(refname)\t%(HEAD)', 'refs/heads', 'refs/remotes']); } catch (e) { throw httpError(400, gitMsg(e)); }
+      const local = [], remote = []; let current = null;
+      for (const l of out.split('\n')) {
+        const [ref, head] = l.split('\t'); if (!ref) continue;
+        if (ref.startsWith('refs/heads/')) { const b = ref.slice(11); local.push(b); if (head === '*') current = b; }
+        else if (ref.startsWith('refs/remotes/') && !ref.endsWith('/HEAD')) { const r = ref.slice(13); remote.push({ ref: r, name: r.slice(r.indexOf('/') + 1) }); }
+      }
+      const seen = new Set(local);
+      return send(res, 200, { current, local, remote: remote.filter((r) => !seen.has(r.name) && seen.add(r.name)) });
+    }
+    case 'POST /api/run/checkout': { // 실행 위치에서 브랜치 전환 (git switch: 원격 브랜치면 추적 브랜치를 만든다. 변경과 충돌하면 git 이 거절)
+      const { name, branch } = JSON.parse(await readBody(req));
+      if (typeof branch !== 'string' || !branch || branch.startsWith('-')) throw httpError(400, '브랜치 이름이 올바르지 않습니다');
+      const dir = RUN.workdirOf(RUN.get(name || ''), root);
+      if ([...RUN.jobs.values()].some((j) => !j.endedAt && j.cwd === dir)) throw httpError(409, '이 위치에서 실행 중인 스크립트가 있어 브랜치를 바꿀 수 없습니다');
+      try { await git(dir, ['switch', branch]); } catch (e) { throw httpError(500, gitMsg(e)); }
+      return send(res, 200, { cwd: dir, git: RUN.gitInfo(dir) });
+    }
     case 'GET /api/run/stream': { // 실행 출력 (SSE): 지금까지의 출력 → 이어서 실시간 → end
       const id = url.searchParams.get('id') || '', job = RUN.jobs.get(id);
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
