@@ -3644,7 +3644,7 @@ function imageViewer(t, o = {}) {
 // 폴더를 열면(트리에서 이미지 폴더 클릭, ⌘O / Shift 두 번에 폴더 경로 붙여넣기, 트리 우클릭) 메인 화면에 이미지를 원래 비율 그대로 행 단위로 채워 보여 준다.
 // · 썸네일은 서버 축소본(/thumb, 캐시)을 화면 근처에 왔을 때만, 동시에 3개씩 요청 (보이는 것부터)  · 하위 폴더는 맨 앞 폴더 타일
 // · 클릭=선택, 더블클릭/Enter=전체화면 보기(검정 배경, ←/→·‹ ›, 앞뒤 미리 디코딩, Esc 로 목록)  · 보고 있는 폴더가 바뀌면 자동 반영
-// · 여러 장 선택: ⌘/Ctrl+클릭 하나씩, Shift+클릭(Shift+방향키) 범위, ⌘A 전체 → ⌘C 복사 / ⌘X 잘라내기 → 트리 폴더·갤러리에서 ⌘V (아래 '파일 클립보드')
+// · 여러 장 선택: ⌘/Ctrl+클릭 하나씩, Shift+클릭(Shift+방향키) 범위, ⌘A 전체, Esc 해제 → ⌘C 복사 / ⌘X 잘라내기 → 트리 폴더·갤러리에서 ⌘V (아래 '파일 클립보드')
 const galJoin = (dir, name) => (dir === '/' ? '' : dir) + '/' + name;
 const galThumb = (abs, w, ver) => `/thumb?root=%2F&path=${encodeURIComponent(abs.slice(1))}&w=${w}&v=${ver || 0}`;
 const GAL_GAP = 6;
@@ -3911,7 +3911,7 @@ function galKey(t, e) {
   let i = g.sel; const how = e.shiftKey ? 'range' : '';   // Shift+방향키: 기준점부터 범위 선택
   if (k === 'Enter' || k === ' ') { if (i >= 0) galView(t, i); }
   else if (k === 'Backspace') { if (g.data?.parent) galGo(t, g.data.parent); }
-  else if (k === 'Escape' && g.picked.size > 1) galSelect(t, i, false);   // 여러 장 선택 → 커서 하나만
+  else if (k === 'Escape' && g.picked.size) { g.picked = new Set(); g.anchor = null; galPaint(t); validate(); }   // 선택 해제 (커서 위치는 기억해 방향키는 이어서)
   else if (!n) return;
   else if (k === 'ArrowRight') galSelect(t, Math.min(n - 1, i + 1), true, how);
   else if (k === 'ArrowLeft') galSelect(t, Math.max(0, i - 1), true, how);
