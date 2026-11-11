@@ -851,6 +851,7 @@ function resolveRel(base, href) {
   }
   return parts.join('/');
 }
+const MD_ID = 'user-content-';
 function renderMarkdown(t, htmlOverride) { // htmlOverride: 이미 변환/정화된 HTML 조각(스마트 편집의 블록)
   marked.setOptions({ gfm: true, breaks: false });
   const html = htmlOverride ?? DOMPurify.sanitize(marked.parse(t.content), { USE_PROFILES: { html: true } });
@@ -866,7 +867,7 @@ function renderMarkdown(t, htmlOverride) { // htmlOverride: 이미 변환/정화
   doc.querySelectorAll('a').forEach((a) => {
     const h = a.getAttribute('href') || '';
     if (/^[a-z]+:|^\/\//i.test(h)) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
-    else if (h.startsWith('#')) { a.onclick = (e) => { e.preventDefault(); doc.querySelector('[id="' + CSS.escape(h.slice(1)) + '"]')?.scrollIntoView(); }; }
+    else if (h.startsWith('#')) { a.onclick = (e) => { e.preventDefault(); let id = h.slice(1); try { id = decodeURIComponent(id); } catch {} doc.querySelector('[id="' + CSS.escape(MD_ID + id) + '"]')?.scrollIntoView(); }; }
     else { // 상대 링크 → 앱에서 열기
       a.onclick = (e) => { e.preventDefault(); openFile(resolveRel(base, decodeURI(h.split('#')[0]))); };
     }
@@ -881,10 +882,12 @@ function renderMarkdown(t, htmlOverride) { // htmlOverride: 이미 변환/정화
     // 가로 스크롤해도 버튼이 따라 움직이지 않도록 스크롤 안 되는 래퍼에 붙인다
     const w = el('div', { className: 'pre-wrap' }); pre.replaceWith(w); w.append(pre, b);
   });
-  // heading id (anchor 링크용)
+  // heading id (anchor 링크용). 문서 안의 모든 id 에 접두어를 붙인다 — '## status' 가 id="status" 가 되면
+  // 앱의 #status(상태바)·#menu·#toast 등과 겹쳐 그 CSS 가 제목에 먹고, $('#menu') 같은 조회가 제목을 집어 버린다 (GitHub 의 user-content- 와 같은 방식)
   doc.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach((h) => {
     h.id ||= h.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/\s+/g, '-');
   });
+  doc.querySelectorAll('[id]').forEach((n) => { if (!n.id.startsWith(MD_ID)) n.id = MD_ID + n.id; });
   doc.querySelectorAll('input[type=checkbox]').forEach((c) => { c.disabled = true; });
   return doc;
 }
