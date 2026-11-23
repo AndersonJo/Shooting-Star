@@ -491,6 +491,7 @@ async function flush(root, ix) { // 변경된 경로만 반영
       ix.set.delete(rel);
       const pre = rel + '/'; for (const f of ix.set) if (f.startsWith(pre)) ix.set.delete(f);
     }
+    if (ix.heads) { ix.heads.delete(rel); const pre = rel + '/'; for (const f of ix.heads.keys()) if (f.startsWith(pre)) ix.heads.delete(f); }   // 제목 캐시도 다시 읽게
   }
   ix.arr = null; ix.ts = Date.now();
   broadcast(root, rels);   // 인덱스를 먼저 갱신한 뒤 알린다 (화면이 필터 폴더 목록을 다시 받을 때 최신이 되도록)
@@ -498,6 +499,43 @@ async function flush(root, ix) { // 변경된 경로만 반영
 function markDirty(root) { // 우리 API 로 만든 변경은 감시 이벤트가 오기 전에도 반영
   const ix = indexes.get(root); if (!ix || ix.watcher) return;
   rebuild(root, ix);
+}
+
+// ───────── 마크다운 제목 인덱스 (Shift×2 검색에서 # 제목까지 찾기) ─────────
+// 파일별로 mtime 과 함께 캐시한다. 감시 중이면 flush 가 바뀐 파일의 캐시를 지우고, 감시 불가면 매번 mtime 을 비교한다.
+const MD_EXT = new Set(['md', 'markdown', 'mdx']), HEADS_FILE_MAX = 1024 * 1024, HEADS_FILES_MAX = 20000;
+function parseHeadings(text) { // ATX 제목(# ~ ######)만. 코드 블록·앞머리(--- yaml ---) 안의 # 은 제외. → [[줄(1부터), 단계, 글]]
+  const lines = text.split('\n'), out = []; let fence = null, i = 0;
+  if (/^---\s*$/.test(lines[0] || '')) { for (i = 1; i < lines.length && !/^(---|\.\.\.)\s*$/.test(lines[i]); i++); i = i < lines.length ? i + 1 : 0; }   // 닫는 --- 가 없으면 앞머리가 아니다
+  for (; i < lines.length; i++) {
+    const l = lines[i], f = l.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (f) { if (!fence) fence = f[1]; else if (f[1][0] === fence[0] && f[1].length >= fence.length && !l.trim().slice(f[1].length).trim()) fence = null; continue; }
+    if (fence) continue;
+    const m = l.match(/^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*\r?$/); if (!m) continue;
+    const t = m[2].replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/`([^`]*)`/g, '$1').replace(/(\*\*|__|~~)(.+?)\1/g, '$2').replace(/\s+/g, ' ').trim();
+    if (t) out.push([i + 1, m[1].length, t.slice(0, 300)]);
+  }
+  return out;
+}
+async function headingsOf(root, ix) {
+  if (!ix.heads) ix.heads = new Map();   // rel → { m: mtimeMs, h: [[줄, 단계, 글]] }
+  const files = indexFiles(ix).filter((f) => MD_EXT.has(path.extname(f).slice(1).toLowerCase())).slice(0, HEADS_FILES_MAX);
+  const next = new Map(), out = [];
+  for (let k = 0; k < files.length; k += 64) {
+    await Promise.all(files.slice(k, k + 64).map(async (f) => {
+      let e = ix.heads.get(f);
+      if (!e || !ix.watcher) {
+        try {
+          const st = await fsp.stat(path.join(root, f));
+          if (!e || e.m !== st.mtimeMs) e = { m: st.mtimeMs, h: st.size > HEADS_FILE_MAX ? [] : parseHeadings(await fsp.readFile(path.join(root, f), 'utf8')) };
+        } catch { e = null; }
+      }
+      if (e) next.set(f, e);
+    }));
+  }
+  ix.heads = next;
+  for (const [f, e] of next) for (const h of e.h) out.push([f, ...h]);
+  return out;
 }
 
 // ───────── 파일 내용 검색 (Find in Files) ─────────
@@ -1339,6 +1377,12 @@ async function api(req, res, url, root) {
         for (let d = f.lastIndexOf('/'); d > 0; d = f.lastIndexOf('/', d - 1)) { const dir = f.slice(0, d); if (dirs.has(dir)) break; dirs.add(dir); }
       }
       return send(res, 200, [...dirs]);
+    }
+    case 'GET /api/headings': { // 마크다운 파일들의 # 제목: [[경로, 줄, 단계, 글]]
+      const ix = getIndex(root);
+      if (!ix.ready) await ix.building;
+      else if (!ix.watcher && Date.now() - ix.ts > 10000) await rebuild(root, ix);
+      return send(res, 200, await headingsOf(root, ix));
     }
     case 'GET /api/index': {
       const ix = getIndex(root);
