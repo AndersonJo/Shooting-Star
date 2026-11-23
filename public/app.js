@@ -1117,7 +1117,7 @@ $('#btn-new-file').onclick = () => createEntry(state.selected && !tabOf(state.se
 $('#btn-new-dir').onclick = () => createEntry(dirOf(state.selected || ''), true);
 
 // ───────── 빠른 열기 (⌘P) ─────────
-const pal = { files: null, ts: 0, heads: null, headsTs: 0, withHeads: store.get('palHeads', true), loading: null, items: [], sel: 0, dir: '', inDir: false };
+const pal = { files: null, dirs: [], ts: 0, heads: null, headsTs: 0, withHeads: store.get('palHeads', true), loading: null, items: [], sel: 0, dir: '', inDir: false };
 function openPalette() {
   $('#palette').hidden = false; const inp = $('#pal-input'); inp.value = ''; inp.focus();
   pal.dir = dirOfSel(); setPalHeads(pal.withHeads, true); setPalScope(store.get('palInDir', false));
@@ -1130,14 +1130,19 @@ function loadPalFiles() {
     const s = await api('GET', 'index');
     const redraw = () => { if (!$('#palette').hidden) filterPalette($('#pal-input').value, true); };
     const jobs = [];
-    if (!(pal.files && s.ts === pal.ts && s.watching)) jobs.push(api('GET', 'files').then((r) => { pal.files = r; pal.ts = s.ts; redraw(); }));
+    if (!(pal.files && s.ts === pal.ts && s.watching)) jobs.push(api('GET', 'files').then((r) => { pal.files = r; pal.dirs = dirsOf(r); pal.ts = s.ts; redraw(); }));
     if (pal.withHeads && !(pal.heads && s.ts === pal.headsTs && s.watching)) {
       jobs.push(api('GET', 'headings').then((r) => { pal.heads = r.map(([f, line, lv, t]) => ({ f, line, lv, t, tl: t.toLowerCase() })); pal.headsTs = s.ts; redraw(); }));
     }
     await Promise.all(jobs);
   })().catch(() => {}).finally(() => { pal.loading = null; });
 }
-// 찾을 대상: 파일만 | 파일 + md 파일 안의 # 제목 (기억해 둔다)
+const dirsOf = (files) => { // 파일이 (하위 포함) 들어 있는 폴더들 (인덱스는 파일만 담는다)
+  const set = new Set();
+  for (const f of files) for (let d = f.lastIndexOf('/'); d > 0; d = f.lastIndexOf('/', d - 1)) { const dir = f.slice(0, d); if (set.has(dir)) break; set.add(dir); }
+  return [...set];
+};
+// 찾을 대상: 이름만(파일·폴더) | 이름 + md 파일 안의 # 제목 (기억해 둔다)
 function setPalHeads(on, quiet) {
   pal.withHeads = on;
   $('#pal-fonly').classList.toggle('on', !on); $('#pal-heads').classList.toggle('on', on);
@@ -1145,7 +1150,7 @@ function setPalHeads(on, quiet) {
   if (!quiet) { store.set('palHeads', on); if (on) loadPalFiles(); filterPalette($('#pal-input').value); $('#pal-input').focus(); }
 }
 $('#pal-fonly').onclick = () => setPalHeads(false); $('#pal-heads').onclick = () => setPalHeads(true);
-const setPalPlaceholder = () => { $('#pal-input').placeholder = (pal.inDir ? pal.dir + ' 안에서 ' : '') + (pal.withHeads ? '파일 이름 · md 제목 검색…' : '파일 이름 검색…'); };
+const setPalPlaceholder = () => { $('#pal-input').placeholder = (pal.inDir ? pal.dir + ' 안에서 ' : '') + (pal.withHeads ? '파일·폴더 이름 · md 제목 검색…' : '파일·폴더 이름 검색…'); };
 // 최근에 연 파일 (최신순, 폴더별 저장). 검색 순위에 쓴다
 const PAL_HISTORY_MAX = 100;
 const palHistory = () => store.get(wsKey('palHistory'), []);
@@ -1227,6 +1232,10 @@ function filterPalette(q, keepSel) {
     // 그룹 (작을수록 위): 이름 접두·단어 시작 0 · md 제목 낱말 시작 1 · 이름 부분 2 · 이름 약어 3 · md 제목 부분 3.5 · 이름 낱말 순서 4 · md 제목 낱말 순서 5 · 경로 6 · 경로 낱말 순서 7
     const FILE_G = [0, 0, 2, 3, 4, 6, 7], HEAD_G = [1, 3.5, 5];
     res = files.map((f) => ({ f, m: match(f) })).filter((x) => x.m).map((x) => ({ ...x, g: FILE_G[x.m.tier], r: rank(x.f) }));
+    for (const d of pal.dirs) { // 폴더 이름: 같은 일치 단계의 파일 바로 뒤
+      if (!inScope(d)) continue;
+      const m = match(d); if (m) res.push({ f: d, d: true, m, g: FILE_G[m.tier] + 0.1, r: rank(d) });
+    }
     if (pal.withHeads && pal.heads && q.trim().length >= 2) { // 한 글자로는 제목이 쏟아지므로 두 글자부터
       for (const h of pal.heads) {
         if (!inScope(h.f)) continue;
@@ -1240,11 +1249,11 @@ function filterPalette(q, keepSel) {
     const seen = new Set(near.map((x) => x.f));
     res = [...near, ...files.filter((f) => !seen.has(f)).slice(0, 80 - near.length).map((f) => ({ f, m: { pos: [] } }))];
   }
-  const key = (x) => (x.h ? x.f + '#' + x.h.line : x.f);
+  const key = (x) => (x.h ? x.f + '#' + x.h.line : x.d ? x.f + '/' : x.f);
   const cur = keepSel && pal.items[pal.sel] && key(pal.items[pal.sel]);   // 목록이 뒤에서 갱신돼도 고르던 항목은 유지
   pal.items = res; pal.sel = cur ? Math.max(0, res.findIndex((x) => key(x) === cur)) : 0; drawPalette();
 }
-function palOpen(x) { closePalette(); x.h ? openHeading(x.f, x.h) : openFile(x.f); }
+function palOpen(x) { closePalette(); x.h ? openHeading(x.f, x.h) : x.d ? (dirGallery(x.f), revealInTree(x.f, true)) : openFile(x.f); }   // 폴더: 트리에서 누른 것과 같게 (갤러리 미리보기 탭 + 트리에서 펼쳐 선택)
 // md 제목으로 이동: 편집/분할이면 그 줄로, 보기/스마트 편집이면 그려진 제목으로 스크롤
 async function openHeading(f, h) {
   await openFile(f);
@@ -1260,7 +1269,7 @@ async function openHeading(f, h) {
   }, 0);
 }
 function drawPalette() {
-  $('#pal-list').replaceChildren(...pal.items.map(({ f, m, h }, i) => {
+  $('#pal-list').replaceChildren(...pal.items.map(({ f, m, h, d }, i) => {
     const b0 = f.lastIndexOf('/') + 1, hl = new Set(m.pos);
     const part = (s, off) => { // 일치한 글자를 하이라이트
       const span = document.createDocumentFragment(); let run = '', on = false;
@@ -1269,7 +1278,12 @@ function drawPalette() {
       flush(); return span;
     };
     const kind = kindOf(f);
-    const li = h
+    const li = d
+      ? el('li', { className: 'dir' + (i === pal.sel ? ' sel' : ''), title: f + '/' },
+        el('span', { className: 'ico', textContent: '📁' }),
+        el('span', { className: 'pn' }, part(f.slice(b0), b0), '/'),
+        el('span', { className: 'pd' }, part(f.slice(0, Math.max(b0 - 1, 0)), 0)))
+      : h
       ? el('li', { className: 'hd' + (i === pal.sel ? ' sel' : ''), title: `${f}:${h.line}` },
         el('span', { className: 'ico k-md', textContent: '#'.repeat(Math.min(h.lv, 3)) }),
         el('span', { className: 'pn' }, part(h.t, 0)),
