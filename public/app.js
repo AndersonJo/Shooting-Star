@@ -724,6 +724,19 @@ function renderContent() {
     const ta = el('textarea', { className: 'editor' + wrapCls, value: t.content, spellcheck: false });
     const pre = el('pre', { className: 'hl' + wrapCls, ariaHidden: 'true' });
     const fm = el('pre', { className: 'fm' + wrapCls, ariaHidden: 'true' });   // 문서 안 찾기 표시 레이어
+    // 줄 번호: 왼쪽 띠만 보이게 잘라 낸 레이어. 줄바꿈 모드에서는 입력창과 같은 폭·글꼴로 본문을 투명하게 깔아
+    // 한 줄이 여러 줄로 접혀도 번호가 그 줄의 첫 행에 맞는다. 줄바꿈이 없으면 번호만 (줄 수가 바뀔 때만 다시 그림)
+    const lnPre = el('pre'), ln = el('div', { className: 'ln', ariaHidden: 'true' }, lnPre);
+    let lnN = -1, lnText = null;
+    const paintLn = () => {
+      const v = ta.value; let n = 1; for (let i = v.indexOf('\n'); i >= 0; i = v.indexOf('\n', i + 1)) n++;
+      ln.parentElement?.style.setProperty('--gd', Math.max(2, String(n).length));
+      const full = state.wrap && v.length < 300000;
+      lnPre.className = full ? 'wrap' : 'plain';
+      if (full) { if (v !== lnText) { lnText = v; lnN = -1; lnPre.innerHTML = v.split('\n').map((l) => '<div>' + (escHtml(l) || ' ') + '</div>').join(''); } }
+      else if (n !== lnN) { lnN = n; lnText = null; lnPre.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n'); }
+      lnPre.scrollTop = ta.scrollTop;
+    };
     let raf = 0;
     const paint = () => { // 색칠은 프레임당 한 번, 너무 큰 파일은 생략
       cancelAnimationFrame(raf);
@@ -732,9 +745,10 @@ function renderContent() {
         ta.classList.toggle('hlon', !!on);
         pre.innerHTML = on ? highlight(lang, ta.value) + '\n' : '';
         pre.scrollTop = ta.scrollTop; pre.scrollLeft = ta.scrollLeft;
+        paintLn();
       });
     };
-    ta.onscroll = () => { pre.scrollTop = fm.scrollTop = ta.scrollTop; pre.scrollLeft = fm.scrollLeft = ta.scrollLeft; };
+    ta.onscroll = () => { pre.scrollTop = fm.scrollTop = lnPre.scrollTop = ta.scrollTop; pre.scrollLeft = fm.scrollLeft = ta.scrollLeft; };
     ta.oninput = () => {
       t.content = ta.value;
       renderTabs(); renderToolbarDirtyOnly(); validate(); updatePreview(); paint();
@@ -768,7 +782,7 @@ function renderContent() {
         imgs.length ? attachImages(imgs) : toast('이미지 파일만 첨부할 수 있습니다');
       });
     }
-    return el('div', { className: 'pane' }, el('div', { className: 'ed' }, fm, pre, ta));
+    return el('div', { className: 'pane' }, el('div', { className: 'ed lnon' }, fm, pre, ta, ln));
   };
   if (t.mode === 'edit') panes.push(editor());
   else if (t.mode === 'smart' && t.kind === 'md') panes.push(smartEditor(t));
