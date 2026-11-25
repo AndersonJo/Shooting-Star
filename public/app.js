@@ -660,7 +660,7 @@ function renderToolbar() {
   items.push(
     btn('복사', '전체 내용 복사', () => copy(t.content, '전체 복사됨')),
     btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) || isExt(t.path) || e.shiftKey ? absOf(t.path) : t.path, '경로 복사됨')),
-    ...(t.kind === 'md' && (t.mode === 'edit' || t.mode === 'split' || t.mode === 'smart') ? [btn('📎 첨부', '이미지·파일 첨부 — 붙여넣기·끌어놓기도 됩니다 (assets/images · assets/files 의 날짜 폴더에 저장)', pickFiles)] : []),
+    ...(t.kind === 'md' && (t.mode === 'edit' || t.mode === 'split' || t.mode === 'smart') ? [btn('📎 첨부', '이미지·파일 첨부 — 붙여넣기·끌어놓기도 됩니다 (문서가 속한 git repo 의 .ss/assets/images · files 날짜 폴더에 저장)', pickFiles)] : []),
     btn('✨ Prettify', '정리/포맷 (⌘⌥L)', prettify),
   );
   if (t.kind === 'json') items.push(btn('Minify', 'JSON 압축', minify));
@@ -1085,7 +1085,7 @@ function fileViewer(t) { // 첨부 파일 탭: PDF·영상·음악은 바로 보
   fileStats([t.path]).then((r) => { const v = r[t.path]; info.textContent = v ? `${fmtSize(v.size)} · ${new Date(v.mtime).toLocaleString()}` : '파일이 없습니다'; });
   return box;
 }
-// 문서 옆 images/ 폴더의 이미지를 assets/images/날짜/ 로 옮기고 링크를 고친다 (먼저 미리보기, 확인 후 실행)
+// 문서 옆 images/ 와 repo 밖에 놓인 첨부(이전 버전의 <워크스페이스>/assets/…)를 각 문서의 git repo 안 .ss/assets/ 로 옮기고 링크를 고친다 (먼저 미리보기, 확인 후 실행)
 async function migrateAssetsUI(dir) {
   await flushAll();
   let plan;
@@ -1094,13 +1094,14 @@ async function migrateAssetsUI(dir) {
   const where = dir || '워크스페이스 전체';
   const skipTxt = plan.skipped.length ? `\n\n그대로 두는 이미지 ${plan.skipped.length}개 (링크를 모두 고칠 수 없음):\n` + plan.skipped.slice(0, 6).map((x) => ` · ${x.path} — ${x.reason}`).join('\n') + (plan.skipped.length > 6 ? `\n · … 외 ${plan.skipped.length - 6}개` : '') : '';
   const unrefTxt = plan.unreferenced ? `\n어느 문서도 참조하지 않는 이미지 ${plan.unreferenced}개도 그대로 둡니다.` : '';
-  if (!plan.files) return toast(`옮길 이미지가 없습니다 (${where})` + (plan.skipped.length ? ` · 링크를 고칠 수 없어 그대로 둔 것 ${plan.skipped.length}개` : ''), 3500);
+  if (!plan.files) return toast(`옮길 첨부가 없습니다 (${where})` + (plan.skipped.length ? ` · 링크를 고칠 수 없어 그대로 둔 것 ${plan.skipped.length}개` : ''), 3500);
   const docsTxt = plan.docs.slice(0, 8).map((d) => ` · ${d.path} (링크 ${d.links}개)`).join('\n') + (plan.docs.length > 8 ? `\n · … 외 ${plan.docs.length - 8}개` : '');
-  if (!confirm(`images/ → assets/images/날짜/ 로 정리 (${where})\n\n이미지 ${plan.files}개 (${fmtSize(plan.bytes)}) 를 옮기고, 문서 ${plan.docs.length}개의 링크를 고칩니다:\n${docsTxt}${skipTxt}${unrefTxt}\n\n진행할까요? (git 으로 되돌릴 수 있게 먼저 커밋해 두는 것을 권합니다)`)) return;
+  const repoTxt = plan.repos.slice(0, 6).map((r) => ` · ${r === '.' ? '(워크스페이스 루트 — git repo 아님)' : r}/.ss/assets/`).join('\n') + (plan.repos.length > 6 ? `\n · … 외 ${plan.repos.length - 6}곳` : '');
+  if (!confirm(`첨부 정리 → 각 문서의 git repo 안 .ss/assets/ (${where})\n\n파일 ${plan.files}개 (${fmtSize(plan.bytes)}) 를 옮기고, 문서 ${plan.docs.length}개의 링크를 고칩니다.\n\n저장 위치:\n${repoTxt}\n\n고칠 문서:\n${docsTxt}${skipTxt}${unrefTxt}\n\n진행할까요? (git 으로 되돌릴 수 있게 먼저 커밋해 두는 것을 권합니다)`)) return;
   try {
     const r = await api('POST', 'assets/migrate', {}, { dir, apply: true });
     childrenCache.clear(); renderTree();
-    toast(`이미지 ${r.moved}개 이동 · 문서 ${r.docs.length}개 링크 수정` + (r.failed.length ? ` · 실패 ${r.failed.length}개 (${r.failed[0].reason})` : ''), 4000);
+    toast(`첨부 ${r.moved}개 이동 · 문서 ${r.docs.length}개 링크 수정` + (r.failed.length ? ` · 실패 ${r.failed.length}개 (${r.failed[0].reason})` : ''), 4000);
   } catch (e) { toast('정리 실패: ' + e.message, 4000); }
 }
 
@@ -1198,7 +1199,7 @@ $('#tree').addEventListener('contextmenu', (ev) => {
     ...(clip || state.platform === 'darwin' ? (() => { const dest = baseDir ? state.root + '/' + baseDir : state.root, M = modKey(); return [['붙여넣기\t' + M + 'V', () => clipPaste(dest)], ['여기로 이동\t' + M + '⌥V', () => clipPaste(dest, true)]]; })() : []),
     ...(row ? [[favs.includes(favKey(p, isDir)) ? '즐겨찾기에서 제거' : '★ 즐겨찾기에 추가', () => toggleFavDir(favKey(p, isDir))]] : []),
     [isDir ? `${FM}에서 열기` : `${FM}에서 보기`, () => revealPath(p, 'reveal')],
-    ...(isDir ? [['🖼 이미지 갤러리로 보기', () => openGallery(p ? state.root + '/' + p : state.root)], ['🗂 images/ → assets/ 로 정리…', () => migrateAssetsUI(p)]] : []),
+    ...(isDir ? [['🖼 이미지 갤러리로 보기', () => openGallery(p ? state.root + '/' + p : state.root)], ['🗂 첨부 정리 (repo 안 .ss/assets/ 로)…', () => migrateAssetsUI(p)]] : []),
   ];
   if (!isDir) items.push(['기본 앱으로 열기', () => revealPath(p, 'open')]);
   if (state.platform === 'darwin') items.push(['터미널에서 열기', () => revealPath(p, 'terminal')]);

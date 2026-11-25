@@ -151,20 +151,22 @@ function sniffImage(buf, ext) {
   return false;
 }
 // ───────── 첨부 (이미지 / 파일) ─────────
-// 새 첨부는 <기준 폴더>/assets/images/YYYYMMDD/ · assets/files/YYYYMMDD/ 에 모은다. 문서에는 문서 기준 상대 링크를 넣는다.
-// 기준 폴더: 문서 폴더에서 위로 올라가며 assets/images 나 assets/files 가 이미 있는 가장 가까운 폴더, 없으면 워크스페이스 루트.
+// 새 첨부는 <기준 폴더>/.ss/assets/images/YYYYMMDD/ · .ss/assets/files/YYYYMMDD/ 에 모은다. 문서에는 문서 기준 상대 링크를 넣는다.
+// 기준 폴더 = 문서가 속한 git repo 루트 (push 할 때 문서와 함께 올라가도록). 문서 폴더에서 위로 올라가며
+// .ss/assets 가 이미 있거나 .git 이 있는 가장 가까운 폴더, repo 가 아니면 워크스페이스 루트. (프로젝트의 assets/ 와 섞이지 않게 .ss/ 아래)
 // 메모(~/.shooting-star/memos)는 따로: memos/images/ · memos/files/ (날짜 폴더 없음)
 // 기존 문서 옆 images/ 링크는 그대로 동작한다 (상대 경로라 렌더러는 바뀌지 않음). /api/assets/migrate 로 옮길 수 있다.
-const ASSETS = 'assets', UPLOAD_MAX = 2 * 1024 * 1048576, UPLOAD_IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.svg', '.bmp']);
+const ASSETS = '.ss/assets', UPLOAD_MAX = 2 * 1024 * 1048576, UPLOAD_IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.svg', '.bmp']);
 const isMemoRoot = (root) => { try { return root === fs.realpathSync(MEMO_DIR); } catch { return false; } };
 const dayStamp = (d = new Date()) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
 const posixRel = (from, to) => path.relative(from, to).split(path.sep).join('/');
-function assetBase(root, dirAbs) { // 첨부를 모을 기준 폴더 (절대경로)
+function assetBase(root, dirAbs) { // 첨부를 모을 기준 폴더 (절대경로): 문서의 git repo 루트
+  const atTop = root === path.parse(root).root;   // 워크스페이스 밖 파일(@ext, root=/)
   for (let d = dirAbs; ; d = path.dirname(d)) {
-    if (isDirSafe(path.join(d, ASSETS, 'images')) || isDirSafe(path.join(d, ASSETS, 'files'))) return d;
-    if (d === root || path.dirname(d) === d) break;
+    if (isDirSafe(path.join(d, ASSETS)) || fs.existsSync(path.join(d, '.git'))) return d;   // .git 은 폴더(일반) 또는 파일(submodule·worktree)
+    if ((!atTop && d === root) || path.dirname(d) === d) break;   // 워크스페이스 밖으로는 나가지 않는다 (앱이 보여 줄 수 없음)
   }
-  return root === path.parse(root).root ? dirAbs : root;   // 워크스페이스 밖 파일(@ext, root=/)은 문서 폴더에
+  return atTop ? dirAbs : root;
 }
 function assetDir(root, dirAbs, kind) { // kind: 'images' | 'files'
   if (isMemoRoot(root)) return path.join(root, kind);
@@ -273,7 +275,10 @@ function linkTarget(raw) { // → { pathPart, suffix, angle } | null (웹 주소
   return { dec, suffix, angle };
 }
 const encLink = (p, angle) => (angle ? `<${p}>` : p.replace(/%/g, '%25').replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/</g, '%3C').replace(/>/g, '%3E'));
-const isLegacyImg = (rel) => { const segs = rel.split('/'); const i = segs.lastIndexOf('images', segs.length - 2); return i >= 0 && segs[i - 1] !== ASSETS ? segs.slice(0, i + 1).join('/') : null; };   // assets/images/… 는 이미 새 방식
+// 옮길 대상: ① 문서 옆 images/ (예전 방식) ② 날짜 폴더 첨부 assets/(images|files)/YYYYMMDD/ · .ss/assets/… 가 문서의 repo 밖에 있는 것 (이전 버전이 워크스페이스 루트에 둔 것)
+const isLegacyImg = (rel) => { const segs = rel.split('/'); if (segs.includes('.ss')) return null; const i = segs.lastIndexOf('images', segs.length - 2); return i >= 0 && segs[i - 1] !== 'assets' ? segs.slice(0, i + 1).join('/') : null; };   // 프로젝트의 assets/images/… 는 건드리지 않는다
+const DATED_RE = /(?:^|\/)(\.ss\/)?assets\/(images|files)\/(\d{8})\/[^/]+$/;
+const LEFTOVER_DIR = (n) => ['images', 'files', 'assets', '.ss'].includes(n) || /^\d{8}$/.test(n);
 async function migrateAssets(root, scope, apply) {
   const ix = getIndex(root); if (!ix.ready) await ix.building;
   if (ix.pending.size) { clearTimeout(ix.timer); await flush(root, ix); }   // 방금 생긴 파일까지 보고 판단한다
@@ -281,23 +286,37 @@ async function migrateAssets(root, scope, apply) {
   const inScope = (rel) => !scope || rel === scope || rel.startsWith(scope + '/');
   const mdDocs = files.filter((f) => MD_EXT.has(path.extname(f).slice(1).toLowerCase()));
   const encDirs = new Set(files.filter((f) => f.endsWith('.enc')).map((f) => path.posix.dirname(f)));
-  const refs = new Map();   // 이미지 rel → [{ doc, start, end, suffix, angle }]
-  const docText = new Map();
+  const refs = new Map(), docText = new Map(), baseCache = new Map();   // 파일 rel → [{ doc, start, end, suffix, angle }]
+  const docBase = (doc) => { const d = path.dirname(path.join(root, doc)); if (!baseCache.has(d)) baseCache.set(d, assetBase(root, d)); return baseCache.get(d); };
   for (const doc of mdDocs) {
     let text; try { const abs = path.join(root, doc); if ((await fsp.stat(abs)).size > 4 * 1048576) continue; text = await fsp.readFile(abs, 'utf8'); } catch { continue; }
     const dir = path.posix.dirname(doc) === '.' ? '' : path.posix.dirname(doc);
     for (const l of findLinks(text)) {
       const t = linkTarget(l.target); if (!t) continue;
       const rel = path.posix.normalize((dir ? dir + '/' : '') + t.dec);
-      if (rel.startsWith('..') || !fileSet.has(rel) || !isLegacyImg(rel) || !inScope(rel)) continue;
+      if (rel.startsWith('..') || !fileSet.has(rel) || !(isLegacyImg(rel) || DATED_RE.test(rel))) continue;
       if (!refs.has(rel)) refs.set(rel, []);
       refs.get(rel).push({ doc, start: l.start, end: l.end, suffix: t.suffix, angle: t.angle });
       docText.set(doc, text);
     }
   }
+  // 파일마다: 참조하는 문서의 repo 별로 목적지를 정한다. 이미 제자리인 참조는 그대로 (그 경우 원본도 남긴다)
+  const work = [];
+  for (const [rel, list] of refs) {
+    if (!inScope(rel) && !list.some((r) => inScope(r.doc))) continue;
+    const abs = path.join(root, rel), dm = DATED_RE.exec(rel), groups = new Map(); let keep = false;
+    for (const r of list) {
+      const base = docBase(r.doc), home = path.join(base, ASSETS) + path.sep;
+      if (dm && (abs.startsWith(home) || (!dm[1] && abs.startsWith(base + path.sep)))) { keep = true; continue; }   // 이미 그 repo 의 .ss/assets 안, 또는 repo 안에 있는 예전 assets/ (push 에 문제 없음)
+      const kind = dm ? dm[2] : 'images';
+      if (!groups.has(base)) groups.set(base, { kind, list: [] });
+      groups.get(base).list.push(r);
+    }
+    if (groups.size) work.push({ rel, abs, date: dm?.[3] || null, groups, keep });
+  }
   const skipped = [], moves = [];
-  // 마크다운이 아닌 텍스트 파일(html 등)이 이름을 언급하면 링크를 고칠 수 없으니 옮기지 않는다
-  const names = new Map(); for (const rel of refs.keys()) { const b = path.posix.basename(rel); if (!names.has(b)) names.set(b, []); names.get(b).push(rel); }
+  // 원본을 지울 파일: 마크다운이 아닌 텍스트 파일(html 등)이 이름을 언급하면 링크를 고칠 수 없으니 옮기지 않는다
+  const names = new Map(); for (const w of work) if (!w.keep) { const b = path.posix.basename(w.rel); if (!names.has(b)) names.set(b, []); names.get(b).push(w.rel); }
   const mentioned = new Map();
   if (names.size) {
     const re = new RegExp([...names.keys()].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
@@ -309,55 +328,55 @@ async function migrateAssets(root, scope, apply) {
     });
   }
   const unref = files.filter((f) => isLegacyImg(f) && inScope(f) && IMG_MIME[path.extname(f).toLowerCase()] && !refs.has(f)).length;
-  for (const [rel, list] of refs) {
-    const imgDir = isLegacyImg(rel), owner = path.posix.dirname(imgDir) === '.' ? '' : path.posix.dirname(imgDir);
-    if (encDirs.has(owner || '.') || [...encDirs].some((d) => list.some((r) => path.posix.dirname(r.doc) === d))) { skipped.push({ path: rel, reason: '암호화 문서가 있는 폴더 (참조를 확인할 수 없음)' }); continue; }
-    if (mentioned.has(rel)) { skipped.push({ path: rel, reason: `다른 파일에서 언급: ${mentioned.get(rel)}` }); continue; }
-    moves.push({ rel, list });
+  for (const w of work) {
+    if (!w.keep) {
+      const lg = isLegacyImg(w.rel), dirs = [...(lg ? [path.posix.dirname(lg)] : []), ...[...w.groups.values()].flatMap((g) => g.list.map((r) => path.posix.dirname(r.doc)))];
+      if (dirs.some((d) => encDirs.has(d))) { skipped.push({ path: w.rel, reason: '암호화 문서가 있는 폴더 (참조를 확인할 수 없음)' }); continue; }
+      if (mentioned.has(w.rel)) { skipped.push({ path: w.rel, reason: `다른 파일에서 언급: ${mentioned.get(w.rel)}` }); continue; }
+    }
+    moves.push(w);
   }
-  const bytes = (await Promise.all(moves.map((m) => fsp.stat(path.join(root, m.rel)).then((s) => s.size, () => 0)))).reduce((a, b) => a + b, 0);
-  const docCount = new Map(); for (const m of moves) for (const r of m.list) docCount.set(r.doc, (docCount.get(r.doc) || 0) + 1);
-  const summary = { files: moves.length, bytes, docs: [...docCount].map(([p, n]) => ({ path: p, links: n })), skipped, unreferenced: unref };
+  const bytes = (await Promise.all(moves.map((m) => fsp.stat(m.abs).then((s) => s.size, () => 0)))).reduce((a, b) => a + b, 0);
+  const docCount = new Map(); for (const m of moves) for (const g of m.groups.values()) for (const r of g.list) docCount.set(r.doc, (docCount.get(r.doc) || 0) + 1);
+  const repos = new Set(); for (const m of moves) for (const b of m.groups.keys()) repos.add(posixRel(root, b) || '.');
+  const summary = { files: moves.length, bytes, docs: [...docCount].map(([p, n]) => ({ path: p, links: n })), repos: [...repos], skipped, unreferenced: unref };
   if (!apply) return summary;
 
-  // 1) 파일 이동 (같은 내용이 이미 있으면 재사용) 2) 링크 고치기 3) 빈 images/ 폴더 정리
-  const newRel = new Map(), failed = [];
+  // 1) repo 별로 복사 (같은 내용이 이미 있으면 재사용) 2) 링크 고치기 3) 원본 지우기 (아직 쓰는 참조가 없을 때) 4) 빈 폴더 정리
+  const edits = new Map(), failed = [], removed = []; let moved = 0;
   for (const m of moves) {
-    const src = path.join(root, m.rel);
     try {
-      const st = await fsp.stat(src), owner = path.dirname(path.join(root, isLegacyImg(m.rel)));
-      const dir = path.join(assetBase(root, owner), ASSETS, 'images', dayStamp(st.mtime));
-      const tmp = path.join(path.dirname(src), `.ss-move-${crypto.randomBytes(6).toString('hex')}`);
-      await fsp.rename(src, tmp);
-      try {
-        const { abs } = await placeFile(tmp, dir, sanitizeName(path.basename(m.rel)), { size: st.size, sha: await hashFile(tmp), siblings: [dir, ...(await datedSiblings(dir))] });
+      const st = await fsp.stat(m.abs), sha = await hashFile(m.abs), name = sanitizeName(path.basename(m.rel)), done = [];
+      for (const [base, g] of m.groups) {
+        const dir = path.join(base, ASSETS, g.kind, m.date || dayStamp(st.mtime));
+        await fsp.mkdir(dir, { recursive: true });
+        const tmp = path.join(dir, `.ss-move-${crypto.randomBytes(6).toString('hex')}`);
+        await fsp.copyFile(m.abs, tmp);
+        const { abs } = await placeFile(tmp, dir, name, { size: st.size, sha, siblings: [dir, ...(await datedSiblings(dir))] });
         await fsp.utimes(abs, st.atime, st.mtime).catch(() => {});
-        newRel.set(m.rel, posixRel(root, abs));
-      } catch (e) { await fsp.rename(tmp, src).catch(() => {}); throw e; }
+        done.push([abs, g.list]);
+      }
+      for (const [abs, list] of done) for (const r of list) {
+        const link = encLink(posixRel(path.dirname(path.join(root, r.doc)), abs), r.angle);
+        if (!edits.has(r.doc)) edits.set(r.doc, []);
+        edits.get(r.doc).push({ start: r.start, end: r.end, text: r.angle ? link.slice(0, -1) + r.suffix + '>' : link + r.suffix });
+      }
+      if (!m.keep && !done.some(([abs]) => abs === m.abs)) { await fsp.unlink(m.abs); removed.push(m.abs); }
+      moved++;
     } catch (e) { failed.push({ path: m.rel, reason: e.message }); }
-  }
-  const edits = new Map();   // doc → [{start,end,text}]
-  for (const m of moves) {
-    const to = newRel.get(m.rel); if (!to) continue;
-    for (const r of m.list) {
-      const docDir = path.dirname(path.join(root, r.doc));
-      const link = encLink(posixRel(docDir, path.join(root, to)), r.angle);
-      if (!edits.has(r.doc)) edits.set(r.doc, []);
-      edits.get(r.doc).push({ start: r.start, end: r.end, text: r.angle ? link.slice(0, -1) + r.suffix + '>' : link + r.suffix });
-    }
   }
   for (const [doc, list] of edits) {
     let text = docText.get(doc);
     for (const e of list.sort((a, b) => b.start - a.start)) text = text.slice(0, e.start) + e.text + text.slice(e.end);
     await fsp.writeFile(path.join(root, doc), text);
   }
-  const dirs = new Set([...newRel.keys()].map((r) => isLegacyImg(r)));
-  for (const d of [...dirs].sort((a, b) => b.length - a.length)) { // 비었으면 지운다 (.DS_Store 만 남았어도)
-    const abs = path.join(root, d);
-    try { const left = (await fsp.readdir(abs)).filter((n) => n !== '.DS_Store'); if (!left.length) await fsp.rm(abs, { recursive: true }); } catch {}
+  for (const d of [...new Set(removed.map((f) => path.dirname(f)))].sort((a, b) => b.length - a.length)) { // 비었으면 위로 올라가며 지운다 (images · files · assets · .ss · 날짜 폴더만)
+    for (let cur = d; cur.startsWith(root + path.sep) && LEFTOVER_DIR(path.basename(cur)); cur = path.dirname(cur)) {
+      try { const left = (await fsp.readdir(cur)).filter((n) => n !== '.DS_Store'); if (left.length) break; await fsp.rm(cur, { recursive: true }); } catch { break; }
+    }
   }
   markDirty(root);
-  return { ...summary, moved: newRel.size, failed };
+  return { ...summary, moved, failed };
 }
 
 async function listDir(root, rel) {
