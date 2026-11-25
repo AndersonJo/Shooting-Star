@@ -413,7 +413,8 @@ async function save(t = cur(), silent = false, auto = false) {
   try {
     const sent = t.content; t._savedAt = Date.now();
     const r = await api('PUT', 'file', { path: t.path }, { content: sent, mtime: t.mtime });
-    t.orig = sent; t.mtime = r.mtime; t.conflict = false; t.missing = false; t._savedAt = Date.now(); if (!silent) toast('저장됨'); renderChrome(); if (auto && !isMemo(t.path)) showSaved();
+    t.orig = sent; t.mtime = r.mtime; t.conflict = false; t.missing = false; t._savedAt = Date.now(); if (!silent) toast('저장됨');
+    t._uiKey = null; syncDirtyUi(t); validate(); if (auto && !isMemo(t.path)) showSaved();   // 트리 전체를 다시 그리지 않는다 (dirty 표시만; 새로 생긴 파일은 감시 이벤트가 트리를 갱신)
   } catch (e) {
     if (e.status === 409 && auto) { // 자동 저장은 외부에서 바뀐 파일을 덮어쓰지 않는다
       if (!t.conflict) toast('⚠ 외부에서도 수정되어 자동 저장을 건너뜁니다 (⌘S 로 저장하면 덮어쓰기 확인)');
@@ -549,7 +550,7 @@ function onFsEvent(d) { // d: { paths, all }
       if (!isMemo(t.path) && !isExt(t.path) && (!set || set.has(t.path))) syncTab(t);
     }
     if (isMemo(state.active) || isExt(state.active)) syncTab(cur());
-    refreshMemos(); refreshGit(); loadRecentSoon();
+    refreshMemos(); refreshGit(!!d.all); loadRecentSoon();
   }, 150);
 }
 function connectEvents() {
@@ -562,7 +563,7 @@ function connectEvents() {
 let lastActivate = 0;
 function onActivate() {
   if (document.hidden || Date.now() - lastActivate < 400) return;
-  lastActivate = Date.now(); onFsEvent({ all: true, paths: [] }); refreshGit(); clipCheck();   // 다른 앱에서 복사했으면 복사 표시를 지운다
+  lastActivate = Date.now(); onFsEvent({ all: true, paths: [] }); refreshGit(true); clipCheck();   // 다른 앱에서 복사했으면 복사 표시를 지운다
   if (runUi.dir) loadRun();   // Run 폴더 감시가 놓친 변경 대비
 }
 window.addEventListener('focus', onActivate);
@@ -576,6 +577,7 @@ function renderChrome() { renderTabs(); renderToolbar(); renderTree(); validate(
 
 function renderTabs() {
   const box = $('#tabs');
+  for (const t of state.tabs) t._uiKey = undefined;   // 다시 그렸으니 syncDirtyUi 가 다음 입력에서 한 번 더 확인하게
   box.replaceChildren(...state.tabs.map((t) => {
     const x = el('span', { className: 'x', title: '닫기 (⌘W)' });
     x.onclick = (e) => { e.stopPropagation(); closeTab(t.path); };
@@ -749,14 +751,14 @@ function renderContent() {
     // 줄 번호: 왼쪽 띠만 보이게 잘라 낸 레이어. 줄바꿈 모드에서는 입력창과 같은 폭·글꼴로 본문을 투명하게 깔아
     // 한 줄이 여러 줄로 접혀도 번호가 그 줄의 첫 행에 맞는다. 줄바꿈이 없으면 번호만 (줄 수가 바뀔 때만 다시 그림)
     const lnPre = el('pre'), ln = el('div', { className: 'ln', ariaHidden: 'true' }, lnPre);
-    let lnN = -1, lnText = null;
+    let lnN = -1, lnText = null, lnLines = null;
     const paintLn = () => {
       const v = ta.value; let n = 1; for (let i = v.indexOf('\n'); i >= 0; i = v.indexOf('\n', i + 1)) n++;
       ln.parentElement?.style.setProperty('--gd', Math.max(2, String(n).length));
       const full = state.wrap && v.length < 300000;
       lnPre.className = full ? 'wrap' : 'plain';
-      if (full) { if (v !== lnText) { lnText = v; lnN = -1; lnPre.innerHTML = v.split('\n').map((l) => '<div>' + (escHtml(l) || ' ') + '</div>').join(''); } }
-      else if (n !== lnN) { lnN = n; lnText = null; lnPre.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n'); }
+      if (full) { if (v !== lnText) { lnText = v; lnN = -1; lnLines = paintLnWrap(lnPre, v.split('\n'), lnLines); } }
+      else if (n !== lnN) { lnN = n; lnText = null; lnLines = null; lnPre.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n'); }
       lnPre.scrollTop = ta.scrollTop;
     };
     let raf = 0;
@@ -773,7 +775,7 @@ function renderContent() {
     ta.onscroll = () => { pre.scrollTop = fm.scrollTop = lnPre.scrollTop = ta.scrollTop; pre.scrollLeft = fm.scrollLeft = ta.scrollLeft; };
     ta.oninput = () => {
       t.content = ta.value;
-      renderTabs(); renderToolbarDirtyOnly(); validate(); updatePreview(); paint();
+      syncDirtyUi(t); validateSoon(); updatePreview(); paint();
       if (fb.open) { clearTimeout(fb.timer); fb.timer = setTimeout(() => runFileFind(false), 120); }
       autosave(t);   // 입력을 멈추면 자동 저장 (설정)
     };
@@ -815,7 +817,30 @@ function renderContent() {
   validate();
   if (fb.open) { placeFindBar(); runFileFind(true); }   // 탭/모드가 바뀌어도 검색 유지
 }
-const renderToolbarDirtyOnly = () => renderToolbar();
+// 키 입력마다 탭·툴바를 통째로 다시 만들지 않는다: '저장 안 됨' 상태(메모는 제목도)가 바뀔 때만
+function syncDirtyUi(t) {
+  const d = dirty(t), key = d + '|' + (isMemo(t.path) ? memoTitle(t.content) : '');
+  if (t._uiKey === key) return;
+  t._uiKey = key;
+  renderTabs(); renderToolbar();
+  $('#tree')?.querySelector(`.row[data-path="${CSS.escape(t.path)}"]`)?.classList.toggle('dirty', d);
+}
+// 줄바꿈 모드 줄 번호 레이어: 앞뒤로 같은 줄은 그대로 두고 바뀐 줄의 <div> 만 바꾼다 (키 입력마다 문서 전체 innerHTML 을 만들지 않게)
+function paintLnWrap(pre, lines, prev) {
+  const line = (l) => { const d = document.createElement('div'); d.textContent = l || ' '; return d; };
+  if (!prev || pre.childElementCount !== prev.length) { pre.replaceChildren(...lines.map(line)); return lines; }
+  let a = 0; const m = Math.min(lines.length, prev.length);
+  while (a < m && lines[a] === prev[a]) a++;
+  let b = 0; while (b < m - a && lines[lines.length - 1 - b] === prev[prev.length - 1 - b]) b++;
+  const kids = pre.children, end = prev.length - b, ref = kids[end] || null;
+  for (let i = end - 1; i >= a; i--) kids[i].remove();
+  const frag = document.createDocumentFragment();
+  for (let i = a; i < lines.length - b; i++) frag.append(line(lines[i]));
+  pre.insertBefore(frag, ref);
+  return lines;
+}
+let validateT;
+const validateSoon = () => { clearTimeout(validateT); validateT = setTimeout(validate, 150); };   // JSON/YAML 검사·크기 계산은 입력이 잠깐 멈추면
 
 // ───────── 마크다운 분할 보기: 스크롤 동기화 + 편집 중인 곳 따라가기 ─────────
 // 미리보기의 최상위 요소 ↔ 원문 줄 번호. 토큰 수와 요소 수가 맞지 않으면(원시 HTML 등) null → 비율로 동기화
@@ -870,6 +895,18 @@ function splitSync(ta, pv) {
   ta.addEventListener('keyup', (e) => { if (e.key.startsWith('Arrow') || e.key === 'PageUp' || e.key === 'PageDown' || e.key === 'Home' || e.key === 'End') follow(); });
   ta.addEventListener('click', follow);
 }
+// 미리보기를 다시 그릴 때 같은 주소의 <img> 는 이전 요소를 그대로 옮겨 쓴다 (다시 요청·디코딩하지 않아 깜빡이지 않는다)
+function reuseImgs(oldRoot, doc) {
+  const pool = new Map();
+  for (const img of oldRoot.querySelectorAll('img')) { const k = img.getAttribute('src'); if (k) (pool.get(k) || pool.set(k, []).get(k)).push(img); }
+  if (!pool.size) return;
+  for (const img of doc.querySelectorAll('img')) {
+    const old = pool.get(img.getAttribute('src'))?.shift(); if (!old) continue;
+    for (const a of [...old.attributes]) if (!img.hasAttribute(a.name)) old.removeAttribute(a.name);
+    for (const a of img.attributes) if (old.getAttribute(a.name) !== a.value) old.setAttribute(a.name, a.value);
+    img.replaceWith(old);
+  }
+}
 let previewTimer;
 function updatePreview() {
   const t = cur(); const pv = $('#preview'); if (!t || !pv) return;
@@ -877,7 +914,7 @@ function updatePreview() {
   previewTimer = setTimeout(() => {
     try {
       if (t.mode === 'table') pv.replaceChildren(renderCSV(t));
-      else if (t.kind === 'md') pv.replaceChildren(renderMarkdown(t));
+      else if (t.kind === 'md') { const doc = renderMarkdown(t); reuseImgs(pv, doc); pv.replaceChildren(doc); }
       else if (t.mode === 'tree') pv.replaceChildren(renderObjTree(t));
     } catch (e) { pv.replaceChildren(el('pre', { className: 'tree', textContent: e.message, style: 'color:var(--err)' })); }
     if (t.mode === 'split' && t.kind === 'md') { pv._anchors = mdAnchors(pv, t.content); }
@@ -2114,7 +2151,9 @@ $('#memo-q').oninput = refreshMemos;
 const gitUi = { repos: [], expanded: new Set(), off: new Map(), msg: new Map(), busy: new Set(), err: new Map(), loaded: false };   // off: repo → 체크 해제한 파일들
 let gitTimer, gitSeq = 0;
 const gitWanted = () => state.view === 'git' || settings.gitMarks !== false;   // 트리 색 표시가 켜져 있으면 git 보기가 아니어도 상태를 읽는다
-const refreshGit = () => { if (!gitWanted()) return; clearTimeout(gitTimer); gitTimer = setTimeout(loadGit, 600); };
+// 파일 변경 이벤트로 부를 때는 서버 캐시(바뀐 repo 만 다시 읽음), 창으로 돌아올 때 등은 fresh (전부 다시)
+let gitFresh = false;
+const refreshGit = (fresh = false) => { if (!gitWanted()) return; gitFresh ||= fresh; clearTimeout(gitTimer); gitTimer = setTimeout(() => { const f = gitFresh; gitFresh = false; loadGit(f); }, 600); };
 // 트리 표시용: 변경된 파일(경로 → M/A/U) 과 변경이 들어 있는 폴더
 let gitMarks = { files: new Map(), dirs: new Map(), sig: '' };
 function computeGitMarks() {
@@ -2129,9 +2168,9 @@ function computeGitMarks() {
   if (sig === gitMarks.sig) return;
   gitMarks = { files, dirs, sig }; renderTree();
 }
-async function loadGit() {
+async function loadGit(fresh = true) {   // 버튼 onclick 처럼 인자가 이벤트여도 fresh
   const seq = ++gitSeq; let r;
-  try { r = await api('GET', 'git/repos'); } catch (e) { if (seq === gitSeq && state.view === 'git') $('#git-list').replaceChildren(el('div', { className: 'git-empty', textContent: 'Git 정보를 읽지 못했습니다: ' + e.message })); return; }
+  try { r = await api('GET', 'git/repos', fresh === false ? {} : { fresh: 1 }); } catch (e) { if (seq === gitSeq && state.view === 'git') $('#git-list').replaceChildren(el('div', { className: 'git-empty', textContent: 'Git 정보를 읽지 못했습니다: ' + e.message })); return; }
   if (seq !== gitSeq) return;
   gitUi.repos = r.repos; gitUi.loaded = true; if (state.view === 'git') drawGit(); computeGitMarks();
 }
@@ -4574,7 +4613,7 @@ function smartEditor(t) {
     const tail = tailOf(blocks[i].raw), next = blocks[i + 1];
     return body + tail + (!tail && next && next.type !== 'space' ? '\n\n' : '');
   };
-  const afterChange = () => { renderTabs(); renderToolbarDirtyOnly(); validate(); autosave(t); };
+  const afterChange = () => { syncDirtyUi(t); validateSoon(); autosave(t); };
   function changed(push = true) {
     t.content = toContent(src());
     if (push) { const s = src(); if (hist[hpos] !== s) { hist.length = hpos + 1; hist.push(s); hpos++; if (hist.length > 200) { hist.shift(); hpos--; } } }

@@ -699,6 +699,7 @@ function getIndex(root) {
   try { // macOS(FSEvents) / Linux(Node 20+) 재귀 감시. 안 되면 접근 시 TTL 전체 재스캔으로 대체
     ix.watcher = fs.watch(root, { recursive: true }, (_ev, name) => {
       const rel = name && String(name).split(path.sep).join('/');
+      if (rel) invalidateGitStat(path.join(root, String(name)));   // .git 안(커밋·스테이징)도 포함해 그 repo 의 git 상태 캐시를 버린다
       if (!rel || isIgnoredRel(rel)) return;
       ix.pending.add(rel); clearTimeout(ix.timer); ix.timer = setTimeout(() => flush(root, ix), 300);
     });
@@ -910,6 +911,30 @@ async function searchFiles(root, o, signal) {
 const GIT_VIEW_ENV = { ...GIT_ENV, GIT_OPTIONAL_LOCKS: '0' };   // status 가 index.lock 을 잡아 사용자의 git 명령과 부딪히지 않게
 const git = (repo, args, opts = {}) => execP('git', ['-c', 'core.quotepath=off', '-C', repo, ...args], { env: GIT_VIEW_ENV, maxBuffer: 16 << 20, ...opts });
 const gitMsg = (e) => ((e.stderr || '') + (e.stdout || '') || e.message).trim().split('\n').slice(-6).join('\n');
+
+// git 상태 캐시: 파일을 저장할 때마다 워크스페이스의 모든 repo 에 git status 를 돌리지 않도록, 감시 이벤트가 들어온 repo 만 다시 읽는다.
+// fresh 요청(창으로 돌아올 때·git 보기·새로고침·커밋 후)은 repo 목록까지 전부 다시 읽는다.
+const repoListCache = new Map();   // root → { list, at }
+const gitStatCache = new Map();    // repo 절대경로 → { st, hasRemote, gen }
+const gitGen = new Map();          // repo 절대경로 → 변경 세대 (status 를 읽는 도중 바뀌면 그 결과는 캐시하지 않는다)
+function invalidateGitStat(abs) {
+  for (const [repo, n] of gitGen) if (abs === repo || abs.startsWith(repo + path.sep)) { gitGen.set(repo, n + 1); gitStatCache.delete(repo); }
+}
+async function cachedRepos(root, fresh) {
+  const c = repoListCache.get(root);
+  if (!fresh && c && Date.now() - c.at < 120000) return c.list;
+  const list = await findRepos(root); repoListCache.set(root, { list, at: Date.now() });
+  return list;
+}
+async function cachedGitStat(repo, fresh) {
+  if (!gitGen.has(repo)) gitGen.set(repo, 0);
+  const gen = gitGen.get(repo), c = gitStatCache.get(repo);
+  if (!fresh && c && c.gen === gen) return c;
+  const st = await gitStatus(repo), hasRemote = fresh || !c ? !!(await git(repo, ['remote'])).trim() : c.hasRemote;
+  const v = { st, hasRemote, gen };
+  if (gitGen.get(repo) === gen) gitStatCache.set(repo, v);
+  return v;
+}
 
 // root 아래(깊이 5)의 repo 를 찾는다. root 가 어떤 repo 의 하위 폴더라면 그 repo 도 포함.
 async function findRepos(root) {
@@ -1423,13 +1448,17 @@ async function api(req, res, url, root) {
       return;
     }
     case 'GET /api/git/repos': { // 작업 폴더 안의 모든 repo 와 변경된 파일
-      const list = await findRepos(root), out = [];
+      const fresh = url.searchParams.get('fresh') === '1' || !indexes.get(root)?.watcher;   // 감시가 없으면 캐시를 믿을 수 없다
+      const list = await cachedRepos(root, fresh), out = [];
       let next = 0;
       await Promise.all(Array.from({ length: Math.min(6, list.length) }, async () => {
         while (next < list.length) {
           const abs = list[next++], base = { abs, rel: path.relative(root, abs), name: path.basename(abs) };
-          try { const st = await gitStatus(abs); st.files.forEach((f) => { const rp = path.relative(root, path.join(abs, f.path)); f.rp = rp.startsWith('..') || path.isAbsolute(rp) ? null : rp; });   // 작업 폴더 기준 경로 (트리 표시용)
-          out.push({ ...base, ...st, hasRemote: !!(await git(abs, ['remote'])).trim() }); } catch (e) { out.push({ ...base, error: gitMsg(e), files: [] }); }
+          try {
+            const { st, hasRemote } = await cachedGitStat(abs, fresh);
+            const files = st.files.map((f) => { const rp = path.relative(root, path.join(abs, f.path)); return { ...f, rp: rp.startsWith('..') || path.isAbsolute(rp) ? null : rp }; });   // 작업 폴더 기준 경로 (트리 표시용)
+            out.push({ ...base, ...st, files, hasRemote });
+          } catch (e) { out.push({ ...base, error: gitMsg(e), files: [] }); }
         }
       }));
       out.sort((a, b) => a.abs.localeCompare(b.abs));
