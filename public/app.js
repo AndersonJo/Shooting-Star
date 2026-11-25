@@ -639,7 +639,7 @@ function renderToolbar() {
     const FM = state.platform === 'darwin' ? 'Finder' : '파일 관리자', canOpen = !isDrop(t.path);
     bar.replaceChildren(el('span', { className: 'path' }),
       btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) || isExt(t.path) || e.shiftKey ? absOf(t.path) : t.path, '경로 복사됨')),
-      ...(canOpen ? [btn('기본 앱으로 열기', '이 파일을 기본 앱으로 열기', () => revealPath(t.path, 'open')), btn(FM, `${FM}에서 보기`, () => revealPath(t.path, 'reveal'))] : []),
+      ...(canOpen ? [btn('기본 앱으로 열기', '이 파일을 기본 앱으로 열기 (엑셀·워드 등에서 편집)', () => revealPath(t.path, 'open')), btn(`${FM}에서 보기`, `${FM}에서 이 파일 위치 보기`, () => revealPath(t.path, 'reveal'))] : []),
       btn('↻', '다시 불러오기', () => reload()));
     return;
   }
@@ -709,6 +709,7 @@ function validate() {
   }
   if (t && t.kind === 'diff') return setStatus(t.stat || '');
   if (t && t.kind === 'history') return setStatus(histStatus(t));
+  if (t?.kind === 'file' && SHEET_EXT.has(extOf(t.path))) return;   // 엑셀 뷰어가 상태줄을 채운다
   if (!t || t.kind === 'image' || t.kind === 'file') return setStatus('');
   let msg = '', cls = 'ok';
   try {
@@ -969,6 +970,7 @@ function attachCard(a, key, atts) { // 파일 링크 → [아이콘 | 이름 · 
   a.replaceChildren(attBadge(key), el('span', { className: 'att-body' }, el('span', { className: 'att-name', textContent: name }), meta));
   a.onclick = (e) => { e.preventDefault(); if (e.metaKey || e.ctrlKey) revealPath(key, 'open'); else openFile(key); };
   atts.push({ key, meta, a });
+  if (SHEET_EXT.has(extOf(key))) return sheetCardPreview(a, key);
   if (!kind) return;
   // 미리보기: 영상·음악은 바로 재생기, PDF 는 펼쳐 보기 버튼
   const holder = el('span', { className: 'att-pv' });
@@ -980,6 +982,76 @@ function attachCard(a, key, atts) { // 파일 링크 → [아이콘 | 이름 · 
     a.after(tg);
   }
   (a.nextSibling?.classList?.contains('att-tg') ? a.nextSibling : a).after(holder);
+}
+function sheetCardPreview(a, key) { // 엑셀 카드: 미리보기 ▾ → 첫 시트의 앞부분을 표로
+  const holder = el('span', { className: 'att-pv' });
+  const tg = el('button', { className: 'att-tg', textContent: '미리보기 ▾', title: '첫 시트의 앞부분을 문서 안에서 보기' });
+  tg.onclick = async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (holder.firstChild) { holder.replaceChildren(); tg.textContent = '미리보기 ▾'; return; }
+    tg.textContent = '읽는 중…';
+    try {
+      const wb = await loadWorkbook(key), ws = wb.Sheets[wb.SheetNames[0]];
+      const { table, rows } = sheetTable(ws, 50);
+      holder.replaceChildren(el('div', { className: 'att-sheet' }, table), el('div', { className: 'att-sheet-note', textContent: `${wb.SheetNames[0]}${wb.SheetNames.length > 1 ? ` (시트 ${wb.SheetNames.length}개 중 첫 번째)` : ''} · ${rows.toLocaleString()}행${rows > 50 ? ' 중 50행' : ''} — 카드를 누르면 전체 보기` }));
+      tg.textContent = '접기 ▴';
+    } catch (err) { tg.textContent = '미리보기 ▾'; toast('엑셀을 읽을 수 없음: ' + err.message); }
+  };
+  a.after(tg); tg.after(holder);
+}
+// ───────── 엑셀 (읽기 전용) ─────────
+// SheetJS(vendor/xlsx.full.min.js, 약 900KB)는 엑셀 파일을 처음 열 때만 불러온다. 값은 엑셀에 보이는 형식 그대로(날짜·숫자 서식 적용), 수식은 저장된 결과값.
+const SHEET_EXT = new Set(['xlsx', 'xlsm', 'xlsb', 'xls', 'ods', 'numbers']);
+let xlsxLib = null;
+function loadXLSX() {
+  return (xlsxLib ||= new Promise((ok, no) => {
+    if (window.XLSX) return ok(window.XLSX);
+    const sc = el('script', { src: 'vendor/xlsx.full.min.js' });
+    sc.onload = () => ok(window.XLSX); sc.onerror = () => { xlsxLib = null; no(new Error('엑셀 라이브러리를 불러오지 못했습니다')); };
+    document.head.append(sc);
+  }));
+}
+const wbCache = new Map();   // 경로|ver → 통합 문서 (같은 파일을 다시 그릴 때 다시 파싱하지 않게)
+async function loadWorkbook(key, ver) {
+  const ck = key + '|' + (ver || ''); if (wbCache.has(ck)) return wbCache.get(ck);
+  const [X, buf] = await Promise.all([loadXLSX(), fetch(rawUrl(key, ver || Date.now())).then((r) => { if (!r.ok) throw new Error(r.status === 404 ? '파일이 없습니다' : r.statusText); return r.arrayBuffer(); })]);
+  const wb = X.read(buf, { type: 'array', cellDates: true, dense: true });
+  if (wbCache.size > 4) wbCache.delete(wbCache.keys().next().value);
+  wbCache.set(ck, wb); return wb;
+}
+const colName = (i) => { let s = ''; for (i++; i > 0; i = Math.floor((i - 1) / 26)) s = String.fromCharCode(65 + ((i - 1) % 26)) + s; return s; };
+function sheetTable(ws, limit) { // 시트 → 표 (A,B,C… 머리글 + 행 번호). → { table, rows, cols }
+  const X = window.XLSX, ref = ws['!ref'];
+  if (!ref) return { table: el('div', { className: 'meta', style: 'padding:12px', textContent: '빈 시트' }), rows: 0, cols: 0 };
+  const rg = X.utils.decode_range(ref), rows = rg.e.r - rg.s.r + 1, cols = Math.min(rg.e.c - rg.s.c + 1, 500);
+  const data = X.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '', blankrows: true });
+  const table = el('table', { className: 'csv sheet' });
+  table.append(el('thead', {}, el('tr', {}, el('th', { className: 'n' }), ...Array.from({ length: cols }, (_, c) => el('th', { textContent: colName(rg.s.c + c) })))));
+  const tb = el('tbody');
+  data.slice(0, limit).forEach((r, i) => tb.append(el('tr', {}, el('td', { className: 'n', textContent: rg.s.r + i + 1 }), ...Array.from({ length: cols }, (_, c) => { const v = String(r[c] ?? ''); return el('td', { textContent: v, title: v, className: /^-?[\d,.]+%?$/.test(v) ? 'num' : '' }); }))));
+  table.append(tb);
+  table.onclick = (e) => { const td = e.target.closest('td:not(.n)'); if (td) copy(td.textContent, '셀 복사됨'); };
+  return { table, rows, cols };
+}
+function sheetViewer(t, box) { // 엑셀 탭: 표 + 아래쪽 시트 탭 (기본 앱으로 열기 / Finder 는 위 툴바)
+  box.className = 'filev sheetv';
+  const body = el('div', { className: 'sheet-body' }), tabs = el('div', { className: 'sheet-tabs' });
+  box.append(body, tabs);
+  body.append(el('div', { className: 'meta', style: 'padding:16px', textContent: '엑셀 파일을 읽는 중…' }));
+  const LIMIT = 5000;
+  loadWorkbook(t.path, t.ver).then((wb) => {
+    const show = (name) => {
+      t.sheet = name;
+      const { table, rows, cols } = sheetTable(wb.Sheets[name], LIMIT);
+      body.replaceChildren(table, ...(rows > LIMIT ? [el('p', { className: 'meta', style: 'padding:8px', textContent: `… ${LIMIT.toLocaleString()}행까지만 표시 (전체 ${rows.toLocaleString()}행) — 전체는 기본 앱으로 여세요` })] : []));
+      body.scrollTop = body.scrollLeft = 0;
+      tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.name === name));
+      setStatus(`${name} · ${rows.toLocaleString()}행 × ${cols}열 · 읽기 전용`);
+    };
+    tabs.replaceChildren(...wb.SheetNames.map((n) => { const b = el('button', { textContent: n, title: n }); b.dataset.name = n; b.onclick = () => show(n); return b; }));
+    show(wb.SheetNames.includes(t.sheet) ? t.sheet : wb.SheetNames[0]);
+  }).catch((e) => body.replaceChildren(el('div', { className: 'fv-card' }, attBadge(t.path, true), el('div', { className: 'fv-name', textContent: t.path.split('/').pop() }), el('div', { className: 'fv-note', textContent: '엑셀을 읽을 수 없습니다: ' + e.message }))));
+  return box;
 }
 async function fillAttSizes(atts) {
   const fresh = (k) => { const c = attStat.get(k); return c && Date.now() - c.at < 15000 ? c : null; };
@@ -995,6 +1067,7 @@ function fileViewer(t) { // 첨부 파일 탭: PDF·영상·음악은 바로 보
   const kind = MEDIA_EXT[extOf(t.path)], src = rawUrl(t.path, t.ver), name = t.path.split('/').pop();
   const box = el('div', { className: 'filev' + (kind === 'pdf' ? ' pdf' : '') });
   if (kind === 'pdf') { box.append(el('iframe', { src, className: 'fv-pdf', title: name })); return box; }
+  if (SHEET_EXT.has(extOf(t.path))) return sheetViewer(t, box);
   const info = el('div', { className: 'fv-meta' });
   const card = el('div', { className: 'fv-card' }, attBadge(t.path, true), el('div', { className: 'fv-name', textContent: name }), info);
   if (kind === 'video') box.append(el('video', { controls: true, src, className: 'fv-video' }), card);

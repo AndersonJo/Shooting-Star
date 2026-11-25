@@ -337,6 +337,18 @@ textarea.editor.wrap { white-space: pre-wrap; word-break: break-word; }
 .fv-audio { width: min(420px, 80vw); margin-top: 6px; }
 .fv-acts { display: flex; gap: 8px; margin-top: 6px; }
 .fv-acts button { border-color: var(--bd); }
+.filev.sheetv { padding: 0; align-items: stretch; justify-content: stretch; gap: 0; overflow: hidden; }
+.sheet-body { flex: 1; min-height: 0; overflow: auto; }
+.sheet-body > .fv-card { margin: 40px auto; }
+table.sheet td.num { text-align: right; }
+.sheet-tabs { flex: none; display: flex; gap: 2px; padding: 3px 8px; border-top: 1px solid var(--bd); background: var(--bg2); overflow-x: auto; }
+.sheet-tabs:empty { display: none; }
+.sheet-tabs button { font-size: 12px; padding: 2px 12px; border-radius: 0 0 6px 6px; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; color: var(--fg2); }
+.sheet-tabs button.on { background: var(--bg); color: var(--fg); border-color: var(--bd); border-top-color: transparent; font-weight: 600; }
+.md .att-sheet { max-height: 360px; overflow: auto; margin: 6px 0 2px; border: 1px solid var(--bd); border-radius: 6px; }
+.md .att-sheet table.csv { display: table; margin: 0; }
+.md .att-sheet table.csv th, .md .att-sheet table.csv td { border-width: 0 1px 1px 0; }
+.md .att-sheet-note { color: var(--fg2); font-size: 12px; margin-bottom: 6px; }
 .fv-acts button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .md code { font: .88em var(--mono); background: var(--code); padding: .15em .35em; border-radius: 4px; }
 .md pre { position: relative; background: var(--code); padding: 12px 14px; border-radius: 6px; overflow: auto; }
