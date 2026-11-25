@@ -197,11 +197,25 @@ function treePins() {
   if (['diff', 'history', 'run', 'sql'].includes(t.kind) || isMemo(t.path) || isExt(t.path) || isDrop(t.path)) return null;
   return { file: t.path };
 }
+// 트리는 행 요소를 경로별로 기억해 두고 다시 쓴다: 구조(깊이·펼침·git 표시)가 같은 행은 그대로 두고 선택·dirty 표시만 바꾸며,
+// 보이는 행 순서가 같으면 DOM 을 건드리지 않는다 (파일 열기·탭 전환마다 트리 전체를 다시 만들지 않게)
+let treeRows = new Map();   // 경로 → 행 요소
+function treeRow(p, e, depth, open, gm) {
+  const row = el('div', { className: 'row' + (gm ? ' g-' + gm + (e.dir ? ' g-dir' : '') : '') },
+    el('span', { className: 'arrow', textContent: e.dir ? (open ? '▼' : '▶') : '' }),
+    e.dir ? el('span', { className: 'ico dir' }) : el('span', { className: 'ico k-' + kindOf(e.name), textContent: iconOf(e.name) }),
+    el('span', { className: 'nm', textContent: e.name }));
+  row.style.paddingLeft = 6 + depth * 14 + 'px';
+  row.dataset.path = p; row.dataset.dir = e.dir ? '1' : '';
+  if (gm) row.dataset.g = e.dir ? '●' : gm === 'A' ? 'N' : gm;
+  row.title = p + (gm ? (e.dir ? '\n(안에 git 변경 있음)' : gm === 'A' ? '\ngit: 새 파일' : gm === 'U' ? '\ngit: 충돌' : '\ngit: 수정됨') : '');
+  return row;
+}
 async function renderTree() {
   drawRecent();   // 최신 문서의 '열린 문서' 표시도 함께
   const seq = ++treeSeq;   // 연달아 호출되면 마지막 호출의 결과만 화면에 반영한다
-  const root = $('#tree'); const scroll = root.scrollTop;
-  const frag = document.createDocumentFragment(), pins = state.filter ? treePins() : null;
+  const root = $('#tree'), pins = state.filter ? treePins() : null, rows = [], next = new Map();
+  const dirtyPaths = new Set(state.tabs.filter(dirty).map((t) => t.path));
   async function walk(dir, depth) {
     let list = childrenCache.get(dir);
     if (!list) { try { list = await loadDir(dir); } catch { return; } }
@@ -213,24 +227,22 @@ async function renderTree() {
         if (!pinned && (e.dir ? !state.filterDirs.has(p) : !fileMatchesFilter(e.name))) continue;
       }
       const open = e.dir && state.expanded.has(p);
-      const tab = !e.dir && tabOf(p);
       const gm = e.dir ? gitMarks.dirs.get(p) : gitMarks.files.get(p);   // git 변경 표시 (M 수정 / A 새 파일 / U 충돌)
-      const row = el('div', { className: 'row' + (state.selected === p ? ' sel' : '') + (tab && dirty(tab) ? ' dirty' : '') + (gm ? ' g-' + gm + (e.dir ? ' g-dir' : '') : '') },
-        el('span', { className: 'arrow', textContent: e.dir ? (open ? '▼' : '▶') : '' }),
-        e.dir ? el('span', { className: 'ico dir' }) : el('span', { className: 'ico k-' + kindOf(e.name), textContent: iconOf(e.name) }),
-        el('span', { className: 'nm', textContent: e.name }));
-      row.style.paddingLeft = 6 + depth * 14 + 'px';
-      row.dataset.path = p; row.dataset.dir = e.dir ? '1' : '';
-      if (gm) row.dataset.g = e.dir ? '●' : gm === 'A' ? 'N' : gm;
-      row.title = p + (gm ? (e.dir ? '\n(안에 git 변경 있음)' : gm === 'A' ? '\ngit: 새 파일' : gm === 'U' ? '\ngit: 충돌' : '\ngit: 수정됨') : '');
-      frag.append(row);
+      const key = `${depth}|${e.dir ? 1 : 0}|${open ? 1 : 0}|${gm || ''}`;
+      let row = treeRows.get(p);
+      if (!row || row._key !== key) { row = treeRow(p, e, depth, open, gm); row._key = key; }
+      row.classList.toggle('sel', state.selected === p); row.classList.toggle('dirty', dirtyPaths.has(p));
+      next.set(p, row); rows.push(row);
       if (open) await walk(p, depth + 1);
     }
   }
   await walk('', 0);
-  if (state.filter && state.filterDirs && !frag.childNodes.length) frag.append(el('div', { className: 'tree-empty', textContent: '설정된 파일 형식이 있는 폴더가 없습니다' }));
   if (seq !== treeSeq) return;
-  root.replaceChildren(frag); root.scrollTop = scroll;
+  treeRows = next;
+  if (state.filter && state.filterDirs && !rows.length) rows.push(el('div', { className: 'tree-empty', textContent: '설정된 파일 형식이 있는 폴더가 없습니다' }));
+  const kids = root.children; let same = kids.length === rows.length;
+  for (let i = 0; same && i < rows.length; i++) same = kids[i] === rows[i];
+  if (!same) { const scroll = root.scrollTop; root.replaceChildren(...rows); root.scrollTop = scroll; }
   paintTreeHits();
 }
 async function refreshDir(p) { // 변경 후 해당 폴더 재로딩
@@ -550,7 +562,7 @@ function onFsEvent(d) { // d: { paths, all }
       if (!isMemo(t.path) && !isExt(t.path) && (!set || set.has(t.path))) syncTab(t);
     }
     if (isMemo(state.active) || isExt(state.active)) syncTab(cur());
-    refreshMemos(); refreshGit(!!d.all); loadRecentSoon();
+    refreshMemos(); refreshGit(); loadRecentSoon();
   }, 150);
 }
 function connectEvents() {
@@ -563,7 +575,7 @@ function connectEvents() {
 let lastActivate = 0;
 function onActivate() {
   if (document.hidden || Date.now() - lastActivate < 400) return;
-  lastActivate = Date.now(); onFsEvent({ all: true, paths: [] }); refreshGit(true); clipCheck();   // 다른 앱에서 복사했으면 복사 표시를 지운다
+  lastActivate = Date.now(); onFsEvent({ all: true, paths: [] }); clipCheck();   // git 상태는 서버 캐시 (감시가 .git 변경까지 본다)   // 다른 앱에서 복사했으면 복사 표시를 지운다
   if (runUi.dir) loadRun();   // Run 폴더 감시가 놓친 변경 대비
 }
 window.addEventListener('focus', onActivate);
@@ -729,8 +741,22 @@ function validate() {
   pos.textContent = `${(new Blob([t.content]).size / 1024).toFixed(1)} KB`;
 }
 
+// 편집기/미리보기 화면은 탭마다 메모리에 두고 다시 붙인다: 탭을 오갈 때 다시 그리지 않고, 스크롤·커서·실행 취소 기록도 그대로
+function viewKey(t) { return `${t.kind}|${t.mode}|${state.wrap ? 1 : 0}`; }
+function viewSave(box) {   // 화면에서 떼기 전에 스크롤·선택 위치를 기억
+  const v = box._owner?._view; if (!v || box.firstChild !== v.panes[0]) return;
+  const ta = v.panes[0].querySelector('textarea.editor'), pv = v.panes.find((x) => x.id === 'preview');
+  v.pos = { ta: ta && { top: ta.scrollTop, left: ta.scrollLeft, a: ta.selectionStart, b: ta.selectionEnd, focus: document.activeElement === ta }, pv: pv?.scrollTop };
+}
+function viewRestore(v) {
+  const p = v.pos; if (!p) return;
+  const ta = v.panes[0].querySelector('textarea.editor'), pv = v.panes.find((x) => x.id === 'preview');
+  if (ta && p.ta) { ta.scrollTop = p.ta.top; ta.scrollLeft = p.ta.left; try { ta.setSelectionRange(p.ta.a, p.ta.b); } catch {} if (p.ta.focus) ta.focus({ preventScroll: true }); }
+  if (pv && p.pv != null) pv.scrollTop = p.pv;
+}
 function renderContent() {
   const box = $('#content'); const t = cur();
+  viewSave(box); box._owner = t;
   if (t?.kind !== 'gallery') galUnwatch();   // 갤러리 폴더 감시는 보이는 동안만
   if (!t) { box.replaceChildren(EMPTY); return; }
   if (t.kind === 'gallery') { const v = galleryView(t); if (box.firstChild !== v || box.childNodes.length !== 1) box.replaceChildren(v); validate(); return; }   // 같은 화면이면 다시 붙이지 않는다 (스크롤 유지)
@@ -741,6 +767,17 @@ function renderContent() {
   if (t.kind === 'history') { const v = historyView(t); if (box.firstChild !== v || box.childNodes.length !== 1) { box.replaceChildren(v); histRestoreScroll(t); } validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.blame) { box.replaceChildren(blameView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.kind === 'diff') { box.replaceChildren(diffView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
+  const v0 = t._view;
+  if (v0 && t.mode !== 'smart' && v0.key === viewKey(t) && v0.content === t.content) {   // 그대로 다시 붙인다
+    if (box.firstChild !== v0.panes[0] || box.childNodes.length !== v0.panes.length) {   // 이미 붙어 있으면 건드리지 않는다
+      box.replaceChildren(...v0.panes); viewRestore(v0);
+      $('textarea.editor')?.dispatchEvent(new Event('scroll'));   // 줄번호·강조 레이어 스크롤 맞추기
+    }
+    validate();
+    if (fb.open) { placeFindBar(); runFileFind(true); }
+    return;
+  }
+  t._view = null;
   const panes = [];
   const editor = () => {
     const lang = langOf(t.path);
@@ -774,7 +811,7 @@ function renderContent() {
     };
     ta.onscroll = () => { pre.scrollTop = fm.scrollTop = lnPre.scrollTop = ta.scrollTop; pre.scrollLeft = fm.scrollLeft = ta.scrollLeft; };
     ta.oninput = () => {
-      t.content = ta.value;
+      t.content = ta.value; if (t._view) t._view.content = t.content;
       syncDirtyUi(t); validateSoon(); updatePreview(); paint();
       if (fb.open) { clearTimeout(fb.timer); fb.timer = setTimeout(() => runFileFind(false), 120); }
       autosave(t);   // 입력을 멈추면 자동 저장 (설정)
@@ -811,6 +848,7 @@ function renderContent() {
   else if (t.mode === 'split') panes.push(editor(), el('div', { className: 'pane', id: 'preview' }));
   else panes.push(el('div', { className: 'pane', id: 'preview' }));
   box.replaceChildren(...panes);
+  if (t.mode !== 'smart') t._view = { key: viewKey(t), content: t.content, panes };
   const ed = $('textarea.editor'); if (ed) { ed.parentElement.style.overflow = 'hidden'; }
   if (t.mode === 'split' && t.kind === 'md' && ed) splitSync(ed, $('#preview'));
   updatePreview();
@@ -3983,7 +4021,7 @@ function imageViewer(t, o = {}) {
 // · 클릭=선택, 더블클릭/Enter=전체화면 보기(검정 배경, ←/→·‹ ›, 앞뒤 미리 디코딩, Esc 로 목록)  · 보고 있는 폴더가 바뀌면 자동 반영
 // · 여러 장 선택: ⌘/Ctrl+클릭 하나씩, Shift+클릭(Shift+방향키) 범위, ⌘A 전체, Esc 해제 → ⌘C 복사 / ⌘X 잘라내기 → 트리 폴더·갤러리에서 ⌘V (아래 '파일 클립보드')
 const galJoin = (dir, name) => (dir === '/' ? '' : dir) + '/' + name;
-const galThumb = (abs, w, ver) => `/thumb?root=%2F&path=${encodeURIComponent(abs.slice(1))}&w=${w}&v=${ver || 0}`;
+const galThumb = (abs, w, ver) => `/thumb?root=%2F&path=${encodeURIComponent(abs.slice(1))}&w=${w}&v=${ver || 0}`;   // v(수정 시각)가 있으면 브라우저가 재확인 없이 캐시를 쓴다
 const GAL_GAP = 6;
 let galWatch = null;   // { dir, es } : 지금 보이는 갤러리 폴더만 감시 (호스트당 연결 수 한도 때문에 탭마다 열어 두지 않는다)
 const galQ = { run: 0, list: [] };
@@ -4018,9 +4056,12 @@ function galWatchDir(t) {
   galWatch = { dir: t.dir, es };
 }
 function galRefresh(t) { const g = t.g; if (!g) return; clearTimeout(g.refreshT); g.refreshT = setTimeout(() => galLoad(t), 120); }
+// 폴더별 갤러리 목록을 기억해 둔다: 다시 열면 바로 그리고, 뒤에서 다시 읽어 바뀐 것만 반영한다
+const galCache = new Map();   // 절대경로 → 목록 (최근 60개)
+const galCachePut = (dir, d) => { galCache.delete(dir); galCache.set(dir, d); while (galCache.size > 60) galCache.delete(galCache.keys().next().value); };
 async function galLoad(t) {
-  const g = t.g; if (!g) return; const seq = ++g.seq;
-  try { const d = await api('GET', 'gallery', { path: '@ext' + t.dir }); if (seq !== g.seq || t.g !== g) return; g.data = d; g.err = null; }
+  const g = t.g; if (!g) return; const seq = ++g.seq, dir = t.dir;
+  try { const d = await api('GET', 'gallery', { path: '@ext' + dir }); galCachePut(dir, d); if (seq !== g.seq || t.g !== g) return; if (g.data && JSON.stringify(g.data) === JSON.stringify(d)) return; g.data = d; g.err = null; }
   catch (e) { if (seq !== g.seq || t.g !== g) return; g.err = e.message; g.data = null; }
   galBuild(t);
   if (t.path === state.active) { renderToolbar(); validate(); }
@@ -4046,7 +4087,8 @@ function galleryView(t) {
   g.ro = new ResizeObserver(() => galRelayout(t)); g.ro.observe(sc);
   g.io = new IntersectionObserver((ents) => { for (const e of ents) { e.target._vis = e.isIntersecting; if (e.isIntersecting) galWant(e.target); } }, { root: sc, rootMargin: '900px 0px' });
   root.addEventListener('keydown', (e) => galKey(t, e));
-  sc.replaceChildren(el('div', { className: 'gal-empty', textContent: '불러오는 중…' }));
+  const cached = galCache.get(t.dir);
+  if (cached) { g.data = cached; galBuild(t); galRelayout(t); }   // 화면에 붙은 다음 프레임에 배치 else sc.replaceChildren(el('div', { className: 'gal-empty', textContent: '불러오는 중…' }));
   galWatchDir(t); galLoad(t);
   requestAnimationFrame(() => { if (root.isConnected && (!document.activeElement || document.activeElement === document.body)) root.focus({ preventScroll: true }); });
   return root;
@@ -4095,7 +4137,7 @@ function galTile(t, it) {
 }
 function galDirTile(t, sd) {
   const abs = galJoin(t.dir, sd.name);
-  const cover = sd.cover ? el('img', { alt: '', draggable: false, loading: 'lazy', decoding: 'async', src: galThumb(galJoin(abs, sd.cover), 256, 0) }) : el('span', { className: 'gal-dir-ic', textContent: '📁' });
+  const cover = sd.cover ? el('img', { alt: '', draggable: false, loading: 'lazy', decoding: 'async', src: galThumb(galJoin(abs, sd.cover), 256, sd.coverMtime) }) : el('span', { className: 'gal-dir-ic', textContent: '📁' });
   const tile = el('div', { className: 'gal-dir', title: abs + (sd.images ? `  (이미지 ${sd.images}장)` : '') },
     el('div', { className: 'gal-dir-cover' }, cover),
     el('div', { className: 'gal-dir-meta' }, el('span', { className: 'gal-dir-name', textContent: sd.name }), el('span', { className: 'gal-dir-n', textContent: sd.images ? sd.images + '장' : '' })));
@@ -4124,7 +4166,7 @@ function galBuild(t) {
   });
   for (const [n, x] of g.tiles) if (!tiles.has(n)) g.io.unobserve(x);
   g.tiles = tiles;
-  const dirs = d.dirs.map((sd) => { const k = `${sd.name}|${sd.images}|${sd.cover}`; const x = g.dirTiles.get(k) || galDirTile(t, sd); dirTiles.set(k, x); return x; });
+  const dirs = d.dirs.map((sd) => { const k = `${sd.name}|${sd.images}|${sd.cover}|${sd.coverMtime}`; const x = g.dirTiles.get(k) || galDirTile(t, sd); dirTiles.set(k, x); return x; });
   g.dirTiles = dirTiles;
   const pp = g.pendingPick, first = pp && Date.now() - pp.at < 5000 ? g.tileList.find((x) => pp.names.has(x._it.name)) : null;
   if (first) { g.pendingPick = null; g.picked = new Set([...pp.names].filter((n) => tiles.has(n))); g.sel = first._i; g.anchor = first._it.name; requestAnimationFrame(() => first.scrollIntoView({ block: 'nearest' })); }   // 방금 붙여넣은 것들을 골라 둔다

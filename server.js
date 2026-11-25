@@ -469,6 +469,10 @@ async function mapLimit(arr, n, fn) {
   await Promise.all(Array.from({ length: Math.min(n, arr.length) }, async () => { while (i < arr.length) { const k = i++; out[k] = await fn(arr[k]); } }));
   return out;
 }
+// 메모리 캐시: 이미지 픽셀 크기(파일 크기·수정 시각이 같으면 헤더를 다시 읽지 않는다), 하위 폴더 요약(폴더 수정 시각이 같으면 다시 읽지 않는다)
+const dimCache = new Map();   // 절대경로 → { size, mtime, w, h }
+const subCache = new Map();   // 절대경로 → { mtime, images, cover, coverMtime }
+const capMap = (m, n) => { if (m.size > n) for (const k of [...m.keys()].slice(0, m.size - n * 0.8)) m.delete(k); };
 async function galleryList(dir) {
   const ents = (await fsp.readdir(dir, { withFileTypes: true })).filter((e) => !e.name.startsWith('.') && !IGNORE.has(e.name));
   const dirs = [], imgs = []; let others = 0;
@@ -480,15 +484,29 @@ async function galleryList(dir) {
   const images = (await mapLimit(imgs.slice(0, GALLERY_MAX), 16, async (name) => {
     try {
       const abs = path.join(dir, name), st = await fsp.stat(abs); if (!st.isFile()) return null;
+      const mtime = Math.round(st.mtimeMs), c = dimCache.get(abs);
+      if (c && c.size === st.size && c.mtime === mtime) return { name, w: c.w, h: c.h, size: st.size, mtime };
       let dim = imageSize(await readHead(abs, 65536));
       if (!dim && /\.jpe?g$/i.test(name)) dim = imageSize(await readHead(abs));   // EXIF 가 큰 JPEG 는 SOF 가 뒤에 있다
-      return { name, w: dim?.w || null, h: dim?.h || null, size: st.size, mtime: Math.round(st.mtimeMs) };
+      dimCache.delete(abs); dimCache.set(abs, { size: st.size, mtime, w: dim?.w || null, h: dim?.h || null });
+      return { name, w: dim?.w || null, h: dim?.h || null, size: st.size, mtime };
     } catch { return null; }   // 쓰는 중이거나 방금 지워진 파일
   })).filter(Boolean);
   const subs = await mapLimit(dirs.slice(0, 500), 16, async (name) => {
-    try { const ns = (await fsp.readdir(path.join(dir, name))).filter((n) => !n.startsWith('.') && isImgName(n)).sort(natCmp); return { name, images: ns.length, cover: ns[0] || null }; }
-    catch { return { name, images: 0, cover: null }; }
+    const sub = path.join(dir, name);
+    try {
+      const mt = (await fsp.stat(sub)).mtimeMs, c = subCache.get(sub);
+      let v = c && c.mtime === mt ? c : null;
+      if (!v) {
+        const ns = (await fsp.readdir(sub)).filter((n) => !n.startsWith('.') && isImgName(n)).sort(natCmp);
+        v = { mtime: mt, images: ns.length, cover: ns[0] || null, coverMtime: 0 };
+        subCache.delete(sub); subCache.set(sub, v);
+      }
+      if (v.cover) { try { v.coverMtime = Math.round((await fsp.stat(path.join(sub, v.cover))).mtimeMs); } catch { v.coverMtime = 0; } }   // 대표 이미지 내용이 바뀐 것은 폴더 시각에 안 나온다
+      return { name, images: v.images, cover: v.cover, coverMtime: v.coverMtime };
+    } catch { return { name, images: 0, cover: null, coverMtime: 0 }; }
   });
+  capMap(dimCache, 200000); capMap(subCache, 20000);
   return { path: dir, parent: path.dirname(dir) !== dir ? path.dirname(dir) : null, dirs: subs, images, others, total: imgs.length, truncated: imgs.length > GALLERY_MAX };
 }
 
@@ -1455,7 +1473,7 @@ async function api(req, res, url, root) {
         while (next < list.length) {
           const abs = list[next++], base = { abs, rel: path.relative(root, abs), name: path.basename(abs) };
           try {
-            const { st, hasRemote } = await cachedGitStat(abs, fresh);
+            const { st, hasRemote } = await cachedGitStat(abs, fresh || !(abs === root || abs.startsWith(root + path.sep)));   // 작업 폴더 위쪽 repo 의 .git 은 감시 밖 → 항상 다시
             const files = st.files.map((f) => { const rp = path.relative(root, path.join(abs, f.path)); return { ...f, rp: rp.startsWith('..') || path.isAbsolute(rp) ? null : rp }; });   // 작업 폴더 기준 경로 (트리 표시용)
             out.push({ ...base, ...st, files, hasRemote });
           } catch (e) { out.push({ ...base, error: gitMsg(e), files: [] }); }
@@ -1805,7 +1823,9 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/thumb') {
         const w = Math.min(4096, Math.max(256, Number(url.searchParams.get('w')) || 2048));
         const t = await thumbFor(abs, st, w);
-        if (t) return sendFile(req, res, t.file, t.type, await fsp.stat(t.file));
+        const v = url.searchParams.get('v'), keep = v && v !== '0' ? { 'Cache-Control': 'private, max-age=31536000, immutable' } : {};   // 화면이 원본 수정 시각을 붙여 요청하면 그 주소의 내용은 바뀌지 않는다 → 재확인 없이 캐시
+        if (t) return sendFile(req, res, t.file, t.type, await fsp.stat(t.file), keep);
+        return sendFile(req, res, abs, type, st, { ...csp, ...keep });   // 작은 이미지는 원본 그대로
       }
       return sendFile(req, res, abs, type, st, csp);
     }
