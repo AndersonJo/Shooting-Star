@@ -4196,21 +4196,33 @@ for (const kind of ['copy', 'cut']) document.addEventListener(kind, (e) => { // 
   if (!galFocused() || String(getSelection())) return;
   e.preventDefault(); galClip(cur(), kind);
 });
-// ⌘/Ctrl+Shift+V: 글자만 붙여넣기 — 첨부(이미지)·링크 변환 없이 일반 텍스트를 앞뒤 공백을 지워(strip) 넣는다
+// Ctrl+Shift+V (⌘⇧V 도): 글자만 붙여넣기 — 첨부(이미지)·링크 변환 없이 일반 텍스트를 앞뒤 공백을 지워(strip) 넣는다
 let plainPasteAt = 0;
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 const isTextField = (t) => t?.closest?.('textarea, input:not([type=checkbox]):not([type=radio]):not([type=button])');
+function insertPlain(ta, raw) {
+  const text = (raw || '').trim(); if (!text) return;
+  ta.focus();
+  if (!document.execCommand('insertText', false, text)) { // 실행취소를 유지하려 execCommand 우선
+    ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end'); ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
 document.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.code === 'KeyV' && isTextField(e.target)) plainPasteAt = Date.now();   // 이어서 오는 paste 이벤트를 글자만 붙여넣기로 (브라우저·앱 메뉴 모두 paste 이벤트를 보낸다)
+  if (!((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.code === 'KeyV')) return;
+  const ta = isTextField(e.target); if (!ta) return;
+  plainPasteAt = Date.now();   // 이어서 오는 paste 이벤트를 글자만 붙여넣기로 (앱: 편집 메뉴가 ⌃⇧V·⌘⇧V 로 paste 를 보낸다)
+  // 브라우저의 macOS Ctrl+Shift+V 는 paste 이벤트가 오지 않는다 → 클립보드를 직접 읽는다 (Windows/Linux 의 Ctrl+Shift+V, ⌘⇧V 는 paste 이벤트가 온다)
+  if (e.ctrlKey && !e.metaKey && IS_MAC && !window.webkit?.messageHandlers?.edit) {
+    e.preventDefault(); plainPasteAt = 0;
+    navigator.clipboard?.readText?.().then((s) => insertPlain(ta, s), () => toast('클립보드를 읽지 못했습니다 (브라우저 권한)'));
+  }
 }, true);
 document.addEventListener('paste', (e) => {
   if (Date.now() - plainPasteAt > 1000) return;
   plainPasteAt = 0;
   const ta = isTextField(e.target); if (!ta) return;
   e.preventDefault(); e.stopImmediatePropagation();
-  const text = (e.clipboardData?.getData('text/plain') || '').trim(); if (!text) return;
-  if (!document.execCommand('insertText', false, text)) { // 실행취소를 유지하려 execCommand 우선
-    ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end'); ta.dispatchEvent(new Event('input', { bubbles: true }));
-  }
+  insertPlain(ta, e.clipboardData?.getData('text/plain'));
 }, true);
 document.addEventListener('paste', (e) => { // 편집 > 붙여넣기 메뉴로 들어온 경우 (단축키는 keydown 에서 이미 처리)
   if (e.target.closest?.('input, textarea, [contenteditable]') || Date.now() - clipKeyAt < 600) return;

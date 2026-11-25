@@ -369,7 +369,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             mi("오려두기", #selector(NSText.cut(_:)), "x"),
             mi("복사하기", #selector(NSText.copy(_:)), "c"),
             mi("붙여넣기", #selector(NSText.paste(_:)), "v"),
-            mi("글자만 붙여넣기 (앞뒤 공백 제거)", #selector(NSText.paste(_:)), "v", [.command, .shift]),   // 페이지가 ⌘⇧V 를 보고 paste 이벤트를 글자만 + strip 으로 처리한다
+            mi("글자만 붙여넣기 (앞뒤 공백 제거)", #selector(NSText.paste(_:)), "v", [.control, .shift]),   // 페이지가 ⌃⇧V 를 보고 paste 이벤트를 글자만 + strip 으로 처리한다
+            mi("글자만 붙여넣기 (⌘)", #selector(NSText.paste(_:)), "v", [.command, .shift]),
             mi("전체 선택", #selector(NSText.selectAll(_:)), "a"),
         ])
         add("보기", [
