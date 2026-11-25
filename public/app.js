@@ -198,6 +198,7 @@ function treePins() {
   return { file: t.path };
 }
 async function renderTree() {
+  drawRecent();   // 최신 문서의 '열린 문서' 표시도 함께
   const seq = ++treeSeq;   // 연달아 호출되면 마지막 호출의 결과만 화면에 반영한다
   const root = $('#tree'); const scroll = root.scrollTop;
   const frag = document.createDocumentFragment(), pins = state.filter ? treePins() : null;
@@ -548,7 +549,7 @@ function onFsEvent(d) { // d: { paths, all }
       if (!isMemo(t.path) && !isExt(t.path) && (!set || set.has(t.path))) syncTab(t);
     }
     if (isMemo(state.active) || isExt(state.active)) syncTab(cur());
-    refreshMemos(); refreshGit();
+    refreshMemos(); refreshGit(); loadRecentSoon();
   }, 150);
 }
 function connectEvents() {
@@ -1773,7 +1774,7 @@ function applyTheme(name) {
 }
 lightMQ.addEventListener?.('change', () => { if (store.get('theme', 'dark') === 'system') applyTheme('system'); });
 
-const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark', checkUpdates: true, gitMarks: true, imageFit: 'fill', autoSave: '1' };
+const SETTINGS_DEFAULT = { searchTypes: ['yaml', 'json', 'python', 'markdown', 'java'], searchAll: false, customExts: '', theme: 'dark', checkUpdates: true, gitMarks: true, imageFit: 'fill', autoSave: '1', recentDocs: 5 };
 
 // ───────── 업데이트 확인 (서버가 GitHub Releases 의 최신 버전과 비교) ─────────
 let updateInfo = null;
@@ -1895,6 +1896,8 @@ function openSettings() {
     }));
     const root = el('input', { className: 'st-custom', placeholder: '~/projects', value: settings.defaultRoot || '', spellcheck: false });
     root.oninput = () => { settings.defaultRoot = root.value.trim(); clearTimeout(root._t); root._t = setTimeout(saveSettings, 400); };
+    const rcN = el('input', { className: 'st-custom st-num', type: 'number', min: 1, max: 50, value: recentN() });
+    rcN.oninput = () => { const v = Math.round(Number(rcN.value)); if (!(v >= 1 && v <= 50)) return; settings.recentDocs = v; clearTimeout(rcN._t); rcN._t = setTimeout(() => { saveSettings(); loadRecent(); }, 300); };
     const custom = el('input', { className: 'st-custom', placeholder: '추가 확장자 (예: env, proto, tf)', value: settings.customExts, spellcheck: false });
     custom.oninput = () => { settings.customExts = custom.value; clearTimeout(custom._t); custom._t = setTimeout(apply, 300); };
     const close = el('button', { textContent: '닫기', className: 'st-close' }); close.onclick = () => { box.hidden = true; };
@@ -1905,6 +1908,7 @@ function openSettings() {
       el('div', { className: 'st-sec', textContent: '테마' }), themeGrid,
       el('div', { className: 'st-sec', textContent: '이미지 보기 (⌘/Ctrl +/- 는 이미지 확대/축소)' }), imgFit,
       el('div', { className: 'st-sec', textContent: '자동 저장 (외부에서 수정된 파일은 덮어쓰지 않습니다 · 메모는 항상 자동 저장)' }), autoOpts,
+      el('div', { className: 'st-sec', textContent: '사이드바 최신 문서 개수 (최근 수정한 마크다운 문서, 1~50)' }), rcN,
       el('div', { className: 'st-sec', textContent: '기본 프로젝트 위치 (마지막으로 연 폴더가 없을 때 여기서 시작, 비우면 ~/projects)' }), root,
       el('div', { className: 'st-sec', textContent: '내용 검색 (⌘/Ctrl+Shift+F) 대상 파일 형식' }),
       all, el('div', { className: 'st-grid' }, ...cats), custom,
@@ -4767,7 +4771,14 @@ const pk = { items: [], sel: 0, dir: '', mode: 'dir' };
 // 파일은 'f:' + 절대경로, 폴더는 절대경로 그대로 저장한다
 let favs = [];
 const favKey = (rel, isDir) => (isDir ? '' : 'f:') + state.root + '/' + rel;
-const loadFavs = async () => { try { favs = await api('GET', 'favorites'); } catch { favs = []; } drawFavBtn(); };
+const loadFavs = async () => {
+  try { favs = await api('GET', 'favorites'); } catch { favs = []; }
+  if (!store.get('favsOrdered', false)) { // 한 번만: 예전(새 항목이 맨 앞) 순서를 기본 순서(폴더 → 파일)로 바꿔 둔다. 이후로는 사용자가 정한 순서를 지킨다
+    store.set('favsOrdered', true);
+    const o = favDefaultOrder(favs); if (o.join('\n') !== favs.join('\n')) { favs = o; return saveFavs(); }
+  }
+  drawFavBtn();
+};
 const saveFavs = async () => { await api('PUT', 'favorites', {}, { list: favs }); drawFavBtn(); };
 function drawFavBtn() {
   const on = favs.includes(state.root), b = $('#btn-fav');
@@ -4775,20 +4786,43 @@ function drawFavBtn() {
   b.title = on ? '즐겨찾기에서 제거' : '이 폴더를 즐겨찾기에 추가';
   drawFavList();
 }
-// 사이드바 상단의 즐겨찾기 폴더 목록
+// 사이드바 접이식 패널 머리줄: 클릭하면 접기/펼치기 (상태는 이 브라우저에 기억), extra 는 오른쪽 버튼들
+const foldOpen = (id) => store.get('fold:' + id, true);
+function panelHead(id, cls, label, extra, onToggle) {
+  const open = foldOpen(id);
+  const head = el('div', { className: 'side-head ' + cls, title: '클릭: 접기/펼치기' },
+    el('span', { className: 'sh-caret', textContent: open ? '▾' : '▸' }), el('span', { className: 'sh-l', textContent: label }), ...(extra || []));
+  head.onclick = () => { store.set('fold:' + id, !open); onToggle(); };
+  return head;
+}
+// 기본 순서: 폴더 먼저, 그다음 파일 — 각각 이름순
+const favIsFile = (k) => k.startsWith('f:');
+const favName = (k) => (favIsFile(k) ? k.slice(2) : k).split('/').filter(Boolean).at(-1) || '/';
+const favDefaultOrder = (list) => [...list].sort((a, b) => favIsFile(a) - favIsFile(b) || favName(a).localeCompare(favName(b), undefined, { numeric: true, sensitivity: 'base' }) || a.localeCompare(b));
+// 사이드바 상단의 즐겨찾기 목록 (접기/펼치기 · 드래그로 순서 바꾸기 · ⇅ 로 기본 순서)
+const favDrag = { key: null };
 function drawFavList() {
   const box = $('#favs');
-  const head = el('div', { className: 'fav-head', textContent: '★ 즐겨찾기' });
+  const sortBtn = el('button', { className: 'sh-btn', textContent: '⇅', title: '기본 순서로 다시 정렬 (폴더 → 파일, 이름순)' });
+  sortBtn.onclick = async (e) => {
+    e.stopPropagation();
+    if (!favs.length || !confirm('즐겨찾기를 기본 순서(폴더 먼저 → 파일, 각각 이름순)로 다시 정렬할까요?\n직접 옮겨 둔 순서는 사라집니다.')) return;
+    favs = favDefaultOrder(favs); await saveFavs(); toast('즐겨찾기를 다시 정렬했습니다');
+  };
+  const head = panelHead('favs', 'fav-head', '★ 즐겨찾기' + (favs.length ? ` (${favs.length})` : ''), favs.length > 1 ? [sortBtn] : [], drawFavList);
+  if (!foldOpen('favs')) { box.classList.add('folded'); box.replaceChildren(head); return; }
+  box.classList.remove('folded');
   if (!favs.length) {
     box.replaceChildren(head, el('div', { className: 'fav-empty', textContent: '위의 ☆ 로 현재 폴더 추가 · 파일/폴더 우클릭으로도 추가' }));
     return;
   }
+  const clearMarks = () => box.querySelectorAll('.drop-before,.drop-after').forEach((r) => r.classList.remove('drop-before', 'drop-after'));
   const rows = favs.map((key) => {
-    const isFile = key.startsWith('f:'), f = isFile ? key.slice(2) : key;
+    const isFile = favIsFile(key), f = isFile ? key.slice(2) : key;
     const x = el('span', { className: 'fx', textContent: '✕', title: '즐겨찾기에서 제거' });
     x.onclick = async (e) => { e.stopPropagation(); favs = favs.filter((y) => y !== key); await saveFavs(); };
     const segs = f.split('/').filter(Boolean), inside = f.startsWith(state.root + '/');
-    const row = el('div', { className: 'fav' + (f === state.root && !isFile ? ' cur' : ''), title: f + (isFile ? '\n클릭: 파일 열기' : f === state.root ? '' : inside ? '\n클릭: 트리에서 이 폴더로 이동' : '\n클릭: 이 폴더를 워크스페이스로 열기') },
+    const row = el('div', { className: 'fav' + (f === state.root && !isFile ? ' cur' : ''), draggable: true, title: f + (isFile ? '\n클릭: 파일 열기' : f === state.root ? '' : inside ? '\n클릭: 트리에서 이 폴더로 이동' : '\n클릭: 이 폴더를 워크스페이스로 열기') + '\n드래그: 순서 바꾸기' },
       el('span', { className: 'fn', textContent: (isFile ? '📄 ' : '') + (segs.at(-1) || '/') }), segs.length > 1 ? el('span', { className: 'fp', textContent: segs.at(-2) }) : '', x);   // 같은 이름이 여러 개여도 구분되도록 상위 폴더 이름을 흐리게 덧붙인다
     row.onclick = () => {
       if (isFile) openExternal(f);   // 파일: 바로 열기 (워크스페이스 안이면 일반 탭)
@@ -4796,14 +4830,64 @@ function drawFavList() {
       else if (f.startsWith(state.root + '/')) revealInTree(f.slice(state.root.length + 1), true);   // 현재 폴더 안이면 트리에서 바로 그 폴더로 이동 (펼치고 선택)
       else go(f);   // 밖이면 그 폴더를 워크스페이스로 연다
     };
+    // 마우스로 끌어서 순서 바꾸기: 놓는 위치가 행의 위쪽 절반이면 앞, 아래쪽이면 뒤
+    row.ondragstart = (e) => { favDrag.key = key; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/x-ss-fav', key); row.classList.add('dragging'); };
+    row.ondragend = () => { favDrag.key = null; row.classList.remove('dragging'); clearMarks(); };
+    row.ondragover = (e) => {
+      if (!favDrag.key) return;
+      e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+      const r = row.getBoundingClientRect(), before = e.clientY < r.top + r.height / 2;
+      clearMarks(); if (favDrag.key !== key) row.classList.add(before ? 'drop-before' : 'drop-after');
+    };
+    row.ondrop = async (e) => {
+      if (!favDrag.key) return;
+      e.preventDefault();
+      const from = favDrag.key, r = row.getBoundingClientRect(), before = e.clientY < r.top + r.height / 2;
+      favDrag.key = null; clearMarks();
+      if (from === key) return;
+      const list = favs.filter((y) => y !== from);
+      list.splice(list.indexOf(key) + (before ? 0 : 1), 0, from);
+      if (list.join('\n') === favs.join('\n')) return;
+      favs = list; await saveFavs();
+    };
     return row;
   });
   box.replaceChildren(head, ...rows);
 }
 async function toggleFavDir(abs) {
   const had = favs.includes(abs);
-  favs = had ? favs.filter((f) => f !== abs) : [abs, ...favs];
+  if (had) favs = favs.filter((f) => f !== abs);
+  else { // 새 항목은 자기 무리의 끝에: 폴더는 폴더들 뒤(파일들 앞), 파일은 맨 끝
+    const i = favIsFile(abs) ? favs.length : favs.findIndex(favIsFile);
+    favs = [...favs]; favs.splice(i < 0 ? favs.length : i, 0, abs);
+  }
   await saveFavs(); toast(had ? '즐겨찾기에서 제거됨' : '즐겨찾기에 추가됨');
+}
+// ───────── 최신 문서 (최근 수정한 마크다운 N개, 설정에서 개수 변경) ─────────
+let recentList = [], recentSeq = 0, recentTimer = 0;
+const recentN = () => Math.max(1, Math.min(50, Number(settings.recentDocs) || 5));
+async function loadRecent() {
+  if (!foldOpen('recent')) return drawRecent();   // 접혀 있으면 묻지 않는다 (펼칠 때 받는다)
+  const seq = ++recentSeq;
+  try { const r = await api('GET', 'recent-docs', { n: recentN() }); if (seq === recentSeq) recentList = r; } catch {}
+  if (seq === recentSeq) drawRecent();
+}
+const loadRecentSoon = () => { clearTimeout(recentTimer); recentTimer = setTimeout(loadRecent, 400); };
+function drawRecent() {
+  const box = $('#recent'); if (!box) return;
+  const head = panelHead('recent', 'rc-head', '🕘 최신 문서', [], () => { drawRecent(); if (foldOpen('recent')) loadRecent(); });
+  if (!foldOpen('recent')) { box.classList.add('folded'); box.replaceChildren(head); return; }
+  box.classList.remove('folded');
+  if (!recentList.length) { box.replaceChildren(head, el('div', { className: 'fav-empty', textContent: '마크다운 문서가 없습니다' })); return; }
+  box.replaceChildren(head, ...recentList.map((d) => {
+    const segs = d.path.split('/'), name = segs.at(-1);
+    const row = el('div', { className: 'fav rc' + (state.active === d.path ? ' cur' : ''), title: `${d.path}\n${new Date(d.mtime).toLocaleString()}` },
+      el('span', { className: 'fn', textContent: name }), segs.length > 1 ? el('span', { className: 'fp', textContent: segs.at(-2) }) : '',
+      el('span', { className: 'rt', textContent: ago(d.mtime / 1000) }));
+    row.onclick = () => openFile(d.path);
+    row.oncontextmenu = (e) => { e.preventDefault(); revealInTree(d.path, false); };
+    return row;
+  }));
 }
 $('#btn-fav').onclick = () => toggleFavDir(state.root);
 const go = (p) => { addRecent(p); try { sessionStorage.setItem('ss:navFrom', state.root); } catch {} location.href = '/?root=' + encodeURIComponent(p); };   // navFrom: 거기서 끝까지 뒤로 가면 여기로
@@ -4971,7 +5055,7 @@ document.addEventListener('wheel', (e) => { // ⌘/Ctrl + 휠, 트랙패드 핀�
   api('PUT', 'last', {}, { root: info.root }).catch(() => {}); state.home = info.home;
   history.replaceState(null, '', '/?root=' + encodeURIComponent(info.root));
   $('#root-name').textContent = info.name; $('#root-name').title = info.root + '  (클릭 / ⌘⇧O: 폴더 열기)';
-  addRecent(info.root); await loadFavs(); await loadSettings(); refreshGit(); if (state.filter) await fetchFilterDirs(); drawFilterBtn(); watchIndex();
+  addRecent(info.root); await loadFavs(); await loadSettings(); loadRecent(); refreshGit(); if (state.filter) await fetchFilterDirs(); drawFilterBtn(); watchIndex();
   state.expanded = new Set(store.get(wsKey('expanded'), []));
   for (const s of store.get(wsKey('tabs'), [])) {
     if (isEnc(s.path)) continue;   // 암호화 문서는 다시 열 때 암호를 묻는다

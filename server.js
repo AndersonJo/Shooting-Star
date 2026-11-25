@@ -711,7 +711,7 @@ function rebuild(root, ix) { // 전체 스캔 (최초 / 변경이 너무 많을 
   if (ix.building) return ix.building;
   ix.pending.clear();
   ix.building = walkAll(root)
-    .then((r) => { ix.set = new Set(r.files); ix.arr = null; ix.truncated = r.truncated; ix.ready = true; ix.ts = Date.now(); })
+    .then((r) => { ix.set = new Set(r.files); ix.arr = null; ix.mt = null; ix.truncated = r.truncated; ix.ready = true; ix.ts = Date.now(); })
     .catch(() => {})
     .finally(() => { ix.building = null; });
   return ix.building;
@@ -729,6 +729,7 @@ async function flush(root, ix) { // 변경된 경로만 반영
       ix.set.delete(rel);
       const pre = rel + '/'; for (const f of ix.set) if (f.startsWith(pre)) ix.set.delete(f);
     }
+    if (ix.mt) { ix.mt.delete(rel); const pre = rel + '/'; for (const f of ix.mt.keys()) if (f.startsWith(pre)) ix.mt.delete(f); }
     if (ix.heads) { ix.heads.delete(rel); const pre = rel + '/'; for (const f of ix.heads.keys()) if (f.startsWith(pre)) ix.heads.delete(f); }   // 제목 캐시도 다시 읽게
   }
   ix.arr = null; ix.ts = Date.now();
@@ -774,6 +775,23 @@ async function headingsOf(root, ix) {
   ix.heads = next;
   for (const [f, e] of next) for (const h of e.h) out.push([f, ...h]);
   return out;
+}
+
+// ───────── 최근 수정한 문서 (사이드바 '최신 문서') ─────────
+// 인덱스의 마크다운(.md/.markdown/.mdx, 암호화 .md.enc 포함) 파일을 수정 시각순으로. 감시 중이면 flush 가 바뀐 파일의 캐시를 지운다.
+const isDocRel = (f) => { const m = f.toLowerCase().replace(/\.enc$/, '').match(/\.([^./]+)$/); return !!m && MD_EXT.has(m[1]); };
+async function recentDocs(root, ix, n) {
+  if (!ix.mt) ix.mt = new Map();   // rel → mtimeMs
+  const files = indexFiles(ix).filter(isDocRel).slice(0, HEADS_FILES_MAX), next = new Map();
+  for (let k = 0; k < files.length; k += 128) {
+    await Promise.all(files.slice(k, k + 128).map(async (f) => {
+      let m = ix.watcher ? ix.mt.get(f) : undefined;
+      if (m == null) { try { m = (await fsp.stat(path.join(root, f))).mtimeMs; } catch { return; } }
+      next.set(f, m);
+    }));
+  }
+  ix.mt = next;
+  return [...next].sort((a, b) => b[1] - a[1]).slice(0, n).map(([path, mtime]) => ({ path, mtime }));
 }
 
 // ───────── 파일 내용 검색 (Find in Files) ─────────
@@ -1621,6 +1639,13 @@ async function api(req, res, url, root) {
       if (!ix.ready) await ix.building;
       else if (!ix.watcher && Date.now() - ix.ts > 10000) await rebuild(root, ix);
       return send(res, 200, await headingsOf(root, ix));
+    }
+    case 'GET /api/recent-docs': {
+      const ix = getIndex(root);
+      if (!ix.ready) await ix.building;
+      else if (!ix.watcher && Date.now() - ix.ts > 10000) await rebuild(root, ix);
+      const n = Math.max(1, Math.min(50, Number(url.searchParams.get('n')) || 5));
+      return send(res, 200, await recentDocs(root, ix, n));
     }
     case 'GET /api/index': {
       const ix = getIndex(root);
