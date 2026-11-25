@@ -754,12 +754,18 @@ function viewRestore(v) {
   if (ta && p.ta) { ta.scrollTop = p.ta.top; ta.scrollLeft = p.ta.left; try { ta.setSelectionRange(p.ta.a, p.ta.b); } catch {} if (p.ta.focus) ta.focus({ preventScroll: true }); }
   if (pv && p.pv != null) pv.scrollTop = p.pv;
 }
+// 화면을 들고 있는 탭은 최근 VIEW_KEEP 개까지 (그보다 오래된 탭은 다시 열 때 새로 그린다)
+const VIEW_KEEP = 10; let viewLru = [];
+function viewTouch(t) {
+  viewLru = [t, ...viewLru.filter((x) => x !== t && state.tabs.includes(x))];
+  for (const x of viewLru.splice(VIEW_KEEP)) { x._view = null; if (x.kind === 'gallery') galDispose(x); }
+}
 function renderContent() {
   const box = $('#content'); const t = cur();
   viewSave(box); box._owner = t;
   if (t?.kind !== 'gallery') galUnwatch();   // 갤러리 폴더 감시는 보이는 동안만
   if (!t) { box.replaceChildren(EMPTY); return; }
-  if (t.kind === 'gallery') { const v = galleryView(t); if (box.firstChild !== v || box.childNodes.length !== 1) box.replaceChildren(v); validate(); return; }   // 같은 화면이면 다시 붙이지 않는다 (스크롤 유지)
+  if (t.kind === 'gallery') { viewTouch(t); const v = galleryView(t); if (box.firstChild !== v || box.childNodes.length !== 1) box.replaceChildren(v); validate(); return; }   // 같은 화면이면 다시 붙이지 않는다 (스크롤 유지)
   if (t.kind === 'image') { box.replaceChildren(imageViewer(t)); validate(); return; }
   if (t.kind === 'file') { box.replaceChildren(fileViewer(t)); validate(); return; }
   if (t.kind === 'run') { const fresh = !t.dom; box.replaceChildren(runView(t)); if (!fresh) t.refreshWhere?.(); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
@@ -767,6 +773,7 @@ function renderContent() {
   if (t.kind === 'history') { const v = historyView(t); if (box.firstChild !== v || box.childNodes.length !== 1) { box.replaceChildren(v); histRestoreScroll(t); } validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.blame) { box.replaceChildren(blameView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.kind === 'diff') { box.replaceChildren(diffView(t)); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
+  viewTouch(t);
   const v0 = t._view;
   if (v0 && t.mode !== 'smart' && v0.key === viewKey(t) && v0.content === t.content) {   // 그대로 다시 붙인다
     if (box.firstChild !== v0.panes[0] || box.childNodes.length !== v0.panes.length) {   // 이미 붙어 있으면 건드리지 않는다
@@ -798,18 +805,44 @@ function renderContent() {
       else if (n !== lnN) { lnN = n; lnText = null; lnLines = null; lnPre.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n'); }
       lnPre.scrollTop = ta.scrollTop;
     };
-    let raf = 0;
-    const paint = () => { // 색칠은 프레임당 한 번, 너무 큰 파일은 생략
+    let raf = 0, hlWin = null;   // hlWin: 큰 문서에서 색칠한 줄 범위 { a, b, n }
+    // 큰 문서는 화면 근처 줄만 색칠하고 나머지는 글자 그대로 둔다 (글자는 같아서 줄바꿈·위치는 그대로 맞는다)
+    const HL_FULL = 60000, HL_MARGIN = () => (state.wrap ? 400 : 200);
+    const visRange = (n) => {
+      const lh = parseFloat(getComputedStyle(ta).lineHeight) || 18, rows = Math.ceil(ta.clientHeight / lh);
+      const first = state.wrap ? Math.floor((ta.scrollTop / Math.max(1, ta.scrollHeight)) * n) : Math.floor(ta.scrollTop / lh);
+      return [first, first + rows];
+    };
+    const hlWindow = (v) => {
+      const starts = [0]; for (let i = v.indexOf('\n'); i >= 0; i = v.indexOf('\n', i + 1)) starts.push(i + 1);
+      const n = starts.length, [f, l] = visRange(n), M = HL_MARGIN();
+      let a = Math.max(0, f - M); const b = Math.min(n, l + M);
+      if (lang === 'markdown') { // 코드 블록 중간에서 시작하면 색이 뒤집힌다 → 그 블록의 여는 줄부터
+        let open = -1; const fence = /^\s*(```|~~~)/y;
+        for (let i = 0; i < a; i++) { fence.lastIndex = starts[i]; if (fence.test(v)) open = open < 0 ? i : -1; }
+        if (open >= 0) a = open;
+      }
+      const A = starts[a], B = b < n ? starts[b] : v.length, mid = document.createElement('span');
+      mid.innerHTML = highlight(lang, v.slice(A, B));
+      pre.replaceChildren(v.slice(0, A), mid, v.slice(B) + '\n');
+      hlWin = { a, b, n };
+    };
+    const paint = () => { // 색칠은 프레임당 한 번
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
-        const on = lang && ta.value.length < 300000;
+        const v = ta.value, on = lang && v.length < 5e6;
         ta.classList.toggle('hlon', !!on);
-        pre.innerHTML = on ? highlight(lang, ta.value) + '\n' : '';
+        if (!on) { pre.innerHTML = ''; hlWin = null; }
+        else if (v.length < HL_FULL) { pre.innerHTML = highlight(lang, v) + '\n'; hlWin = null; }
+        else hlWindow(v);
         pre.scrollTop = ta.scrollTop; pre.scrollLeft = ta.scrollLeft;
         paintLn();
       });
     };
-    ta.onscroll = () => { pre.scrollTop = fm.scrollTop = lnPre.scrollTop = ta.scrollTop; pre.scrollLeft = fm.scrollLeft = ta.scrollLeft; };
+    ta.onscroll = () => {
+      pre.scrollTop = fm.scrollTop = lnPre.scrollTop = ta.scrollTop; pre.scrollLeft = fm.scrollLeft = ta.scrollLeft;
+      if (hlWin) { const [f, l] = visRange(hlWin.n), q = HL_MARGIN() / 4; if ((f < hlWin.a + q && hlWin.a > 0) || (l > hlWin.b - q && hlWin.b < hlWin.n)) paint(); }   // 색칠한 범위 끝에 가까워지면 다시
+    };
     ta.oninput = () => {
       t.content = ta.value; if (t._view) t._view.content = t.content;
       syncDirtyUi(t); validateSoon(); updatePreview(); paint();
