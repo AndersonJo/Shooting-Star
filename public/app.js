@@ -4196,6 +4196,22 @@ for (const kind of ['copy', 'cut']) document.addEventListener(kind, (e) => { // 
   if (!galFocused() || String(getSelection())) return;
   e.preventDefault(); galClip(cur(), kind);
 });
+// ⌘/Ctrl+Shift+V: 글자만 붙여넣기 — 첨부(이미지)·링크 변환 없이 일반 텍스트를 앞뒤 공백을 지워(strip) 넣는다
+let plainPasteAt = 0;
+const isTextField = (t) => t?.closest?.('textarea, input:not([type=checkbox]):not([type=radio]):not([type=button])');
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.code === 'KeyV' && isTextField(e.target)) plainPasteAt = Date.now();   // 이어서 오는 paste 이벤트를 글자만 붙여넣기로 (브라우저·앱 메뉴 모두 paste 이벤트를 보낸다)
+}, true);
+document.addEventListener('paste', (e) => {
+  if (Date.now() - plainPasteAt > 1000) return;
+  plainPasteAt = 0;
+  const ta = isTextField(e.target); if (!ta) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  const text = (e.clipboardData?.getData('text/plain') || '').trim(); if (!text) return;
+  if (!document.execCommand('insertText', false, text)) { // 실행취소를 유지하려 execCommand 우선
+    ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end'); ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}, true);
 document.addEventListener('paste', (e) => { // 편집 > 붙여넣기 메뉴로 들어온 경우 (단축키는 keydown 에서 이미 처리)
   if (e.target.closest?.('input, textarea, [contenteditable]') || Date.now() - clipKeyAt < 600) return;
   if (galFocused()) { e.preventDefault(); clipPaste(cur().dir); }
@@ -4882,7 +4898,7 @@ function drawRecent() {
   box.replaceChildren(head, ...recentList.map((d) => {
     const segs = d.path.split('/'), name = segs.at(-1);
     const row = el('div', { className: 'fav rc' + (state.active === d.path ? ' cur' : ''), title: `${d.path}\n${new Date(d.mtime).toLocaleString()}` },
-      el('span', { className: 'fn', textContent: name }), segs.length > 1 ? el('span', { className: 'fp', textContent: segs.at(-2) }) : '',
+      el('span', { className: 'fn', textContent: name }), el('span', { className: 'fp rp', textContent: segs.length > 1 ? segs.slice(0, -1).join('/') + '/\u200e' : '' }),   // 폴더 경로: 넘치면 앞쪽을 … 로 잘라 끝부분이 보이게 (\u200e: rtl 표시에서 / 위치 유지)
       el('span', { className: 'rt', textContent: ago(d.mtime / 1000) }));
     row.onclick = () => openFile(d.path);
     row.oncontextmenu = (e) => { e.preventDefault(); revealInTree(d.path, false); };
