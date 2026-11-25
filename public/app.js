@@ -66,10 +66,15 @@ const setStatus = (msg, cls = '') => { const s = $('#st-msg'); s.textContent = m
 // ───────── 파일 종류 ─────────
 const extOf = (p) => (p.match(/\.([^./]+)$/)?.[1] || '').toLowerCase();
 const IMG_EXT = new Set('png jpg jpeg gif webp avif svg bmp ico tif tiff heic heif'.split(' '));
+// 첨부 파일: 앱 안에서 볼 수 있는 것(PDF·영상·음악)과 기본 앱으로 여는 것(문서·압축 …). 글자 파일이 아니라 편집기로 열지 않는다
+const MEDIA_EXT = { pdf: 'pdf', mp4: 'video', m4v: 'video', mov: 'video', webm: 'video', ogv: 'video', mp3: 'audio', m4a: 'audio', aac: 'audio', wav: 'audio', flac: 'audio', ogg: 'audio', oga: 'audio', opus: 'audio' };
+const BIN_EXT = new Set(('zip gz tgz bz2 xz 7z rar tar jar war dmg pkg exe msi deb rpm apk iso img doc docx xls xlsx ppt pptx hwp hwpx key pages numbers odt ods odp rtf epub mobi ' +
+  'psd ai sketch fig xd mkv avi wmv flv mpg mpeg 3gp aiff ttf otf woff woff2 eot sqlite sqlite3 db mdb parquet feather pkl npy npz h5 hdf5 onnx pt pth safetensors gguf ckpt bin dll so dylib class pyc wasm icns blend fbx glb obj stl').split(' '));
 function kindOf(p) {
   if (isDrop(p)) return 'image';
   const e = extOf(isEnc(p) ? p.slice(0, -4) : p);
   if (IMG_EXT.has(e)) return 'image';
+  if (!isEnc(p) && (MEDIA_EXT[e] || BIN_EXT.has(e))) return 'file';
   if (['md', 'markdown', 'mdx'].includes(e)) return 'md';
   if (e === 'json' || e === 'jsonc' || e === 'geojson') return 'json';
   if (e === 'jsonl' || e === 'ndjson') return 'jsonl';
@@ -77,7 +82,7 @@ function kindOf(p) {
   if (['csv', 'tsv'].includes(e)) return 'csv';
   return 'text';
 }
-const ICON = { md: 'M↓', json: '{}', jsonl: '{}', yaml: 'Y', csv: '▦', text: '≡', image: '▣' };
+const ICON = { md: 'M↓', json: '{}', jsonl: '{}', yaml: 'Y', csv: '▦', text: '≡', image: '▣', file: '📎' };
 const iconOf = (p) => (isEnc(p) ? '🔒' : ICON[kindOf(p)]);
 const MODES = {
   md: [['view', '보기'], ['split', '분할'], ['edit', '편집'], ['smart', '스마트 편집']],
@@ -87,9 +92,10 @@ const MODES = {
   jsonl: [['edit', '편집']],
   text: [['edit', '편집']],
   image: [['view', '보기']],
+  file: [['view', '보기']],
   diff: [['unified', '통합'], ['split', '나란히']],
 };
-const DEFAULT_MODE = { image: 'view', md: 'view', json: 'edit', yaml: 'edit', csv: 'table', jsonl: 'edit', text: 'edit' };
+const DEFAULT_MODE = { image: 'view', file: 'view', md: 'view', json: 'edit', yaml: 'edit', csv: 'table', jsonl: 'edit', text: 'edit' };
 
 // ───────── CSV ─────────
 function detectDelim(text, path) {
@@ -366,7 +372,7 @@ $('#ts-input').onkeydown = (e) => {
 async function openFile(p, mode, at) {
   flushAll();   // 다른 파일로 넘어가기 전에 마지막 편집까지 저장
   let t = tabOf(p);
-  if (!t && kindOf(p) === 'image') { t = { path: p, content: '', orig: '', mtime: 0, kind: 'image', mode: 'view' }; state.tabs.push(t); }   // 이미지는 뷰어가 직접 불러온다
+  if (!t && (kindOf(p) === 'image' || kindOf(p) === 'file')) { t = { path: p, content: '', orig: '', mtime: 0, kind: kindOf(p), mode: 'view' }; state.tabs.push(t); }   // 이미지·첨부 파일은 뷰어가 직접 불러온다
   if (!t) {
     try {
       const f = isEnc(p) ? await readEnc(p) : await api('GET', 'file', { path: p });
@@ -374,7 +380,10 @@ async function openFile(p, mode, at) {
       const kind = kindOf(p);
       t = { path: p, content: f.content, orig: f.content, mtime: f.mtime, kind, mode: mode || DEFAULT_MODE[kind], pass: f.pass };
       state.tabs.push(t);
-    } catch (e) { toast(`열 수 없음: ${e.message}`); return; }
+    } catch (e) {
+      if (e.status !== 415) { toast(`열 수 없음: ${e.message}`); return; }
+      t = { path: p, content: '', orig: '', mtime: 0, kind: 'file', mode: 'view' }; state.tabs.push(t);   // 글자 파일이 아님 → 첨부 파일 뷰어
+    }
   }
   state.active = p; state.selected = p;
   if (!isMemo(p) && !isExt(p)) rememberOpen(p);
@@ -475,6 +484,7 @@ async function closeTabs(paths) { // 여러 탭을 순서대로 닫는다. 저�
 async function reload(t = cur()) {
   if (!t) return;
   if (t.kind === 'image') { imgv.ver.set(t.path, Date.now()); return renderContent(); }
+  if (t.kind === 'file') { t.ver = Date.now(); return renderContent(); }
   if (dirty(t) && !confirm('저장하지 않은 변경을 버리고 다시 불러올까요?')) return;
   const f = await api('GET', 'file', { path: t.path });
   Object.assign(t, { content: f.content, orig: f.content, mtime: f.mtime }); renderAll();
@@ -486,7 +496,7 @@ async function reload(t = cur()) {
 //  · 트리: 바뀐 폴더만 다시 읽기   · 열린 탭: 저장 안 한 변경이 없으면 자동 반영, 있으면 ⚠ 충돌 표시(저장 시 덮어쓰기 확인)
 let pendingPvScroll = null;
 async function syncTab(t) {
-  if (!t || t.kind === 'image' || t.kind === 'diff' || t.kind === 'history' || t.kind === 'run' || t.kind === 'sql' || t.kind === 'gallery' || (isMemo(t.path) || isExt(t.path)) && t.path !== state.active) return;
+  if (!t || t.kind === 'image' || t.kind === 'file' || t.kind === 'diff' || t.kind === 'history' || t.kind === 'run' || t.kind === 'sql' || t.kind === 'gallery' || (isMemo(t.path) || isExt(t.path)) && t.path !== state.active) return;
   if (Date.now() - (t._savedAt || 0) < 1500) return;   // 방금 우리가 저장한 파일의 변경 이벤트는 무시
   try {
     const f = await api('GET', 'file', { path: t.path });
@@ -533,7 +543,8 @@ function onFsEvent(d) { // d: { paths, all }
       if (t.kind === 'run' || t.kind === 'sql' || t.kind === 'history') continue;
       if (t.kind === 'gallery') { if (d.all && t.path === state.active) galRefresh(t); continue; }   // 갤러리는 따로 감시한다 (창으로 돌아오면 다시 읽기)
       if (t.kind === 'diff') { t.stale = true; if (t.path === state.active) renderContent(); continue; }   // 열려 있는 diff 는 다시 계산
-      if (t.kind === 'image') { if (set) { if (set.has(t.path)) imgReload(t); } else imgCheck(t); continue; }   // 이미지가 바뀌면 다시 불러온다 (창으로 돌아올 때는 정말 바뀌었을 때만)
+      if (t.kind === 'image') { if (set) { if (set.has(t.path)) imgReload(t); } else imgCheck(t); continue; }
+      if (t.kind === 'file') { if (set?.has(t.path)) { t.ver = Date.now(); if (t.path === state.active) renderContent(); } continue; }   // 이미지가 바뀌면 다시 불러온다 (창으로 돌아올 때는 정말 바뀌었을 때만)
       if (!isMemo(t.path) && !isExt(t.path) && (!set || set.has(t.path))) syncTab(t);
     }
     if (isMemo(state.active) || isExt(state.active)) syncTab(cur());
@@ -624,6 +635,14 @@ function renderToolbar() {
       btn('새로고침', '변경 내용 다시 계산', () => loadDiff(t)));
     return;
   }
+  if (t.kind === 'file') {
+    const FM = state.platform === 'darwin' ? 'Finder' : '파일 관리자', canOpen = !isDrop(t.path);
+    bar.replaceChildren(el('span', { className: 'path' }),
+      btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) || isExt(t.path) || e.shiftKey ? absOf(t.path) : t.path, '경로 복사됨')),
+      ...(canOpen ? [btn('기본 앱으로 열기', '이 파일을 기본 앱으로 열기', () => revealPath(t.path, 'open')), btn(FM, `${FM}에서 보기`, () => revealPath(t.path, 'reveal'))] : []),
+      btn('↻', '다시 불러오기', () => reload()));
+    return;
+  }
   if (t.kind === 'image') {
     bar.replaceChildren(el('span', { className: 'path' }),
       ...(isDrop(t.path) ? [] : [btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isExt(t.path) || e.shiftKey ? absOf(t.path) : t.path, '경로 복사됨'))]),
@@ -641,7 +660,7 @@ function renderToolbar() {
   items.push(
     btn('복사', '전체 내용 복사', () => copy(t.content, '전체 복사됨')),
     btn('경로', '경로 복사 (Shift: 절대경로)', (e) => copy(isMemo(t.path) || isExt(t.path) || e.shiftKey ? absOf(t.path) : t.path, '경로 복사됨')),
-    ...(t.kind === 'md' && (t.mode === 'edit' || t.mode === 'split' || t.mode === 'smart') ? [btn('🖼 이미지', '이미지 첨부 — 붙여넣기·끌어놓기도 됩니다 (문서 폴더의 images/ 에 저장)', pickImages)] : []),
+    ...(t.kind === 'md' && (t.mode === 'edit' || t.mode === 'split' || t.mode === 'smart') ? [btn('📎 첨부', '이미지·파일 첨부 — 붙여넣기·끌어놓기도 됩니다 (assets/images · assets/files 의 날짜 폴더에 저장)', pickFiles)] : []),
     btn('✨ Prettify', '정리/포맷 (⌘⌥L)', prettify),
   );
   if (t.kind === 'json') items.push(btn('Minify', 'JSON 압축', minify));
@@ -690,7 +709,7 @@ function validate() {
   }
   if (t && t.kind === 'diff') return setStatus(t.stat || '');
   if (t && t.kind === 'history') return setStatus(histStatus(t));
-  if (!t || t.kind === 'image') return setStatus('');
+  if (!t || t.kind === 'image' || t.kind === 'file') return setStatus('');
   let msg = '', cls = 'ok';
   try {
     if (t.kind === 'json') { JSON.parse(stripJsonc(t.content)); msg = '✓ valid JSON'; }
@@ -712,6 +731,7 @@ function renderContent() {
   if (!t) { box.replaceChildren(EMPTY); return; }
   if (t.kind === 'gallery') { const v = galleryView(t); if (box.firstChild !== v || box.childNodes.length !== 1) box.replaceChildren(v); validate(); return; }   // 같은 화면이면 다시 붙이지 않는다 (스크롤 유지)
   if (t.kind === 'image') { box.replaceChildren(imageViewer(t)); validate(); return; }
+  if (t.kind === 'file') { box.replaceChildren(fileViewer(t)); validate(); return; }
   if (t.kind === 'run') { const fresh = !t.dom; box.replaceChildren(runView(t)); if (!fresh) t.refreshWhere?.(); validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
   if (t.kind === 'sql') { box.replaceChildren(sqlView(t)); validate(); return; }
   if (t.kind === 'history') { const v = historyView(t); if (box.firstChild !== v || box.childNodes.length !== 1) { box.replaceChildren(v); histRestoreScroll(t); } validate(); if (fb.open) { placeFindBar(); runFileFind(true); } return; }
@@ -768,18 +788,16 @@ function renderContent() {
       $('#st-pos').textContent = `Ln ${before.length}, Col ${before.at(-1).length + 1}`;
     };
     ta.onkeyup = ta.onclick = upd;
-    if (t.kind === 'md') { // 이미지 붙여넣기 / 끌어놓기
+    if (t.kind === 'md') { // 이미지·파일 붙여넣기 / 끌어놓기 → 첨부
       ta.addEventListener('paste', (e) => {
         if (pasteLink(e, ta)) return;
-        const cd = e.clipboardData, files = [...(cd?.files || [])].filter((f) => f.type.startsWith('image/'));
-        if (!files.length || cd.getData('text/plain')) return;   // 텍스트가 같이 있으면(엑셀 등) 평소대로 붙여넣기
-        e.preventDefault(); attachImages(files);
+        const files = clipFiles(e); if (!files.length) return;
+        e.preventDefault(); attachFiles(files);
       });
       ta.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
       ta.addEventListener('drop', (e) => {
-        const all = [...(e.dataTransfer?.files || [])]; if (!all.length) return;   // 선택한 텍스트를 끌어놓는 경우는 기본 동작
-        e.preventDefault(); const imgs = all.filter((f) => f.type.startsWith('image/'));
-        imgs.length ? attachImages(imgs) : toast('이미지 파일만 첨부할 수 있습니다');
+        const all = dropFiles(e); if (!all.length) return;   // 선택한 텍스트를 끌어놓는 경우는 기본 동작
+        e.preventDefault(); attachFiles(all);
       });
     }
     return el('div', { className: 'pane' }, el('div', { className: 'ed lnon' }, fm, pre, ta, ln));
@@ -881,7 +899,7 @@ function renderMarkdown(t, htmlOverride) { // htmlOverride: 이미 변환/정화
   marked.setOptions({ gfm: true, breaks: false });
   const html = htmlOverride ?? DOMPurify.sanitize(marked.parse(t.content), { USE_PROFILES: { html: true } });
   const doc = el('div', { className: 'md' }); doc.innerHTML = html;
-  const base = dirOf(t.path);
+  const base = dirOf(t.path), atts = [];
   doc.querySelectorAll('img').forEach((img) => {
     const s = img.getAttribute('src');
     if (s && !/^([a-z]+:|\/\/|data:)/i.test(s)) {
@@ -894,9 +912,15 @@ function renderMarkdown(t, htmlOverride) { // htmlOverride: 이미 변환/정화
     if (/^[a-z]+:|^\/\//i.test(h)) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
     else if (h.startsWith('#')) { a.onclick = (e) => { e.preventDefault(); let id = h.slice(1); try { id = decodeURIComponent(id); } catch {} doc.querySelector('[id="' + CSS.escape(MD_ID + id) + '"]')?.scrollIntoView(); }; }
     else { // 상대 링크 → 앱에서 열기
-      a.onclick = (e) => { e.preventDefault(); openFile(resolveRel(base, decodeURI(h.split('#')[0]))); };
+      let rp = h.split(/[?#]/)[0]; try { rp = decodeURI(rp); } catch {}
+      rp = resolveRel(base, rp);
+      const key = rp.startsWith('@') ? rp : (isMemo(t.path) ? '@memo/' : '') + rp;
+      const isAtt = kindOf(key) === 'file' || /(^|\/)assets\/files\//.test(rp) || (isMemo(key) && /^@memo\/files\//.test(key));   // assets/files/ 안이면 글자 파일도 카드로
+      if (isAtt && !a.querySelector('img')) attachCard(a, key, atts);
+      else a.onclick = (e) => { e.preventDefault(); openFile(key); };
     }
   });
+  if (atts.length) fillAttSizes(atts);
   doc.querySelectorAll('pre > code[class*=language-]').forEach((code) => {
     const lang = langByName(code.className.match(/language-([\w+-]+)/)?.[1]);
     if (lang && code.textContent.length < 100000) code.innerHTML = highlight(lang, code.textContent);
@@ -915,6 +939,96 @@ function renderMarkdown(t, htmlOverride) { // htmlOverride: 이미 변환/정화
   doc.querySelectorAll('[id]').forEach((n) => { if (!n.id.startsWith(MD_ID)) n.id = MD_ID + n.id; });
   doc.querySelectorAll('input[type=checkbox]').forEach((c) => { c.disabled = true; });
   return doc;
+}
+
+// ───────── 첨부 파일: 링크 카드 / 뷰어 ─────────
+const rawUrl = (p, ver) => { const rr = rootRel(p); return '/raw?root=' + encodeURIComponent(rr.root) + '&path=' + encodeURIComponent(rr.rel) + (ver ? '&v=' + ver : ''); };
+const ATT_COLOR = { pdf: '#e5534b', doc: '#4a8bf5', docx: '#4a8bf5', hwp: '#2f9fd8', hwpx: '#2f9fd8', pages: '#f0a030', rtf: '#4a8bf5', odt: '#4a8bf5',
+  xls: '#2ea44f', xlsx: '#2ea44f', numbers: '#2ea44f', ods: '#2ea44f', ppt: '#e8743b', pptx: '#e8743b', key: '#3b8ee8', odp: '#e8743b',
+  zip: '#a07a3c', gz: '#a07a3c', tgz: '#a07a3c', '7z': '#a07a3c', rar: '#a07a3c', tar: '#a07a3c', xz: '#a07a3c', bz2: '#a07a3c', dmg: '#888', pkg: '#888' };
+const attColor = (p) => { const e = extOf(p); return ATT_COLOR[e] || (MEDIA_EXT[e] === 'video' ? '#9b59d0' : MEDIA_EXT[e] === 'audio' ? '#d0459b' : '#7a8290'); };
+const attBadge = (p, big) => el('span', { className: 'att-ic' + (big ? ' big' : ''), textContent: (extOf(p) || 'file').slice(0, 4).toUpperCase(), style: `--att:${attColor(p)}` });
+const attStat = new Map();   // 경로 → { size, mtime } | null (잠깐 기억)
+async function fileStats(keys) { // 경로들 → { 경로: {size, mtime} | null } (메모/워크스페이스 밖 파일은 루트별로 묻는다)
+  const groups = new Map();
+  for (const k of keys) { const { root, rel } = rootRel(k); if (!groups.has(root)) groups.set(root, []); groups.get(root).push([k, rel]); }
+  const out = {};
+  await Promise.all([...groups].map(async ([root, list]) => {
+    try {
+      const r = await fetch('/api/stats', { method: 'POST', headers: { 'X-SS': '1', 'X-SS-Root': encodeURIComponent(root), 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: list.map((x) => x[1]) }) });
+      const j = await r.json(); for (const [k, rel] of list) out[k] = j[rel] ?? null;
+    } catch { for (const [k] of list) out[k] = null; }
+  }));
+  for (const k of keys) attStat.set(k, { v: out[k], at: Date.now() });
+  return out;
+}
+function attachCard(a, key, atts) { // 파일 링크 → [아이콘 | 이름 · 크기 | 미리보기] 카드. 클릭=앱에서 보기, ⌘/Ctrl+클릭=기본 앱으로 열기
+  const name = a.textContent.trim() || key.split('/').pop(), kind = MEDIA_EXT[extOf(key)];
+  const meta = el('span', { className: 'att-meta' });
+  a.classList.add('att'); a.title = `${key.replace(/^@memo\//, '')}\n클릭: 앱에서 보기 · ${modKey()}+클릭: 기본 앱으로 열기`;
+  a.replaceChildren(attBadge(key), el('span', { className: 'att-body' }, el('span', { className: 'att-name', textContent: name }), meta));
+  a.onclick = (e) => { e.preventDefault(); if (e.metaKey || e.ctrlKey) revealPath(key, 'open'); else openFile(key); };
+  atts.push({ key, meta, a });
+  if (!kind) return;
+  // 미리보기: 영상·음악은 바로 재생기, PDF 는 펼쳐 보기 버튼
+  const holder = el('span', { className: 'att-pv' });
+  if (kind === 'video') holder.append(el('video', { controls: true, preload: 'metadata', src: rawUrl(key) }));
+  else if (kind === 'audio') holder.append(el('audio', { controls: true, preload: 'metadata', src: rawUrl(key) }));
+  else {
+    const tg = el('button', { className: 'att-tg', textContent: '미리보기 ▾', title: 'PDF 를 문서 안에서 펼쳐 보기' });
+    tg.onclick = (e) => { e.preventDefault(); e.stopPropagation(); const f = holder.querySelector('iframe'); if (f) { f.remove(); tg.textContent = '미리보기 ▾'; } else { holder.append(el('iframe', { src: rawUrl(key), className: 'att-pdf' })); tg.textContent = '접기 ▴'; } };
+    a.after(tg);
+  }
+  (a.nextSibling?.classList?.contains('att-tg') ? a.nextSibling : a).after(holder);
+}
+async function fillAttSizes(atts) {
+  const fresh = (k) => { const c = attStat.get(k); return c && Date.now() - c.at < 15000 ? c : null; };
+  const need = [...new Set(atts.filter((x) => !fresh(x.key)).map((x) => x.key))];
+  if (need.length) await fileStats(need);
+  for (const { key, meta, a } of atts) {
+    const v = attStat.get(key)?.v;
+    if (!v) { a.classList.add('missing'); meta.textContent = '파일 없음'; continue; }
+    meta.textContent = fmtSize(v.size);
+  }
+}
+function fileViewer(t) { // 첨부 파일 탭: PDF·영상·음악은 바로 보기, 그 밖은 카드 + 기본 앱으로 열기
+  const kind = MEDIA_EXT[extOf(t.path)], src = rawUrl(t.path, t.ver), name = t.path.split('/').pop();
+  const box = el('div', { className: 'filev' + (kind === 'pdf' ? ' pdf' : '') });
+  if (kind === 'pdf') { box.append(el('iframe', { src, className: 'fv-pdf', title: name })); return box; }
+  const info = el('div', { className: 'fv-meta' });
+  const card = el('div', { className: 'fv-card' }, attBadge(t.path, true), el('div', { className: 'fv-name', textContent: name }), info);
+  if (kind === 'video') box.append(el('video', { controls: true, src, className: 'fv-video' }), card);
+  else if (kind === 'audio') { card.append(el('audio', { controls: true, src, className: 'fv-audio' })); box.append(card); }
+  else {
+    const acts = el('div', { className: 'fv-acts' });
+    if (!isDrop(t.path)) {
+      const o = el('button', { className: 'primary', textContent: '기본 앱으로 열기' }); o.onclick = () => revealPath(t.path, 'open');
+      const r = el('button', { textContent: (state.platform === 'darwin' ? 'Finder' : '파일 관리자') + '에서 보기' }); r.onclick = () => revealPath(t.path, 'reveal');
+      acts.append(o, r);
+    }
+    card.append(el('div', { className: 'fv-note', textContent: '이 형식은 앱 안에서 미리 볼 수 없습니다' }), acts);
+    box.append(card);
+  }
+  fileStats([t.path]).then((r) => { const v = r[t.path]; info.textContent = v ? `${fmtSize(v.size)} · ${new Date(v.mtime).toLocaleString()}` : '파일이 없습니다'; });
+  return box;
+}
+// 문서 옆 images/ 폴더의 이미지를 assets/images/날짜/ 로 옮기고 링크를 고친다 (먼저 미리보기, 확인 후 실행)
+async function migrateAssetsUI(dir) {
+  await flushAll();
+  let plan;
+  try { toast('문서의 이미지 링크를 확인하는 중…', 30000); plan = await api('POST', 'assets/migrate', {}, { dir, apply: false }); }
+  catch (e) { return toast('확인 실패: ' + e.message); }
+  const where = dir || '워크스페이스 전체';
+  const skipTxt = plan.skipped.length ? `\n\n그대로 두는 이미지 ${plan.skipped.length}개 (링크를 모두 고칠 수 없음):\n` + plan.skipped.slice(0, 6).map((x) => ` · ${x.path} — ${x.reason}`).join('\n') + (plan.skipped.length > 6 ? `\n · … 외 ${plan.skipped.length - 6}개` : '') : '';
+  const unrefTxt = plan.unreferenced ? `\n어느 문서도 참조하지 않는 이미지 ${plan.unreferenced}개도 그대로 둡니다.` : '';
+  if (!plan.files) return toast(`옮길 이미지가 없습니다 (${where})` + (plan.skipped.length ? ` · 링크를 고칠 수 없어 그대로 둔 것 ${plan.skipped.length}개` : ''), 3500);
+  const docsTxt = plan.docs.slice(0, 8).map((d) => ` · ${d.path} (링크 ${d.links}개)`).join('\n') + (plan.docs.length > 8 ? `\n · … 외 ${plan.docs.length - 8}개` : '');
+  if (!confirm(`images/ → assets/images/날짜/ 로 정리 (${where})\n\n이미지 ${plan.files}개 (${fmtSize(plan.bytes)}) 를 옮기고, 문서 ${plan.docs.length}개의 링크를 고칩니다:\n${docsTxt}${skipTxt}${unrefTxt}\n\n진행할까요? (git 으로 되돌릴 수 있게 먼저 커밋해 두는 것을 권합니다)`)) return;
+  try {
+    const r = await api('POST', 'assets/migrate', {}, { dir, apply: true });
+    childrenCache.clear(); renderTree();
+    toast(`이미지 ${r.moved}개 이동 · 문서 ${r.docs.length}개 링크 수정` + (r.failed.length ? ` · 실패 ${r.failed.length}개 (${r.failed[0].reason})` : ''), 4000);
+  } catch (e) { toast('정리 실패: ' + e.message, 4000); }
 }
 
 // ───────── CSV 테이블 ─────────
@@ -1011,7 +1125,7 @@ $('#tree').addEventListener('contextmenu', (ev) => {
     ...(clip || state.platform === 'darwin' ? (() => { const dest = baseDir ? state.root + '/' + baseDir : state.root, M = modKey(); return [['붙여넣기\t' + M + 'V', () => clipPaste(dest)], ['여기로 이동\t' + M + '⌥V', () => clipPaste(dest, true)]]; })() : []),
     ...(row ? [[favs.includes(favKey(p, isDir)) ? '즐겨찾기에서 제거' : '★ 즐겨찾기에 추가', () => toggleFavDir(favKey(p, isDir))]] : []),
     [isDir ? `${FM}에서 열기` : `${FM}에서 보기`, () => revealPath(p, 'reveal')],
-    ...(isDir ? [['🖼 이미지 갤러리로 보기', () => openGallery(p ? state.root + '/' + p : state.root)]] : []),
+    ...(isDir ? [['🖼 이미지 갤러리로 보기', () => openGallery(p ? state.root + '/' + p : state.root)], ['🗂 images/ → assets/ 로 정리…', () => migrateAssetsUI(p)]] : []),
   ];
   if (!isDir) items.push(['기본 앱으로 열기', () => revealPath(p, 'open')]);
   if (state.platform === 'darwin') items.push(['터미널에서 열기', () => revealPath(p, 'terminal')]);
@@ -3490,7 +3604,7 @@ function buildFileFind() {
 }
 const placeFindBar = () => { $('#fbar').style.top = ($('#content').offsetTop + 8) + 'px'; };
 function openFileFind() {
-  if (!cur() || cur().kind === 'image') return;
+  if (!cur() || cur().kind === 'image' || cur().kind === 'file') return;
   buildFileFind();
   const ta = $('textarea.editor'); let sel = '';
   if (ta && ta.selectionEnd > ta.selectionStart) sel = ta.value.slice(ta.selectionStart, ta.selectionEnd); else sel = String(getSelection());
@@ -4232,29 +4346,42 @@ function openDroppedUrl(uris, html) { // 웹 페이지의 이미지/이미지 �
   } else toast('이미지 주소가 아닙니다: ' + u.slice(0, 120));
 }
 
-// ───────── 마크다운 이미지 첨부 ─────────
-// 편집기에 이미지를 붙여넣거나 끌어놓으면 <문서 폴더>/images/ 에 저장하고, 커서 위치에 ![이름](images/파일) 을 넣는다.
-async function uploadImage(destRel, file) {
-  const { root, rel: p } = rootRel(destRel);   // 메모는 ~/.shooting-star/memos/images/
-  const r = await fetch('/api/upload?path=' + encodeURIComponent(p), { method: 'POST', headers: { 'X-SS': '1', 'X-SS-Root': encodeURIComponent(root), 'Content-Type': file.type || 'application/octet-stream' }, body: file });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || r.statusText);
-  return j;
-}
+// ───────── 마크다운 첨부 (이미지 / 파일) ─────────
+// 편집기에 붙여넣거나 끌어놓은 파일을 서버가 <기준 폴더>/assets/images|files/YYYYMMDD/ 에 저장하고(메모는 memos/images|files/),
+// 커서 위치에 이미지는 ![이름](상대경로), 그 밖은 [이름](상대경로) 를 넣는다. 보기에서는 파일 링크가 아이콘·크기가 있는 카드로 보인다.
+const clipFiles = (e) => { const cd = e.clipboardData; const f = [...(cd?.files || [])]; return !f.length || (cd.getData('text/plain') && f.every((x) => x.type.startsWith('image/'))) ? [] : f; };   // 텍스트가 같이 있으면(엑셀 등) 평소대로 붙여넣기
+const dropFiles = (e) => { const items = [...(e.dataTransfer?.items || [])]; return [...(e.dataTransfer?.files || [])].filter((f, i) => !items[i]?.webkitGetAsEntry?.()?.isDirectory); };   // 폴더는 첨부하지 않는다
 const imgStamp = () => { const d = new Date(); return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`; };
-async function uploadImages(t, files) { // 이미지들을 <문서 폴더>/images/ 에 올리고 마크다운 링크 목록을 돌려준다
-  const dir = dirOf(t.path), parts = []; let reused = 0;
-  toast(`이미지 업로드 중… (${files.length}개)`);
+function uploadOne(docPath, file, name, onProgress) {
+  const { root, rel } = rootRel(docPath);
+  return new Promise((resolve, reject) => { // XHR: 큰 파일의 진행률을 보여 주려고
+    const x = new XMLHttpRequest();
+    x.open('POST', '/api/upload?path=' + encodeURIComponent(rel) + '&name=' + encodeURIComponent(name));
+    x.setRequestHeader('X-SS', '1'); x.setRequestHeader('X-SS-Root', encodeURIComponent(root));
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded, e.total);
+    x.onload = () => { let j = {}; try { j = JSON.parse(x.responseText); } catch {} x.status < 300 ? resolve(j) : reject(new Error(j.error || x.statusText)); };
+    x.onerror = () => reject(new Error('업로드 실패 (연결 끊김)'));
+    x.send(file);
+  });
+}
+const mdLabel = (s) => s.replace(/([\[\]\\])/g, '\\$1');
+async function uploadFiles(t, files) { // 첨부들을 올리고 마크다운 조각 목록을 돌려준다
+  const parts = []; let reused = 0, nImg = 0, nFile = 0, dest = '';
+  const total = files.reduce((a, f) => a + f.size, 0); let done = 0;
+  toast(`첨부 업로드 중… (${files.length}개${total > 5 * 1048576 ? ', ' + fmtSize(total) : ''})`, 60000);
   for (const f of files) {
-    const ext = ((f.name.match(/\.([A-Za-z0-9]+)$/) || [])[1] || (f.type.split('/')[1] || 'png').replace('svg+xml', 'svg')).toLowerCase();
-    const stem = !f.name || /^image\.\w+$/i.test(f.name) ? `image-${imgStamp()}` : f.name.replace(/\.[^.]+$/, '');   // 붙여넣은 스크린샷은 시각으로 이름을 붙인다
+    const ext = ((f.name.match(/\.([A-Za-z0-9]+)$/) || [])[1] || (f.type.startsWith('image/') ? (f.type.split('/')[1] || 'png').replace('svg+xml', 'svg').replace('jpeg', 'jpg') : '')).toLowerCase();
+    const name = !f.name || /^image\.\w+$/i.test(f.name) ? `image-${imgStamp()}${ext ? '.' + ext : ''}` : f.name;   // 붙여넣은 스크린샷은 시각으로 이름을 붙인다
     try {
-      const j = await uploadImage(`${dir ? dir + '/' : ''}images/${stem}.${ext}`, f);
-      if (j.reused) reused++;
-      parts.push(`![${j.name.replace(/\.[^.]+$/, '')}](images/${j.name})`);
-    } catch (e) { toast('이미지 첨부 실패: ' + e.message); }
+      const j = await uploadOne(t.path, f, name, total > 5 * 1048576 ? (n) => toast(`첨부 업로드 중… ${Math.floor(((done + n) / total) * 100)}%`, 60000) : null);
+      done += f.size; if (j.reused) reused++;
+      const label = mdLabel(j.name.replace(/\.[^.]+$/, '') || j.name), link = j.link.replace(/ /g, '%20');
+      if (j.kind === 'image') { nImg++; parts.push(`![${label}](${link})`); } else { nFile++; parts.push(`[${mdLabel(j.name)}](${link})`); }
+      dest = j.path.replace(/\/[^/]+$/, '/');
+    } catch (e) { done += f.size; toast('첨부 실패: ' + f.name + ' — ' + e.message, 4000); }
   }
-  if (parts.length) toast(`이미지 ${parts.length}개 첨부됨 → ${dir ? dir + '/' : ''}images/` + (reused ? ` (같은 이미지 ${reused}개는 재사용)` : ''));
+  if (parts.length) toast(`${[nImg && `이미지 ${nImg}개`, nFile && `파일 ${nFile}개`].filter(Boolean).join(', ')} 첨부됨 → ${dest}` + (reused ? ` (같은 파일 ${reused}개는 재사용)` : ''), 3000);
   return { parts, reused };
 }
 // 텍스트를 선택한 채 URL 을 붙여넣으면 [선택한 글](URL) 로 바꿈 (처리했으면 true)
@@ -4308,16 +4435,16 @@ function indentKey(e, ta, md) {
   if (ranged) ta.setSelectionRange(ls0, ls0 + out.length); else { const c = Math.max(ls0, a + firstDelta); ta.setSelectionRange(c, c); }
   return true;
 }
-async function attachImages(files, taOverride) {
-  const t = cur(); if (!t || t.kind !== 'md') return;
-  if (t.mode === 'smart' && !taOverride) return smartCtx?.attach(files);   // 스마트 편집: 편집 중이 아니면 이미지 블록으로 추가
+async function attachFiles(files, taOverride) {
+  const t = cur(); if (!t || t.kind !== 'md' || !files.length) return;
+  if (t.mode === 'smart' && !taOverride) return smartCtx?.attach(files);   // 스마트 편집: 편집 중이 아니면 블록으로 추가
   const ta = taOverride || $('textarea.editor'); if (!ta) return;
-  const { parts } = await uploadImages(t, files); if (!parts.length) return;
+  const { parts } = await uploadFiles(t, files); if (!parts.length) return;
   ta.focus(); document.execCommand('insertText', false, parts.join('\n'));   // 커서 위치에 삽입 (⌘Z 로 되돌릴 수 있다)
 }
-function pickImages() {
-  const inp = el('input', { type: 'file', accept: 'image/*', multiple: true });
-  inp.onchange = () => attachImages([...inp.files]);
+function pickFiles() {
+  const inp = el('input', { type: 'file', multiple: true });
+  inp.onchange = () => attachFiles([...inp.files]);
   inp.click();
 }
 
@@ -4377,15 +4504,15 @@ function smartEditor(t) {
     ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px';
     ta.className = 'sb-ta' + (lvl(ta.value) ? ' h' + lvl(ta.value) : '') + (/^\s*(```|~~~)/.test(ta.value) ? ' code' : '') + (/^>/.test(ta.value) ? ' quote' : '');
   }
-  const imgFiles = (e) => { const cd = e.clipboardData; const f = [...(cd?.files || [])].filter((x) => x.type.startsWith('image/')); return !f.length || cd.getData('text/plain') ? [] : f; };
+  const imgFiles = clipFiles;
   function makeEditor(b) {
     const ta = el('textarea', { className: 'sb-ta', value: b.raw.replace(/\s+$/, ''), spellcheck: false, rows: 1 });
     ta.oninput = () => { fit(ta); live(); };
     ta.onkeydown = (e) => onKey(e, ta);
     ta.onblur = () => setTimeout(() => { if (editIdx >= 0 && !doc.contains(document.activeElement)) { commitEdit(); render(); } }, 0);
-    ta.addEventListener('paste', (e) => { if (pasteLink(e, ta)) return; const f = imgFiles(e); if (f.length) { e.preventDefault(); attachImages(f, ta); } });
+    ta.addEventListener('paste', (e) => { if (pasteLink(e, ta)) return; const f = imgFiles(e); if (f.length) { e.preventDefault(); attachFiles(f, ta); } });
     ta.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
-    ta.addEventListener('drop', (e) => { const all = [...(e.dataTransfer?.files || [])]; if (!all.length) return; e.preventDefault(); const im = all.filter((f) => f.type.startsWith('image/')); im.length ? attachImages(im, ta) : toast('이미지 파일만 첨부할 수 있습니다'); });
+    ta.addEventListener('drop', (e) => { const all = dropFiles(e); if (!all.length) return; e.preventDefault(); attachFiles(all, ta); });
     return ta;
   }
   function blockEl(b, i) {
@@ -4464,20 +4591,20 @@ function smartEditor(t) {
     if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); if (/^\s*([-*+]|\d+[.)])\s/.test(line)) { ta.setSelectionRange(ls, ls); document.execCommand('insertText', false, e.shiftKey ? '' : '  '); ta.setSelectionRange(s + 2, s + 2); } else document.execCommand('insertText', false, '  '); }
   }
   async function attach(files) { // 편집 중이면 커서 위치에, 아니면 마지막으로 만진 블록 뒤(없으면 문서 끝)에 이미지 블록으로 추가
-    const ta = doc.querySelector('.sb-ta'); if (ta) return attachImages(files, ta);
-    const { parts } = await uploadImages(t, files); if (!parts.length) return;
+    const ta = doc.querySelector('.sb-ta'); if (ta) return attachFiles(files, ta);
+    const { parts } = await uploadFiles(t, files); if (!parts.length) return;
     lastIdx = insertBlockAfter(lastIdx >= 0 && lastIdx < blocks.length ? lastIdx : blocks.length - 1, parts.join('\n\n')); changed(); render();
   }
   // 입력: 블록 클릭=편집 (링크 클릭=이동, Alt+클릭=편집), 체크박스 토글, 이미지 붙여넣기/끌어놓기, 문서 단위 되돌리기
   doc.addEventListener('mousedown', (e) => {
     const sb = e.target.closest('.sb'); if (!sb || sb.classList.contains('editing')) return;
-    if (e.target.closest('.cp, input[type=checkbox]')) return;
+    if (e.target.closest('.cp, input[type=checkbox], video, audio, iframe, .att-pv')) return;
     if (e.target.closest('a') && !e.altKey) return;   // 링크 클릭 = 이동 (Alt+클릭 = 그 블록 편집)
     e.preventDefault(); startEdit(+sb.dataset.i, 'end');   // mousedown 을 막아 두면 편집 중이던 입력창이 먼저 blur 되며 화면이 바뀌는 일이 없다
   });
   doc.addEventListener('click', (e) => { if (e.target.closest('a') && e.altKey) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
   pane.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
-  pane.addEventListener('drop', (e) => { if (e.target.closest('textarea')) return; const im = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith('image/')); if (im.length) { e.preventDefault(); attach(im); } });
+  pane.addEventListener('drop', (e) => { if (e.target.closest('textarea')) return; const fs = dropFiles(e); if (fs.length) { e.preventDefault(); attach(fs); } });
   const ctx = { attach };
   const onPaste = (e) => { if (!doc.isConnected) { document.removeEventListener('paste', onPaste, true); return; } if (e.target.closest?.('textarea, input')) return; const f = imgFiles(e); if (f.length) { e.preventDefault(); attach(f); } };
   const onDocKey = (e) => {

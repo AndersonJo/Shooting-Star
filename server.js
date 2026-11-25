@@ -150,6 +150,216 @@ function sniffImage(buf, ext) {
   if (ext === '.svg') return /<svg[\s>]/i.test(buf.subarray(0, 2048).toString('utf8'));
   return false;
 }
+// ───────── 첨부 (이미지 / 파일) ─────────
+// 새 첨부는 <기준 폴더>/assets/images/YYYYMMDD/ · assets/files/YYYYMMDD/ 에 모은다. 문서에는 문서 기준 상대 링크를 넣는다.
+// 기준 폴더: 문서 폴더에서 위로 올라가며 assets/images 나 assets/files 가 이미 있는 가장 가까운 폴더, 없으면 워크스페이스 루트.
+// 메모(~/.shooting-star/memos)는 따로: memos/images/ · memos/files/ (날짜 폴더 없음)
+// 기존 문서 옆 images/ 링크는 그대로 동작한다 (상대 경로라 렌더러는 바뀌지 않음). /api/assets/migrate 로 옮길 수 있다.
+const ASSETS = 'assets', UPLOAD_MAX = 2 * 1024 * 1048576, UPLOAD_IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.svg', '.bmp']);
+const isMemoRoot = (root) => { try { return root === fs.realpathSync(MEMO_DIR); } catch { return false; } };
+const dayStamp = (d = new Date()) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+const posixRel = (from, to) => path.relative(from, to).split(path.sep).join('/');
+function assetBase(root, dirAbs) { // 첨부를 모을 기준 폴더 (절대경로)
+  for (let d = dirAbs; ; d = path.dirname(d)) {
+    if (isDirSafe(path.join(d, ASSETS, 'images')) || isDirSafe(path.join(d, ASSETS, 'files'))) return d;
+    if (d === root || path.dirname(d) === d) break;
+  }
+  return root === path.parse(root).root ? dirAbs : root;   // 워크스페이스 밖 파일(@ext, root=/)은 문서 폴더에
+}
+function assetDir(root, dirAbs, kind) { // kind: 'images' | 'files'
+  if (isMemoRoot(root)) return path.join(root, kind);
+  return path.join(assetBase(root, dirAbs), ASSETS, kind, dayStamp());
+}
+const sanitizeName = (n) => String(n).normalize('NFC').replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^[.-]+/, '').replace(/-+(\.[^.]*)?$/, '$1').slice(-120) || 'file';
+async function hashFile(abs) {
+  const h = crypto.createHash('sha1');
+  await new Promise((ok, no) => fs.createReadStream(abs).on('data', (c) => h.update(c)).on('end', ok).on('error', no));
+  return h.digest('hex');
+}
+async function readHead(abs, n = 4096) {
+  const fh = await fsp.open(abs, 'r');
+  try { const b = Buffer.alloc(n); const { bytesRead } = await fh.read(b, 0, n, 0); return b.subarray(0, bytesRead); } finally { await fh.close(); }
+}
+// tmp 를 dir/name 으로 넣는다. 같은 이름이 있으면 내용이 같을 때 그것을 재사용, 다르면 name-1, name-2 …
+// 같은 종류의 다른 날짜 폴더에 같은 이름·같은 내용이 있어도 재사용한다 (siblings: 찾아볼 폴더들)
+async function placeFile(tmp, dir, name, { size, sha, siblings = [] }) {
+  for (const d of siblings) {
+    const cand = path.join(d, name);
+    try { if ((await fsp.stat(cand)).size === size && (await hashFile(cand)) === sha) { await fsp.unlink(tmp).catch(() => {}); return { abs: cand, reused: true }; } } catch {}
+  }
+  await fsp.mkdir(dir, { recursive: true });
+  const ext = path.extname(name), stem = name.slice(0, name.length - ext.length) || 'file';
+  for (let i = 0; i < 1000; i++) {
+    const cand = path.join(dir, i ? `${stem}-${i}${ext}` : name);
+    try { await fsp.link(tmp, cand); await fsp.unlink(tmp).catch(() => {}); return { abs: cand, reused: false }; }   // link 는 있으면 EEXIST 로 실패한다 (덮어쓰지 않음)
+    catch (e) {
+      if (e.code === 'EXDEV' || e.code === 'EPERM' || e.code === 'ENOTSUP') { // 하드 링크가 안 되는 파일 시스템
+        try { await fsp.copyFile(tmp, cand, fs.constants.COPYFILE_EXCL); await fsp.unlink(tmp).catch(() => {}); return { abs: cand, reused: false }; } catch (e2) { if (e2.code !== 'EEXIST') throw e2; }
+      } else if (e.code !== 'EEXIST') throw e;
+      try { const st = await fsp.stat(cand); if (st.size === size && (await hashFile(cand)) === sha) { await fsp.unlink(tmp).catch(() => {}); return { abs: cand, reused: true }; } } catch {}
+    }
+  }
+  await fsp.unlink(tmp).catch(() => {});
+  throw httpError(409, 'too many files with the same name');
+}
+async function datedSiblings(dir) { // assets/images/20261101 → assets/images/* (같은 종류의 날짜 폴더들)
+  if (isMemoRoot(path.dirname(dir))) return [];
+  const up = path.dirname(dir);
+  try { return (await fsp.readdir(up, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => path.join(up, e.name)); } catch { return []; }
+}
+// 업로드 본문을 임시 파일로 받으며 크기/해시를 잰다 (큰 파일도 메모리에 올리지 않는다)
+async function receiveTo(req, tmp, limit) {
+  const h = crypto.createHash('sha1'); let size = 0;
+  const out = fs.createWriteStream(tmp, { flags: 'wx' });
+  try {
+    await new Promise((ok, no) => {
+      req.on('data', (c) => { size += c.length; if (size > limit) { no(httpError(413, `too large (>${Math.round(limit / 1048576)}MB)`)); req.destroy(); return; } h.update(c); if (!out.write(c)) { req.pause(); out.once('drain', () => req.resume()); } });
+      req.on('end', ok); req.on('error', no); out.on('error', no);
+    });
+    await new Promise((ok, no) => out.end((e) => (e ? no(e) : ok())));
+  } catch (e) { out.destroy(); await fsp.unlink(tmp).catch(() => {}); throw e; }
+  return { size, sha: h.digest('hex') };
+}
+async function uploadAttachment(req, root, docRel, rawName) {
+  const docAbs = resolveSafe(root, docRel), docDir = path.dirname(docAbs);
+  const name = sanitizeName(rawName), ext = path.extname(name).toLowerCase();
+  const stage = isMemoRoot(root) ? root : assetBase(root, docDir);
+  await fsp.mkdir(path.join(stage, isMemoRoot(root) ? '' : ASSETS), { recursive: true });
+  const tmp = path.join(stage, isMemoRoot(root) ? '' : ASSETS, `.ss-upload-${crypto.randomBytes(6).toString('hex')}`);
+  const { size, sha } = await receiveTo(req, tmp, UPLOAD_MAX);
+  if (!size) { await fsp.unlink(tmp).catch(() => {}); throw httpError(400, '빈 파일입니다'); }
+  const isImg = UPLOAD_IMG_EXT.has(ext) && sniffImage(await readHead(tmp), ext);   // 확장자만 이미지인 파일은 일반 첨부로
+  const dir = assetDir(root, docDir, isImg ? 'images' : 'files');
+  const { abs, reused } = await placeFile(tmp, dir, name, { size, sha, siblings: (await datedSiblings(dir)).filter((d) => d !== dir) });
+  return { path: posixRel(root, abs), link: posixRel(docDir, abs), name: path.basename(abs), kind: isImg ? 'image' : 'file', size, reused };
+}
+
+// ───────── 기존 문서 옆 images/ → assets/images/ 로 옮기기 ─────────
+// 마크다운 문서들의 링크(![](…), [](…), [id]: …, <img src>, <a href> 등)를 모두 찾아,
+// 모든 참조를 바꿀 수 있는 이미지만 옮기고 링크를 고친다. 바꿀 수 없으면(다른 종류 파일이 참조, 암호화 문서가 있는 폴더 …) 그대로 둔다.
+const LINK_RES = [
+  /\]\(\s*(<[^>\n]*>|[^)\s]+)(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?\s*\)/gd,             // [글](대상 "제목") / ![](대상)
+  /^ {0,3}\[[^\]\n]+\]:[ \t]*(<[^>\n]*>|\S+)/gmd,                                              // [id]: 대상
+  /<(?:img|a|source|video|audio|embed|iframe)\b[^>]*?\b(?:src|href)\s*=\s*(?:"([^"\n]*)"|'([^'\n]*)')/gid,   // HTML
+];
+function maskCode(text) { // 코드 블록·인라인 코드 안은 링크로 보지 않도록 같은 길이의 공백으로 가린다
+  const blank = (s) => s.replace(/[^\n]/g, ' ');
+  let out = '', fence = null, buf = '';
+  for (const line of text.split(/(?<=\n)/)) {
+    const f = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence) { buf += blank(line); if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !line.trim().slice(f[1].length).trim()) { out += buf; buf = ''; fence = null; } continue; }
+    if (f) { fence = f[1]; buf = blank(line); continue; }
+    out += line;
+  }
+  out += fence ? buf : '';
+  return out.replace(/(`+)([^`\n]|[^`\n][\s\S]*?[^`])\1(?!`)/g, (m) => blank(m));
+}
+function findLinks(text) { // → [{ start, end, target }] (start/end: 원문에서 대상 문자열 위치, <> 포함)
+  const masked = maskCode(text), out = [];
+  for (const re of LINK_RES) {
+    re.lastIndex = 0; let m;
+    while ((m = re.exec(masked))) {
+      const ix = m.indices[1] || m.indices[2]; if (!ix) continue;
+      out.push({ start: ix[0], end: ix[1], target: text.slice(ix[0], ix[1]) });
+    }
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+function linkTarget(raw) { // → { pathPart, suffix, angle } | null (웹 주소·절대경로·앵커는 제외)
+  const angle = raw.startsWith('<') && raw.endsWith('>'); let s = angle ? raw.slice(1, -1) : raw;
+  if (!s || /^[a-z][a-z0-9+.-]*:|^\/\/|^\/|^#/i.test(s)) return null;
+  const cut = s.search(/[?#]/), pathPart = cut < 0 ? s : s.slice(0, cut), suffix = cut < 0 ? '' : s.slice(cut);
+  let dec = pathPart; try { dec = decodeURI(pathPart); } catch {}
+  return { dec, suffix, angle };
+}
+const encLink = (p, angle) => (angle ? `<${p}>` : p.replace(/%/g, '%25').replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/</g, '%3C').replace(/>/g, '%3E'));
+const isLegacyImg = (rel) => { const segs = rel.split('/'); const i = segs.lastIndexOf('images', segs.length - 2); return i >= 0 && segs[i - 1] !== ASSETS ? segs.slice(0, i + 1).join('/') : null; };   // assets/images/… 는 이미 새 방식
+async function migrateAssets(root, scope, apply) {
+  const ix = getIndex(root); if (!ix.ready) await ix.building;
+  if (ix.pending.size) { clearTimeout(ix.timer); await flush(root, ix); }   // 방금 생긴 파일까지 보고 판단한다
+  const files = indexFiles(ix), fileSet = new Set(files);
+  const inScope = (rel) => !scope || rel === scope || rel.startsWith(scope + '/');
+  const mdDocs = files.filter((f) => MD_EXT.has(path.extname(f).slice(1).toLowerCase()));
+  const encDirs = new Set(files.filter((f) => f.endsWith('.enc')).map((f) => path.posix.dirname(f)));
+  const refs = new Map();   // 이미지 rel → [{ doc, start, end, suffix, angle }]
+  const docText = new Map();
+  for (const doc of mdDocs) {
+    let text; try { const abs = path.join(root, doc); if ((await fsp.stat(abs)).size > 4 * 1048576) continue; text = await fsp.readFile(abs, 'utf8'); } catch { continue; }
+    const dir = path.posix.dirname(doc) === '.' ? '' : path.posix.dirname(doc);
+    for (const l of findLinks(text)) {
+      const t = linkTarget(l.target); if (!t) continue;
+      const rel = path.posix.normalize((dir ? dir + '/' : '') + t.dec);
+      if (rel.startsWith('..') || !fileSet.has(rel) || !isLegacyImg(rel) || !inScope(rel)) continue;
+      if (!refs.has(rel)) refs.set(rel, []);
+      refs.get(rel).push({ doc, start: l.start, end: l.end, suffix: t.suffix, angle: t.angle });
+      docText.set(doc, text);
+    }
+  }
+  const skipped = [], moves = [];
+  // 마크다운이 아닌 텍스트 파일(html 등)이 이름을 언급하면 링크를 고칠 수 없으니 옮기지 않는다
+  const names = new Map(); for (const rel of refs.keys()) { const b = path.posix.basename(rel); if (!names.has(b)) names.set(b, []); names.get(b).push(rel); }
+  const mentioned = new Map();
+  if (names.size) {
+    const re = new RegExp([...names.keys()].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+    const others = files.filter((f) => { const e = path.extname(f).slice(1).toLowerCase(); return !MD_EXT.has(e) && !BINARY_EXT.has(e) && !IMG_MIME['.' + e] && !f.endsWith('.enc'); }).slice(0, 30000);
+    await mapLimit(others, 16, async (f) => {
+      try { const abs = path.join(root, f); if ((await fsp.stat(abs)).size > 1048576) return; const buf = await fsp.readFile(abs); if (buf.subarray(0, 4000).includes(0)) return;
+        for (const m of buf.toString('utf8').matchAll(re)) for (const rel of names.get(m[0]) || []) if (!mentioned.has(rel)) mentioned.set(rel, f);
+      } catch {}
+    });
+  }
+  const unref = files.filter((f) => isLegacyImg(f) && inScope(f) && IMG_MIME[path.extname(f).toLowerCase()] && !refs.has(f)).length;
+  for (const [rel, list] of refs) {
+    const imgDir = isLegacyImg(rel), owner = path.posix.dirname(imgDir) === '.' ? '' : path.posix.dirname(imgDir);
+    if (encDirs.has(owner || '.') || [...encDirs].some((d) => list.some((r) => path.posix.dirname(r.doc) === d))) { skipped.push({ path: rel, reason: '암호화 문서가 있는 폴더 (참조를 확인할 수 없음)' }); continue; }
+    if (mentioned.has(rel)) { skipped.push({ path: rel, reason: `다른 파일에서 언급: ${mentioned.get(rel)}` }); continue; }
+    moves.push({ rel, list });
+  }
+  const bytes = (await Promise.all(moves.map((m) => fsp.stat(path.join(root, m.rel)).then((s) => s.size, () => 0)))).reduce((a, b) => a + b, 0);
+  const docCount = new Map(); for (const m of moves) for (const r of m.list) docCount.set(r.doc, (docCount.get(r.doc) || 0) + 1);
+  const summary = { files: moves.length, bytes, docs: [...docCount].map(([p, n]) => ({ path: p, links: n })), skipped, unreferenced: unref };
+  if (!apply) return summary;
+
+  // 1) 파일 이동 (같은 내용이 이미 있으면 재사용) 2) 링크 고치기 3) 빈 images/ 폴더 정리
+  const newRel = new Map(), failed = [];
+  for (const m of moves) {
+    const src = path.join(root, m.rel);
+    try {
+      const st = await fsp.stat(src), owner = path.dirname(path.join(root, isLegacyImg(m.rel)));
+      const dir = path.join(assetBase(root, owner), ASSETS, 'images', dayStamp(st.mtime));
+      const tmp = path.join(path.dirname(src), `.ss-move-${crypto.randomBytes(6).toString('hex')}`);
+      await fsp.rename(src, tmp);
+      try {
+        const { abs } = await placeFile(tmp, dir, sanitizeName(path.basename(m.rel)), { size: st.size, sha: await hashFile(tmp), siblings: [dir, ...(await datedSiblings(dir))] });
+        await fsp.utimes(abs, st.atime, st.mtime).catch(() => {});
+        newRel.set(m.rel, posixRel(root, abs));
+      } catch (e) { await fsp.rename(tmp, src).catch(() => {}); throw e; }
+    } catch (e) { failed.push({ path: m.rel, reason: e.message }); }
+  }
+  const edits = new Map();   // doc → [{start,end,text}]
+  for (const m of moves) {
+    const to = newRel.get(m.rel); if (!to) continue;
+    for (const r of m.list) {
+      const docDir = path.dirname(path.join(root, r.doc));
+      const link = encLink(posixRel(docDir, path.join(root, to)), r.angle);
+      if (!edits.has(r.doc)) edits.set(r.doc, []);
+      edits.get(r.doc).push({ start: r.start, end: r.end, text: r.angle ? link.slice(0, -1) + r.suffix + '>' : link + r.suffix });
+    }
+  }
+  for (const [doc, list] of edits) {
+    let text = docText.get(doc);
+    for (const e of list.sort((a, b) => b.start - a.start)) text = text.slice(0, e.start) + e.text + text.slice(e.end);
+    await fsp.writeFile(path.join(root, doc), text);
+  }
+  const dirs = new Set([...newRel.keys()].map((r) => isLegacyImg(r)));
+  for (const d of [...dirs].sort((a, b) => b.length - a.length)) { // 비었으면 지운다 (.DS_Store 만 남았어도)
+    const abs = path.join(root, d);
+    try { const left = (await fsp.readdir(abs)).filter((n) => n !== '.DS_Store'); if (!left.length) await fsp.rm(abs, { recursive: true }); } catch {}
+  }
+  markDirty(root);
+  return { ...summary, moved: newRel.size, failed };
+}
+
 async function listDir(root, rel) {
   const abs = resolveSafe(root, rel);
   const entries = await fsp.readdir(abs, { withFileTypes: true });
@@ -340,10 +550,19 @@ async function pruneThumbs() { // 캐시가 800MB 를 넘으면 오래된 것부
     for (const f of files.sort((a, b) => a.t - b.t)) { if (total < 600 * 1048576) break; await fsp.unlink(f.p).catch(() => {}); total -= f.size; }
   } catch {}
 }
-function sendFile(req, res, abs, type, st, extra = {}) { // ETag 로 재검증(304) + 스트리밍 (큰 이미지를 통째로 메모리에 올리지 않는다)
+const MEDIA_MIME = { '.pdf': 'application/pdf', '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm', '.ogv': 'video/ogg',
+  '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.wav': 'audio/wav', '.flac': 'audio/flac', '.ogg': 'audio/ogg', '.oga': 'audio/ogg', '.opus': 'audio/ogg' };
+function sendFile(req, res, abs, type, st, extra = {}) { // ETag 로 재검증(304) + 스트리밍 (큰 이미지를 통째로 메모리에 올리지 않는다). Range(206): 영상·음악 탐색
   const etag = `W/"${st.size}-${Math.round(st.mtimeMs)}"`;
-  const headers = { ETag: etag, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', ...extra };
+  const headers = { ETag: etag, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes', ...extra };
   if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
+  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  if (m && (m[1] || m[2]) && st.size) {
+    let a = m[1] ? +m[1] : Math.max(0, st.size - +m[2]), b = m[1] && m[2] ? Math.min(+m[2], st.size - 1) : st.size - 1;
+    if (a > b || a >= st.size) { res.writeHead(416, { 'Content-Range': `bytes */${st.size}`, ...headers }); return res.end(); }
+    res.writeHead(206, { 'Content-Type': type, 'Content-Length': b - a + 1, 'Content-Range': `bytes ${a}-${b}/${st.size}`, ...headers });
+    return fs.createReadStream(abs, { start: a, end: b }).on('error', () => res.destroy()).pipe(res);
+  }
   res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, ...headers });
   fs.createReadStream(abs).on('error', () => res.destroy()).pipe(res);
 }
@@ -1443,26 +1662,21 @@ async function api(req, res, url, root) {
       markDirty(root);
       return send(res, 200, { ok: true });
     }
-    case 'POST /api/upload': { // 마크다운에 붙여넣은/끌어놓은 이미지를 <문서 폴더>/images/ 에 저장
-      const rel = String(p).split('/').filter(Boolean);
-      if (rel.length < 2 || rel.at(-2) !== 'images') throw httpError(400, 'images 폴더에만 저장할 수 있습니다');
-      let name = rel.at(-1).normalize('NFC').replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^[.-]+/, '').slice(-100);
-      const ext = path.extname(name).toLowerCase();
-      if (!['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.svg', '.bmp'].includes(ext)) throw httpError(415, '지원하지 않는 이미지 형식');
-      const buf = await readRaw(req, 30 * 1048576);
-      if (!buf.length || !sniffImage(buf, ext)) throw httpError(415, '이미지 파일이 아닙니다');
-      const dirRel = rel.slice(0, -1).join('/'), dir = resolveSafe(root, dirRel);
-      await fsp.mkdir(dir, { recursive: true });
-      const stem = name.slice(0, name.length - ext.length) || 'image', sha = (b) => crypto.createHash('sha1').update(b).digest('hex');
-      for (let i = 0; i < 1000; i++) {
-        const cand = i ? `${stem}-${i}${ext}` : `${stem}${ext}`, abs = path.join(dir, cand);
-        try { await fsp.writeFile(abs, buf, { flag: 'wx' }); return send(res, 200, { path: `${dirRel}/${cand}`, name: cand, reused: false }); }
-        catch (e) {
-          if (e.code !== 'EEXIST') throw e;
-          if (sha(await fsp.readFile(abs)) === sha(buf)) return send(res, 200, { path: `${dirRel}/${cand}`, name: cand, reused: true });   // 같은 이미지를 다시 붙여넣으면 재사용
-        }
-      }
-      throw httpError(409, 'too many files with the same name');
+    case 'POST /api/upload': { // 마크다운에 붙여넣은/끌어놓은 첨부: path = 문서, name = 파일 이름. 이미지는 assets/images/날짜/, 그 밖은 assets/files/날짜/
+      const r = await uploadAttachment(req, root, p, url.searchParams.get('name') || 'file');
+      markDirty(root);
+      return send(res, 200, r);
+    }
+    case 'POST /api/stats': { // 여러 파일의 크기/수정 시각 (첨부 카드 표시용)
+      const { paths = [] } = JSON.parse((await readBody(req)) || '{}');
+      const out = {};
+      await mapLimit(paths.slice(0, 500), 16, async (rel) => { try { const st = await fsp.stat(resolveSafe(root, rel)); out[rel] = { size: st.size, mtime: st.mtimeMs, dir: st.isDirectory() }; } catch { out[rel] = null; } });
+      return send(res, 200, out);
+    }
+    case 'POST /api/assets/migrate': { // 문서 옆 images/ → assets/images/날짜/ (apply=false 면 미리보기만)
+      const { dir = '', apply = false } = JSON.parse((await readBody(req)) || '{}');
+      if (dir) resolveSafe(root, dir);
+      return send(res, 200, await migrateAssets(root, String(dir).replace(/^\/+|\/+$/g, ''), !!apply));
     }
     case 'POST /api/rename': {
       const { to } = JSON.parse(await readBody(req));
@@ -1504,10 +1718,17 @@ const server = http.createServer(async (req, res) => {
     if (!['127.0.0.1', 'localhost', '[::1]', HOST].includes(host)) throw httpError(403, 'bad host');
     if (url.pathname === '/raw' || url.pathname === '/thumb') { // 이미지: 원본 / 화면용 축소본
       const abs = resolveSafe(rootOf(req, url), url.searchParams.get('path') || '');
-      const ext = path.extname(abs).toLowerCase(), type = IMG_MIME[ext];
-      if (!type) throw httpError(415, 'unsupported');
+      const ext = path.extname(abs).toLowerCase(), img = IMG_MIME[ext];
+      if (!img && url.pathname === '/thumb') throw httpError(415, 'unsupported');
       const st = await fsp.stat(abs); if (!st.isFile()) throw httpError(404, 'not a file');
       const csp = { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:" };   // SVG 를 직접 열어도 스크립트가 실행되지 않게
+      if (!img) { // 첨부 파일: PDF·영상·음악은 앱 안에서 보기, 글자 파일은 text/plain, 그 밖은 내려받기로만 (HTML 등이 이 출처에서 실행되지 않게)
+        const inline = MEDIA_MIME[ext];
+        if (inline) return sendFile(req, res, abs, inline, st, ext === '.pdf' ? {} : csp);
+        const name = encodeURIComponent(path.basename(abs));
+        return sendFile(req, res, abs, 'application/octet-stream', st, { ...csp, 'Content-Disposition': `attachment; filename*=UTF-8''${name}` });
+      }
+      const type = img;
       if (url.pathname === '/thumb') {
         const w = Math.min(4096, Math.max(256, Number(url.searchParams.get('w')) || 2048));
         const t = await thumbFor(abs, st, w);
